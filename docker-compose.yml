@@ -1,0 +1,69 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: texmin-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      OLLAMA_HOST: 0.0.0.0:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: texmin-backend
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    env_file:
+      - ./backend/.env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      RAW_DATA_DIR: /app/raw_data_files
+      VECTOR_DB_DIR: /app/vector_db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/raw_data_files:/app/raw_data_files:ro
+      - ./backend/vector_db:/app/vector_db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: texmin-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    env_file:
+      - ./backend/.env
+    environment:
+      QA_API_URL: http://backend:8000
+      AVATAR_MODEL_FILE: assets/scene.gltf
+    ports:
+      - "8501:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ollama_models:
