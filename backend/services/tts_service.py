@@ -1,16 +1,18 @@
 import asyncio
 import os
 import re
+import tempfile
+import threading
 from pathlib import Path
 
-import edge_tts
+import pyttsx3
 from dotenv import load_dotenv
 
 from helpers.request_models import TTSRequest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SUPPORTED_FORMATS = {"mp3"}
+SUPPORTED_FORMATS = {"mp3", "wav"}
 DEFAULT_ENGLISH_VOICE = "en-IN-NeerjaNeural"
 DEFAULT_HINDI_VOICE = "hi-IN-SwaraNeural"
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
@@ -23,6 +25,7 @@ TONE_PRESETS = {
     "serious": {"rate": "-7%", "pitch": "-7Hz", "volume": "+0%"},
     "energetic": {"rate": "+14%", "pitch": "+6Hz", "volume": "+8%"},
 }
+PYTTSX3_LOCK = threading.Lock()
 
 
 class TTSEngineError(RuntimeError):
@@ -127,6 +130,8 @@ def _prosody_settings(payload: TTSRequest) -> tuple[str, str, str]:
 
 
 async def _generate_audio(text: str, voice: str, rate: str, pitch: str, volume: str) -> bytes:
+    import edge_tts
+
     communicate = edge_tts.Communicate(
         text,
         voice,
@@ -155,9 +160,19 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     response_format = payload.response_format.lower()
     if response_format not in SUPPORTED_FORMATS:
         raise TTSEngineError(
-            f"Edge TTS supports MP3 output only. Use response_format='mp3', not '{payload.response_format}'."
+            f"Unsupported audio format '{payload.response_format}'. Use 'wav' for local TTS or 'mp3' for Edge TTS."
         )
 
+    engine_name = os.getenv("TTS_ENGINE", "local").strip().lower()
+    if engine_name in {"local", "offline", "pyttsx3"}:
+        return _synthesize_local_speech(payload)
+    if engine_name not in {"edge", "edge-tts"}:
+        raise TTSEngineError("Unknown TTS_ENGINE. Use 'local' for offline speech or 'edge' for Edge TTS.")
+
+    return _synthesize_edge_speech(payload)
+
+
+def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
     voice = payload.voice_id or os.getenv("EDGE_TTS_VOICE", DEFAULT_ENGLISH_VOICE)
     hindi_voice = os.getenv("EDGE_TTS_HINDI_VOICE", DEFAULT_HINDI_VOICE)
     rate, pitch, volume = _prosody_settings(payload)
@@ -177,3 +192,111 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     if not audio:
         raise TTSEngineError("Edge TTS did not return audio data.")
     return audio, "audio/mpeg"
+
+
+def _parse_percent(value: str, default: int = 0) -> int:
+    match = re.fullmatch(r"\s*([+-]?\d+)\s*%\s*", value or "")
+    if not match:
+        return default
+    return int(match.group(1))
+
+
+def _voice_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_voice_text(item) for item in value)
+    return str(value)
+
+
+def _voice_matches(voice, query: str) -> bool:
+    query = (query or "").strip().lower()
+    if not query:
+        return False
+
+    haystack = " ".join(
+        [
+            _voice_text(getattr(voice, "id", "")),
+            _voice_text(getattr(voice, "name", "")),
+            _voice_text(getattr(voice, "languages", "")),
+        ]
+    ).lower()
+    return query in haystack
+
+
+def _voice_has_language(voice, language_terms: tuple[str, ...]) -> bool:
+    haystack = " ".join(
+        [
+            _voice_text(getattr(voice, "id", "")),
+            _voice_text(getattr(voice, "name", "")),
+            _voice_text(getattr(voice, "languages", "")),
+        ]
+    ).lower()
+    return any(term in haystack for term in language_terms)
+
+
+def _select_local_voice(engine, requested_voice: str | None, text: str) -> str | None:
+    voices = engine.getProperty("voices") or []
+    if not voices:
+        return None
+
+    if requested_voice:
+        for voice in voices:
+            if _voice_matches(voice, requested_voice):
+                return voice.id
+
+    language_terms = ("hi", "hindi", "india") if _contains_devanagari(text) else ("en", "english")
+    for voice in voices:
+        if _voice_has_language(voice, language_terms):
+            return voice.id
+
+    return getattr(voices[0], "id", None)
+
+
+def _configure_local_engine(engine, payload: TTSRequest, spoken_text: str) -> None:
+    voice_id = _select_local_voice(engine, payload.voice_id, spoken_text)
+    if voice_id:
+        engine.setProperty("voice", voice_id)
+
+    rate, _pitch, volume = _prosody_settings(payload)
+    base_rate = int(engine.getProperty("rate") or 200)
+    rate_multiplier = max(0.45, min(1.8, 1 + (_parse_percent(rate) / 100)))
+    engine.setProperty("rate", int(base_rate * rate_multiplier))
+
+    base_volume = float(engine.getProperty("volume") or 1.0)
+    adjusted_volume = max(0.0, min(1.0, base_volume + (_parse_percent(volume) / 100)))
+    engine.setProperty("volume", adjusted_volume)
+
+
+def _synthesize_local_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    if not spoken_text:
+        raise TTSEngineError("There is no speakable text after formatting was removed.")
+
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as output_file:
+            output_path = output_file.name
+
+        with PYTTSX3_LOCK:
+            engine = pyttsx3.init()
+            _configure_local_engine(engine, payload, spoken_text)
+            engine.save_to_file(spoken_text, output_path)
+            engine.runAndWait()
+            engine.stop()
+
+        audio = Path(output_path).read_bytes()
+    except Exception as exc:
+        raise TTSEngineError(f"Local offline TTS could not synthesize speech: {exc}") from exc
+    finally:
+        if output_path:
+            try:
+                Path(output_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if not audio:
+        raise TTSEngineError("Local offline TTS did not return audio data.")
+    return audio, "audio/wav"

@@ -3,8 +3,6 @@ services:
     image: ollama/ollama:latest
     container_name: texmin-ollama
     restart: unless-stopped
-    ports:
-      - "11434:11434"
     volumes:
       - ollama_models:/root/.ollama
     environment:
@@ -32,8 +30,6 @@ services:
       OLLAMA_BASE_URL: http://ollama:11434
       RAW_DATA_DIR: /app/raw_data_files
       VECTOR_DB_DIR: /app/vector_db
-    ports:
-      - "8000:8000"
     volumes:
       - ./backend/raw_data_files:/app/raw_data_files:ro
       - ./backend/vector_db:/app/vector_db

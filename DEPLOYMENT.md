@@ -21,17 +21,18 @@ docker compose up --build -d
 4. Pull the Ollama models inside the Ollama container:
 
 ```bash
-docker compose exec ollama ollama pull llama3.2
-docker compose exec ollama ollama pull nomic-embed-text
+docker compose exec ollama ollama pull qwen3:30b
+docker compose exec ollama ollama pull embeddinggemma
 ```
 
-5. Build or refresh the vector database:
+5. Build or refresh the vector database. Do this whenever `OLLAMA_EMBED_MODEL`,
+   `CHUNK_SIZE`, or `CHUNK_OVERLAP` changes:
 
 ```bash
 docker compose run --rm backend python train_engine.py --force-rebuild
 ```
 
-6. Open the frontend at `http://<dgx-host>:8501`. The API is exposed at `http://<dgx-host>:8000`.
+6. Open the frontend at `http://<dgx-host>:8501`. The backend and Ollama services stay private inside the Docker network.
 
 ## Local Development
 
@@ -52,3 +53,6 @@ python -m streamlit run app.py
 ```
 
 For local non-Docker runs, set `OLLAMA_BASE_URL=http://localhost:11434` and `QA_API_URL=http://127.0.0.1:8000`.
+The QA API sends recent chat history with each question, but the backend trims it before prompting so document context still gets most of the token budget.
+Text-to-speech defaults to `TTS_ENGINE=local`, which uses the operating system's offline voices.
+Use `TTS_ENGINE=edge` only if you explicitly want Edge TTS and have internet access.

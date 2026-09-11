@@ -14,7 +14,8 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
-DEFAULT_EDGE_VOICE = os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural")
+DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural"))
+DEFAULT_AUDIO_MIME = "audio/wav"
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_AVATAR_MODEL_PATH = APP_DIR / "assets" / "avatar.glb"
 VOICE_QUERY_COMPONENT_DIR = APP_DIR / "voice_query_component"
@@ -57,7 +58,7 @@ VOICE_OPTIONS = {
     "Chinese Mandarin - Xiaoxiao": "zh-CN-XiaoxiaoNeural",
     "Japanese Japan - Nanami": "ja-JP-NanamiNeural",
 }
-CUSTOM_VOICE_LABEL = "Custom Edge voice name"
+CUSTOM_VOICE_LABEL = "Custom voice name"
 TONE_OPTIONS = ["neutral", "warm", "cheerful", "calm", "serious", "energetic", "custom"]
 
 
@@ -423,13 +424,13 @@ def init_state() -> None:
     if "api_url" not in st.session_state:
         st.session_state.api_url = DEFAULT_API_URL
     if "top_k" not in st.session_state:
-        st.session_state.top_k = 4
+        st.session_state.top_k = 8
     if "temperature" not in st.session_state:
         st.session_state.temperature = 0.55
     if "tts_enabled" not in st.session_state:
         st.session_state.tts_enabled = True
     if "tts_voice_id" not in st.session_state:
-        st.session_state.tts_voice_id = DEFAULT_EDGE_VOICE
+        st.session_state.tts_voice_id = DEFAULT_TTS_VOICE
     if "tts_voice_choice" not in st.session_state:
         matching_voice = next(
             (label for label, voice in VOICE_OPTIONS.items() if voice == st.session_state.tts_voice_id),
@@ -437,11 +438,11 @@ def init_state() -> None:
         )
         st.session_state.tts_voice_choice = matching_voice
     if "tts_tone" not in st.session_state:
-        st.session_state.tts_tone = os.getenv("EDGE_TTS_TONE", "neutral").strip().lower()
+        st.session_state.tts_tone = os.getenv("TTS_TONE", os.getenv("EDGE_TTS_TONE", "neutral")).strip().lower()
     if "tts_rate" not in st.session_state:
-        st.session_state.tts_rate = os.getenv("EDGE_TTS_RATE", "+0%")
+        st.session_state.tts_rate = os.getenv("TTS_RATE", os.getenv("EDGE_TTS_RATE", "+0%"))
     if "tts_pitch" not in st.session_state:
-        st.session_state.tts_pitch = os.getenv("EDGE_TTS_PITCH", "+0Hz")
+        st.session_state.tts_pitch = os.getenv("TTS_PITCH", os.getenv("EDGE_TTS_PITCH", "+0Hz"))
     if "tts_max_words" not in st.session_state:
         st.session_state.tts_max_words = 260
     if "avatar_enabled" not in st.session_state:
@@ -459,15 +460,16 @@ def markdown_to_html(content: str) -> str:
     )
 
 
-def latest_assistant_audio() -> tuple[str | None, str, bool]:
+def latest_assistant_audio() -> tuple[str | None, str, bool, str]:
     for message in reversed(st.session_state.messages):
         if message.get("role") == "assistant" and message.get("audio_b64"):
             return (
                 message.get("audio_b64"),
                 message.get("content", ""),
                 bool(message.get("audio_autoplay", True)),
+                message.get("audio_mime", DEFAULT_AUDIO_MIME),
             )
-    return None, "", True
+    return None, "", True, DEFAULT_AUDIO_MIME
 
 
 def _resolved_avatar_model_path() -> Path:
@@ -538,6 +540,7 @@ def render_lip_sync_avatar(
     autoplay: bool = True,
     resume_listener_on_end: bool = True,
     queue_id: str | None = None,
+    audio_mime: str = DEFAULT_AUDIO_MIME,
 ) -> None:
     spoken_text = " ".join((text or "").split())
     safe_text = escape(spoken_text[:120])
@@ -547,7 +550,8 @@ def render_lip_sync_avatar(
     autoplay_js = "true" if autoplay else "false"
     resume_listener_js = "true" if resume_listener_on_end else "false"
     queue_id_json = json.dumps(queue_id or "")
-    audio_src_attr = f'src="data:audio/mpeg;base64,{audio_b64}"' if audio_b64 else ""
+    audio_mime_json = json.dumps(audio_mime or DEFAULT_AUDIO_MIME)
+    audio_src_attr = f'src="data:{audio_mime};base64,{audio_b64}"' if audio_b64 else ""
     components.html(
         f"""
         <style>
@@ -699,6 +703,7 @@ def render_lip_sync_avatar(
             const shouldAutoplay = {autoplay_js};
             const shouldResumeListenerOnEnd = {resume_listener_js};
             const queueId = {queue_id_json};
+            const initialAudioMime = {audio_mime_json};
             const queuedPlayback = Boolean(queueId);
             const avatar = document.getElementById("avatar");
             const audio = document.getElementById("voice");
@@ -1183,7 +1188,7 @@ def render_lip_sync_avatar(
                 queuePlaying = true;
                 speechText = item.text || "";
                 avatarLine.textContent = speechText;
-                audio.src = `data:audio/mpeg;base64,${{item.audio}}`;
+                audio.src = `data:${{item.mime || initialAudioMime}};base64,${{item.audio}}`;
                 audio.load();
                 try {{
                     audio.volume = 1;
@@ -1203,6 +1208,7 @@ def render_lip_sync_avatar(
                     pendingQueueItems.set(message.sequence, {{
                         audio: message.audio,
                         text: message.text || "",
+                        mime: message.mime || initialAudioMime,
                     }});
                     while (pendingQueueItems.has(nextQueueSequence)) {{
                         audioQueue.push(pendingQueueItems.get(nextQueueSequence));
@@ -1292,7 +1298,7 @@ def render_message(message: dict) -> None:
 
     audio_b64 = message.get("audio_b64")
     if role == "assistant" and audio_b64 and not st.session_state.avatar_enabled:
-        st.audio(base64.b64decode(audio_b64), format="audio/mp3")
+        st.audio(base64.b64decode(audio_b64), format=message.get("audio_mime", DEFAULT_AUDIO_MIME))
 
     audio_error = message.get("audio_error")
     if role == "assistant" and audio_error:
@@ -1794,12 +1800,30 @@ def resume_voice_listener_without_audio() -> None:
     )
 
 
+def _chat_history_payload(exclude_latest_user: bool = False) -> list[dict]:
+    messages = st.session_state.messages[:-1] if exclude_latest_user else st.session_state.messages
+    history = []
+    for message in messages[-10:]:
+        role = message.get("role")
+        content = " ".join(str(message.get("content", "")).split())
+        if role not in {"user", "assistant"} or not content or message.get("error"):
+            continue
+        history.append(
+            {
+                "role": role,
+                "content": content[:900],
+            }
+        )
+    return history
+
+
 def ask_api(question: str) -> tuple[str, list[dict], str | None]:
     url = st.session_state.api_url.rstrip("/") + "/qa/ask"
     payload = {
         "question": question,
         "top_k": st.session_state.top_k,
         "temperature": st.session_state.temperature,
+        "chat_history": _chat_history_payload(exclude_latest_user=True),
     }
 
     try:
@@ -1867,6 +1891,7 @@ def _send_avatar_queue_event(
     sequence: int,
     audio_bytes: bytes | None = None,
     spoken_text: str = "",
+    audio_mime: str = DEFAULT_AUDIO_MIME,
     final: bool = False,
 ) -> None:
     event = {
@@ -1874,6 +1899,7 @@ def _send_avatar_queue_event(
         "queueId": queue_id,
         "sequence": sequence,
         "audio": base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else "",
+        "mime": audio_mime,
         "text": spoken_text,
         "final": final,
         "finalSequence": sequence if final else None,
@@ -1903,6 +1929,7 @@ def _render_streaming_avatar_audio(
     avatar_container,
     audio_bytes: bytes,
     spoken_text: str,
+    audio_mime: str = DEFAULT_AUDIO_MIME,
     resume_listener_on_end: bool = False,
 ) -> None:
     if avatar_container is None or not audio_bytes or not st.session_state.avatar_enabled:
@@ -1915,21 +1942,28 @@ def _render_streaming_avatar_audio(
             spoken_text,
             autoplay=True,
             resume_listener_on_end=resume_listener_on_end,
+            audio_mime=audio_mime,
         )
 
 
-def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str, list[dict], str | None, bytes | None, str | None]:
+def ask_api_stream(
+    question: str,
+    container,
+    avatar_container=None,
+) -> tuple[str, list[dict], str | None, bytes | None, str, str | None]:
     url = st.session_state.api_url.rstrip("/") + "/qa/ask/stream"
     payload = {
         "question": question,
         "top_k": st.session_state.top_k,
         "temperature": st.session_state.temperature,
+        "chat_history": _chat_history_payload(exclude_latest_user=True),
     }
     answer = ""
     sources = []
     status = "Searching your document library..."
     speech_buffer = ""
     audio_chunks = []
+    audio_mime = DEFAULT_AUDIO_MIME
     audio_error = None
     queue_sequence = 0
     queue_id = (
@@ -1958,9 +1992,10 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                 if fallback_answer:
                     render_streaming_message(container, fallback_answer)
                 fallback_audio = None
+                fallback_audio_mime = DEFAULT_AUDIO_MIME
                 fallback_audio_error = None
                 if fallback_answer and not fallback_error and st.session_state.tts_enabled:
-                    fallback_audio, fallback_audio_error = ask_tts(fallback_answer)
+                    fallback_audio, fallback_audio_mime, fallback_audio_error = ask_tts(fallback_answer)
                     if fallback_audio:
                         if queue_id and queue_sender is not None:
                             _send_avatar_queue_event(
@@ -1969,6 +2004,7 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                                 queue_sequence,
                                 fallback_audio,
                                 fallback_answer,
+                                fallback_audio_mime,
                             )
                             queue_sequence += 1
                         else:
@@ -1976,6 +2012,7 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                                 avatar_container,
                                 fallback_audio,
                                 fallback_answer,
+                                fallback_audio_mime,
                             )
                 if queue_id and queue_sender is not None:
                     _send_avatar_queue_event(
@@ -1984,14 +2021,14 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                         queue_sequence,
                         final=True,
                     )
-                return fallback_answer, fallback_sources, fallback_error, fallback_audio, fallback_audio_error
+                return fallback_answer, fallback_sources, fallback_error, fallback_audio, fallback_audio_mime, fallback_audio_error
 
             if not response.ok:
                 try:
                     detail = response.json().get("detail", response.text)
                 except ValueError:
                     detail = response.text
-                return "", [], f"API returned {response.status_code}: {detail}", None, None
+                return "", [], f"API returned {response.status_code}: {detail}", None, DEFAULT_AUDIO_MIME, None
 
             render_streaming_message(container, "", status)
             for line in response.iter_lines(decode_unicode=True):
@@ -2016,18 +2053,20 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                     if queue_id and not audio_error:
                         segments, speech_buffer = _split_speakable_prefix(speech_buffer)
                         for segment in segments:
-                            segment_audio, segment_error = ask_tts(segment)
+                            segment_audio, segment_mime, segment_error = ask_tts(segment)
                             if segment_error:
                                 audio_error = segment_error
                                 break
                             if segment_audio and queue_sender is not None:
                                 audio_chunks.append(segment_audio)
+                                audio_mime = segment_mime
                                 _send_avatar_queue_event(
                                     queue_sender,
                                     queue_id,
                                     queue_sequence,
                                     segment_audio,
                                     segment,
+                                    segment_mime,
                                 )
                                 queue_sequence += 1
                 elif event_type == "done":
@@ -2035,26 +2074,28 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
                     sources = event.get("sources", [])
                     render_streaming_message(container, answer, status)
                 elif event_type == "error":
-                    return "", [], event.get("message", "Streaming failed."), None, audio_error
+                    return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
     except requests.RequestException as exc:
-        return "", [], f"Could not reach the FastAPI server at {url}. {exc}", None, audio_error
+        return "", [], f"Could not reach the FastAPI server at {url}. {exc}", None, audio_mime, audio_error
 
     if queue_id and queue_sender is not None:
         remaining_speech = speech_buffer.strip()
         if not remaining_speech and not audio_chunks:
             remaining_speech = answer.strip()
         if remaining_speech and not audio_error:
-            segment_audio, segment_error = ask_tts(remaining_speech)
+            segment_audio, segment_mime, segment_error = ask_tts(remaining_speech)
             if segment_error:
                 audio_error = segment_error
             elif segment_audio:
                 audio_chunks.append(segment_audio)
+                audio_mime = segment_mime
                 _send_avatar_queue_event(
                     queue_sender,
                     queue_id,
                     queue_sequence,
                     segment_audio,
                     remaining_speech,
+                    segment_mime,
                 )
                 queue_sequence += 1
         _send_avatar_queue_event(
@@ -2063,29 +2104,30 @@ def ask_api_stream(question: str, container, avatar_container=None) -> tuple[str
             queue_sequence,
             final=True,
         )
-        audio_bytes = b"".join(audio_chunks) if audio_chunks else None
+        audio_bytes = audio_chunks[0] if len(audio_chunks) == 1 else None
     else:
         audio_bytes = None
         if st.session_state.tts_enabled and answer.strip():
-            audio_bytes, audio_error = ask_tts(answer)
+            audio_bytes, audio_mime, audio_error = ask_tts(answer)
         if audio_bytes:
             _render_streaming_avatar_audio(
                 avatar_container,
                 audio_bytes,
                 answer,
+                audio_mime,
                 resume_listener_on_end=True,
             )
 
-    return answer.strip(), sources, None, audio_bytes, audio_error
+    return answer.strip(), sources, None, audio_bytes, audio_mime, audio_error
 
 
-def ask_tts(text: str) -> tuple[bytes | None, str | None]:
+def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:
     if not st.session_state.tts_enabled:
-        return None, None
+        return None, DEFAULT_AUDIO_MIME, None
 
     voice_id = st.session_state.tts_voice_id.strip()
     if not voice_id:
-        return None, "Voice is off: add an Edge TTS voice name in the sidebar to hear replies."
+        return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
 
     url = st.session_state.api_url.rstrip("/") + "/tts/speech"
     payload = {
@@ -2095,23 +2137,24 @@ def ask_tts(text: str) -> tuple[bytes | None, str | None]:
         "rate": st.session_state.tts_rate.strip() or "+0%",
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
         "volume": "+0%",
-        "response_format": "mp3",
+        "response_format": "wav",
         "max_words": st.session_state.tts_max_words,
     }
 
     try:
         response = requests.post(url, json=payload, timeout=180)
     except requests.RequestException as exc:
-        return None, f"Voice could not connect to {url}. {exc}"
+        return None, DEFAULT_AUDIO_MIME, f"Voice could not connect to {url}. {exc}"
 
     if not response.ok:
         try:
             detail = response.json().get("detail", response.text)
         except ValueError:
             detail = response.text
-        return None, f"Voice is unavailable: {detail}"
+        return None, DEFAULT_AUDIO_MIME, f"Voice is unavailable: {detail}"
 
-    return response.content, None
+    audio_mime = response.headers.get("content-type", DEFAULT_AUDIO_MIME).split(";", 1)[0]
+    return response.content, audio_mime or DEFAULT_AUDIO_MIME, None
 
 
 def get_voice_query_param() -> str | None:
@@ -2148,15 +2191,15 @@ with st.sidebar:
     if st.session_state.tts_voice_choice not in voice_labels:
         st.session_state.tts_voice_choice = CUSTOM_VOICE_LABEL
     st.session_state.tts_voice_choice = st.selectbox(
-        "Free multilingual voice",
+        "Preferred voice",
         voice_labels,
         index=voice_labels.index(st.session_state.tts_voice_choice),
     )
     if st.session_state.tts_voice_choice == CUSTOM_VOICE_LABEL:
         st.session_state.tts_voice_id = st.text_input(
-            "Edge voice name",
+            "Voice name",
             value=st.session_state.tts_voice_id,
-            placeholder="For example, en-US-AvaMultilingualNeural",
+            placeholder="For example, Hindi or en-IN-NeerjaNeural",
         )
     else:
         st.session_state.tts_voice_id = VOICE_OPTIONS[st.session_state.tts_voice_choice]
@@ -2233,9 +2276,14 @@ st.markdown("</div>", unsafe_allow_html=True)
 voice_component_query = render_voice_query_component()
 question = st.chat_input("Message KHOJ ChatBOT...") or voice_component_query or voice_query_param
 
-latest_audio_b64, latest_audio_text, latest_audio_autoplay = latest_assistant_audio()
+latest_audio_b64, latest_audio_text, latest_audio_autoplay, latest_audio_mime = latest_assistant_audio()
 if not question and st.session_state.avatar_enabled and latest_audio_b64:
-    render_lip_sync_avatar(latest_audio_b64, latest_audio_text, autoplay=latest_audio_autoplay)
+    render_lip_sync_avatar(
+        latest_audio_b64,
+        latest_audio_text,
+        autoplay=latest_audio_autoplay,
+        audio_mime=latest_audio_mime,
+    )
 
 if question:
     with live_response_container:
@@ -2245,7 +2293,7 @@ if question:
 
         stream_container = st.empty()
         avatar_stream_container = st.empty()
-        answer, sources, error, audio_bytes, audio_error = ask_api_stream(
+        answer, sources, error, audio_bytes, audio_mime, audio_error = ask_api_stream(
             question,
             stream_container,
             avatar_stream_container,
@@ -2268,6 +2316,7 @@ if question:
                 "content": answer,
                 "sources": sources,
                 "audio_b64": audio_b64,
+                "audio_mime": audio_mime,
                 "audio_error": audio_error,
                 "audio_autoplay": not bool(audio_bytes),
             }

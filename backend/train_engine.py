@@ -65,7 +65,7 @@ def chunk_settings() -> dict:
     return {
         "version": INGESTION_VERSION,
         "embedding_provider": "ollama",
-        "embedding_model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+        "embedding_model": os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma"),
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "chunk_size": int(os.getenv("CHUNK_SIZE", "850")),
         "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "150")),
@@ -293,7 +293,7 @@ def create_vector_store(reset_collection: bool = False) -> tuple[Chroma, Path, s
             pass
 
     embeddings = OllamaEmbeddings(
-        model=os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+        model=os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma"),
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         keep_alive=int(os.getenv("OLLAMA_KEEP_ALIVE", "1800")),
     )

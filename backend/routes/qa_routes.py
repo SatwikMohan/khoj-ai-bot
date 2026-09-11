@@ -17,6 +17,7 @@ def ask_question(payload: QARequest) -> QAResponse:
             question=payload.question,
             top_k=payload.top_k,
             temperature=payload.temperature,
+            chat_history=payload.chat_history,
         )
     except QAEngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -30,6 +31,7 @@ def stream_question(payload: QARequest) -> StreamingResponse:
                 question=payload.question,
                 top_k=payload.top_k,
                 temperature=payload.temperature,
+                chat_history=payload.chat_history,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except QAEngineError as exc:

@@ -9,8 +9,10 @@ langchain-text-splitters
 langchain-chroma
 langchain-ollama
 chromadb
+cryptography>=3.1
 pypdf
 docx2txt
 openpyxl
 python-pptx
 edge-tts
+pyttsx3
