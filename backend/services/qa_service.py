@@ -16,12 +16,13 @@ from helpers.request_models import ChatMessage, QAResponse, SourceChunk
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
 DEFAULT_VECTOR_DB_DIR = REPO_ROOT / "vector_db"
-DEFAULT_RELEVANCE_THRESHOLD = 0.35
+DEFAULT_RELEVANCE_THRESHOLD = 0.15
 DEFAULT_CONTEXT_MAX_CHARS = 24000
 DEFAULT_RETRIEVAL_FETCH_K = 60
 DEFAULT_CHAT_HISTORY_MAX_TURNS = 8
 DEFAULT_CHAT_HISTORY_MAX_CHARS = 2400
 DEFAULT_CHAT_HISTORY_MESSAGE_CHARS = 520
+DEFAULT_MIN_RETRIEVED_TEXT_CHARS = 40
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
@@ -354,7 +355,8 @@ def _doc_years(doc) -> tuple[str, ...]:
 
 
 def _has_meaningful_content(doc) -> bool:
-    return len(" ".join(_clean_content(doc.page_content).split())) >= 120
+    min_chars = _env_int("MIN_RETRIEVED_TEXT_CHARS", DEFAULT_MIN_RETRIEVED_TEXT_CHARS)
+    return len(" ".join(_clean_content(doc.page_content).split())) >= min_chars
 
 
 def _format_context(docs) -> str:
@@ -509,16 +511,18 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
     threshold = float(os.getenv("RELEVANCE_SCORE_THRESHOLD", str(DEFAULT_RELEVANCE_THRESHOLD)))
 
     scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
+    fallback_by_key = {}
     relevant_by_key = {}
     for doc, score in scored_docs:
         if not _has_meaningful_content(doc):
             continue
         doc.metadata["relevance_score"] = round(float(score), 4)
+        fallback_by_key[_doc_key(doc)] = doc
         if score >= threshold:
             relevant_by_key[_doc_key(doc)] = doc
 
     if not relevant_by_key:
-        return []
+        return _diversify_docs(list(fallback_by_key.values()), top_k)
 
     if not _env_bool("RETRIEVAL_MMR_ENABLED", True):
         return _diversify_docs(list(relevant_by_key.values()), top_k)

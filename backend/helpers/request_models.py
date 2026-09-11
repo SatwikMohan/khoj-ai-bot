@@ -40,5 +40,5 @@ class TTSRequest(BaseModel):
     rate: str = Field("+0%", description="Speech rate adjustment, for example +10% or -10%.")
     pitch: str = Field("+0Hz", description="Speech pitch adjustment, for example +2Hz or -2Hz.")
     volume: str = Field("+0%", description="Speech volume adjustment, for example +10% or -10%.")
-    response_format: str = Field("wav", description="Requested audio format. Local TTS returns WAV; Edge TTS returns MP3.")
+    response_format: str = Field("mp3", description="Requested audio format. Local TTS returns WAV; Edge TTS returns MP3.")
     max_words: int = Field(260, ge=40, le=900, description="Maximum words to send to TTS.")

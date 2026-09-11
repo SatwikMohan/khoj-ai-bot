@@ -5,7 +5,6 @@ import tempfile
 import threading
 from pathlib import Path
 
-import pyttsx3
 from dotenv import load_dotenv
 
 from helpers.request_models import TTSRequest
@@ -258,7 +257,10 @@ def _select_local_voice(engine, requested_voice: str | None, text: str) -> str |
 def _configure_local_engine(engine, payload: TTSRequest, spoken_text: str) -> None:
     voice_id = _select_local_voice(engine, payload.voice_id, spoken_text)
     if voice_id:
-        engine.setProperty("voice", voice_id)
+        try:
+            engine.setProperty("voice", voice_id)
+        except Exception:
+            pass
 
     rate, _pitch, volume = _prosody_settings(payload)
     base_rate = int(engine.getProperty("rate") or 200)
@@ -271,6 +273,8 @@ def _configure_local_engine(engine, payload: TTSRequest, spoken_text: str) -> No
 
 
 def _synthesize_local_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    import pyttsx3
+
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     if not spoken_text:
         raise TTSEngineError("There is no speakable text after formatting was removed.")

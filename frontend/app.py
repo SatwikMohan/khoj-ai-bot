@@ -15,7 +15,8 @@ import streamlit.components.v1 as components
 
 DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
 DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural"))
-DEFAULT_AUDIO_MIME = "audio/wav"
+DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge").strip().lower()
+DEFAULT_AUDIO_MIME = "audio/mpeg" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "audio/wav"
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_AVATAR_MODEL_PATH = APP_DIR / "assets" / "avatar.glb"
 VOICE_QUERY_COMPONENT_DIR = APP_DIR / "voice_query_component"
@@ -1450,8 +1451,8 @@ def render_speech_to_text_control() -> None:
             let latestTranscript = "";
             let heardSpeech = false;
             let lastVoiceAt = 0;
-            const silenceLimitMs = 5000;
-            const voiceThreshold = 0.08;
+            const silenceLimitMs = 6500;
+            const voiceThreshold = 0.025;
 
             function drawIdleWave() {
                 const width = canvas.width;
@@ -1654,6 +1655,9 @@ def render_speech_to_text_control() -> None:
             function buildRecognition() {
                 const instance = new SpeechRecognition();
                 instance.lang = navigator.language || "en-IN";
+                if (!["en", "hi"].includes(instance.lang.slice(0, 2).toLowerCase())) {{
+                    instance.lang = "en-IN";
+                }}
                 instance.continuous = true;
                 instance.interimResults = true;
 
@@ -1670,6 +1674,10 @@ def render_speech_to_text_control() -> None:
 
                     const visibleText = [finalTranscript, interimTranscript].filter(Boolean).join(" ");
                     latestTranscript = visibleText.trim();
+                    if (latestTranscript) {{
+                        heardSpeech = true;
+                        lastVoiceAt = Date.now();
+                    }}
                     preview.textContent = visibleText;
                     statusText.textContent = interimTranscript ? "Listening..." : "Speech recognized.";
                 };
@@ -1699,7 +1707,9 @@ def render_speech_to_text_control() -> None:
                         ? "Sending voice query..."
                         : transcript
                             ? "Transcript captured, but the query could not be sent."
-                            : "Recording stopped. No transcript was captured.";
+                            : heardSpeech
+                                ? "I heard audio, but the browser did not return text. Try Chrome or Edge over HTTPS."
+                                : "Recording stopped. No transcript was captured.";
                     setButtonState(false);
                     stopMeter();
                 };
@@ -2137,7 +2147,7 @@ def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:
         "rate": st.session_state.tts_rate.strip() or "+0%",
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
         "volume": "+0%",
-        "response_format": "wav",
+        "response_format": "mp3" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "wav",
         "max_words": st.session_state.tts_max_words,
     }
 

@@ -140,8 +140,8 @@
     const storageModeKey = "texmin_voice_conversation";
     const storageResumeKey = "texmin_voice_resume_at";
     const storageWaitingKey = "texmin_voice_waiting_since";
-    const silenceLimitMs = 5000;
-    const voiceThreshold = 0.08;
+    const silenceLimitMs = 6500;
+    const voiceThreshold = 0.025;
 
     let recognition = null;
     let listening = false;
@@ -317,6 +317,9 @@
     function buildRecognition() {
       const instance = new SpeechRecognition();
       instance.lang = navigator.language || "en-IN";
+      if (!["en", "hi"].includes(instance.lang.slice(0, 2).toLowerCase())) {
+        instance.lang = "en-IN";
+      }
       instance.continuous = true;
       instance.interimResults = true;
 
@@ -332,6 +335,10 @@
         }
 
         latestTranscript = [finalTranscript, interimTranscript].filter(Boolean).join(" ").trim();
+        if (latestTranscript) {
+          heardSpeech = true;
+          lastVoiceAt = Date.now();
+        }
         preview.textContent = latestTranscript;
         statusText.textContent = "Listening...";
       };
@@ -349,7 +356,9 @@
         const transcript = (finalTranscript || latestTranscript || interimTranscript).trim();
         const submitted = submitTranscript(transcript);
         if (!submitted) {
-          statusText.textContent = "I did not catch enough speech yet.";
+          statusText.textContent = heardSpeech
+            ? "I heard audio, but the browser did not return text. Try Chrome or Edge over HTTPS."
+            : "I did not catch speech yet.";
           setButtonState("idle");
         }
         stopMeter();
