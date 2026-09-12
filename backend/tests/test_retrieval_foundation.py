@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 
 from services.embedding_service import embedding_profile
 from services.lexical_service import add_lexical_chunks, lexical_search
-from services.qa_service import _history_aware_query
+from services.qa_service import _general_response, _history_aware_query, _is_general_query
 from services.stt_service import STTEngineError, transcribe_audio
 from services.tts_service import TTSEngineError, _validate_audio
 
@@ -35,6 +35,17 @@ class RetrievalQueryTests(unittest.TestCase):
         history = [{"role": "assistant", "content": "The rule was amended in 2025."}]
         result = _history_aware_query("When did it apply?", history)
         self.assertIn("Recent conversation", result)
+
+
+class ConversationStyleTests(unittest.TestCase):
+    def test_wellbeing_gets_a_specific_conversational_reply(self):
+        answer = _general_response("How are you?").answer
+        self.assertIn("doing well", answer)
+        self.assertNotIn("indexed documents", answer)
+
+    def test_hindi_greeting_is_recognized_without_retrieval(self):
+        self.assertTrue(_is_general_query("नमस्ते।"))
+        self.assertIn("नमस्ते", _general_response("नमस्ते।").answer)
 
 
 class LexicalIndexTests(unittest.TestCase):

@@ -6,4 +6,4 @@ __pycache__/
 *.pyc
 *.log
 raw_data_files/
-assets/
+/assets/

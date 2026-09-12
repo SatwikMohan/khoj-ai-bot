@@ -15,6 +15,8 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
+ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Khoj").strip() or "Khoj"
+DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(os.getenv("QA_TEMPERATURE", "0.5"))))
 DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
 DEFAULT_TTS_VOICE = os.getenv(
     "TTS_VOICE",
@@ -83,7 +85,7 @@ TONE_OPTIONS = ["neutral", "warm", "cheerful", "calm", "serious", "energetic", "
 
 
 st.set_page_config(
-    page_title="KHOJ ChatBot",
+    page_title=ASSISTANT_NAME,
     page_icon="K",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -446,7 +448,7 @@ def init_state() -> None:
     if "top_k" not in st.session_state:
         st.session_state.top_k = 3
     if "temperature" not in st.session_state:
-        st.session_state.temperature = 0.35
+        st.session_state.temperature = DEFAULT_QA_TEMPERATURE
     if "tts_enabled" not in st.session_state:
         st.session_state.tts_enabled = True
     if "tts_voice_id" not in st.session_state:
@@ -542,10 +544,15 @@ def avatar_model_source() -> dict | None:
     if extension not in MODEL_MIME_TYPES or not model_path.exists():
         return None
 
-    if extension == ".gltf":
-        uri = _inline_gltf_assets(model_path)
-    else:
-        uri = _file_data_uri(model_path, MODEL_MIME_TYPES[extension])
+    try:
+        if extension == ".gltf":
+            uri = _inline_gltf_assets(model_path)
+        else:
+            uri = _file_data_uri(model_path, MODEL_MIME_TYPES[extension])
+    except (OSError, json.JSONDecodeError, ValueError):
+        # Audio playback and chat should remain usable if an optional avatar
+        # file or one of its external glTF resources was not packaged.
+        return None
 
     return {
         "name": model_path.name,
@@ -692,12 +699,12 @@ def render_lip_sync_avatar(
 
         <div class="texmin-avatar" id="avatar">
             <div class="avatar-stage">
-                <div id="avatarScene" aria-label="KHOJ ChatBOT 3D presenter avatar">
+                <div id="avatarScene" aria-label="{escape(ASSISTANT_NAME)} 3D presenter avatar">
                     <div class="model-status" id="modelStatus">Loading 3D avatar...</div>
                     <div class="avatar-badge">3D AVATAR</div>
                 </div>
                 <div class="avatar-copy">
-                    <div class="avatar-title">KHOJ ChatBOT</div>
+                    <div class="avatar-title">{escape(ASSISTANT_NAME)}</div>
                     <div class="avatar-line" id="avatarLine">{safe_text}</div>
                 </div>
             </div>
@@ -1433,7 +1440,7 @@ def render_lip_sync_avatar(
 
 def render_message(message: dict) -> None:
     role = message.get("role", "assistant")
-    label = "You" if role == "user" else "KHOJ ChatBOT"
+    label = "You" if role == "user" else ASSISTANT_NAME
     bubble_class = "user" if role == "user" else "assistant"
     if message.get("error"):
         bubble_class += " error"
@@ -2090,7 +2097,7 @@ def render_streaming_message(container, content: str, status: str = "") -> None:
         f"""
         <div class="message-row assistant">
             <div class="bubble assistant">
-                <span class="role-label">KHOJ ChatBOT</span>
+                <span class="role-label">{escape(ASSISTANT_NAME)}</span>
                 <div class="markdown-body">{content_html}</div>
             </div>
         </div>
@@ -2105,24 +2112,30 @@ def _split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
         return [], ""
 
     segments = []
-    cursor = 0
+    pending_sentences = []
+    emitted_cursor = 0
+    minimum_segment_chars = int(os.getenv("TTS_STREAM_MIN_CHARS", "240"))
     for match in re.finditer(r"(.+?[.!?\u0964])(\s+|$)", normalized, flags=re.DOTALL):
         segment = match.group(1).strip()
         if segment:
-            segments.append(segment)
-        cursor = match.end()
+            pending_sentences.append(segment)
+        combined = " ".join(pending_sentences)
+        if len(combined) >= minimum_segment_chars:
+            segments.append(combined)
+            pending_sentences = []
+            emitted_cursor = match.end()
 
-    remainder = normalized[cursor:].strip()
-    if not segments and len(normalized) >= 170:
+    remainder = normalized[emitted_cursor:].strip()
+    if not segments and len(normalized) >= 300:
         split_at = max(
-            normalized.rfind(",", 0, 165),
-            normalized.rfind(";", 0, 165),
-            normalized.rfind(":", 0, 165),
-            normalized.rfind(" - ", 0, 165),
+            normalized.rfind(",", 0, 285),
+            normalized.rfind(";", 0, 285),
+            normalized.rfind(":", 0, 285),
+            normalized.rfind(" - ", 0, 285),
         )
-        if split_at <= 80 and len(normalized) >= 230:
-            split_at = normalized.rfind(" ", 0, 205)
-        if split_at > 80:
+        if split_at <= 160 and len(normalized) >= 380:
+            split_at = normalized.rfind(" ", 0, 340)
+        if split_at > 160:
             split_end = split_at
             if normalized[split_at : split_at + 3] == " - ":
                 split_end = split_at + 3
@@ -2521,12 +2534,12 @@ with st.sidebar:
 
 st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 st.markdown(
-    """
+    f"""
     <div class="app-title">
         <div class="brand-lockup">
             <div class="brand-mark">K</div>
             <div>
-                <div class="brand-title">KHOJ ChatBOT</div>
+                <div class="brand-title">{escape(ASSISTANT_NAME)}</div>
                 <div class="brand-subtitle">Grounded answers from your indexed mining documents</div>
             </div>
         </div>
@@ -2556,7 +2569,7 @@ live_response_container = st.container()
 st.markdown("</div>", unsafe_allow_html=True)
 
 voice_component_query = render_voice_query_component()
-question = st.chat_input("Message KHOJ ChatBOT...") or voice_component_query or voice_query_param
+question = st.chat_input(f"Message {ASSISTANT_NAME}...") or voice_component_query or voice_query_param
 
 latest_audio_b64, latest_audio_text, latest_audio_autoplay, latest_audio_mime = latest_assistant_audio()
 if not question and st.session_state.avatar_enabled and latest_audio_b64:

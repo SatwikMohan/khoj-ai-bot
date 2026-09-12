@@ -108,6 +108,11 @@ GENERAL_PHRASES = {
     "tum kaun ho",
     "kya kar sakte ho",
     "madad kar sakte ho",
+    "आप कैसे हैं",
+    "तुम कैसे हो",
+    "आप कौन हैं",
+    "तुम कौन हो",
+    "आप क्या कर सकते हैं",
 }
 
 SUMMARY_TERMS = {
@@ -212,36 +217,79 @@ def _target_filter(question: str) -> dict | None:
 def _general_response(question: str) -> QAResponse:
     language_style = _detect_language_style(question)
     normalized = _normalized_query(question)
+    assistant_name = os.getenv("ASSISTANT_NAME", "Khoj").strip() or "Khoj"
+    is_wellbeing = normalized in {
+        "how are you",
+        "how r u",
+        "kaise ho",
+        "aap kaise ho",
+        "tum kaise ho",
+        "आप कैसे हैं",
+        "तुम कैसे हो",
+    }
+    is_identity = normalized in {
+        "who are you",
+        "what are you",
+        "what is your name",
+        "tell me about yourself",
+        "aap kaun ho",
+        "tum kaun ho",
+        "आप कौन हैं",
+        "तुम कौन हो",
+    }
+    is_capability = normalized in {
+        "what can you do",
+        "kya kar sakte ho",
+        "आप क्या कर सकते हैं",
+    }
+    is_help = normalized in {"can you help me", "help me", "madad kar sakte ho"}
 
     if normalized in {"thanks", "thank you", "thankyou", "dhanyavad", "shukriya"}:
         if language_style == "hindi":
-            answer = "बहुत खुशी हुई। जब भी आप तैयार हों, अपने दस्तावेजों से जुड़ा सवाल पूछिए।"
+            answer = "ज़रूर। जब चाहें, अगला सवाल पूछिए।"
         elif language_style == "hinglish":
-            answer = "Khushi hui. Jab bhi aap ready ho, documents se related sawaal pooch lijiye."
+            answer = "Bilkul—jab chahein, agla sawaal pooch lijiye."
         else:
-            answer = "You are very welcome. Whenever you are ready, ask me anything from your documents."
+            answer = "Anytime. What would you like to look at next?"
     elif normalized in {"bye", "goodbye"}:
         if language_style == "hindi":
-            answer = "ठीक है, फिर मिलते हैं। जब जरूरत हो, मैं यहीं हूँ।"
+            answer = "ठीक है, फिर मिलते हैं। अपना ख्याल रखिए।"
         elif language_style == "hinglish":
-            answer = "Theek hai, phir milte hain. Jab zarurat ho, main yahin hoon."
+            answer = "Theek hai, phir milte hain. Apna khayal rakhiye."
         else:
-            answer = "Alright, see you soon. I will be here when you need me."
+            answer = "See you soon. Take care."
     elif language_style == "hindi":
-        answer = (
-            "नमस्ते! मैं तैयार हूँ। आप चाहें तो सामान्य बात कर सकते हैं, या अपने दस्तावेजों "
-            "से जुड़ा कोई सवाल पूछ सकते हैं।"
-        )
+        if is_wellbeing:
+            answer = "मैं बढ़िया हूँ—आपसे बात करके अच्छा लगा। बताइए, आज क्या देखना है?"
+        elif is_identity:
+            answer = f"मैं {assistant_name} हूँ। जटिल दस्तावेज़ों को समझने, तुलना करने और सीधा जवाब देने में आपकी मदद करता हूँ।"
+        elif is_capability:
+            answer = "मैं आपके दस्तावेज़ खोज सकता हूँ, नियमों और आँकड़ों की तुलना कर सकता हूँ, और बात को आसान भाषा में समझा सकता हूँ।"
+        elif is_help:
+            answer = "बिल्कुल। बताइए कहाँ अटके हैं, हम वहीं से शुरू करते हैं।"
+        else:
+            answer = "नमस्ते—आपसे बात करके अच्छा लगा। बताइए, आज क्या जानना है?"
     elif language_style == "hinglish":
-        answer = (
-            "Hi! Main ready hoon. Aap normal chat kar sakte ho, ya documents se related "
-            "koi specific sawaal pooch sakte ho."
-        )
+        if is_wellbeing:
+            answer = "Main badhiya hoon—aur aapse baat karke achha laga. Bataiye, aaj kya dekhna hai?"
+        elif is_identity:
+            answer = f"Main {assistant_name} hoon. Complex documents samajhne, compare karne aur seedha jawab nikalne mein aapki help karta hoon."
+        elif is_capability:
+            answer = "Main aapke documents search kar sakta hoon, rules aur figures compare kar sakta hoon, aur simple language mein samjha sakta hoon."
+        elif is_help:
+            answer = "Bilkul. Bataiye kahan atke hain—wahin se shuru karte hain."
+        else:
+            answer = "Namaste—achha laga aapse baat karke. Bataiye, aaj kya dekhna hai?"
+    elif is_wellbeing:
+        answer = "I’m doing well—glad you’re here. What are we looking into today?"
+    elif is_identity:
+        answer = f"I’m {assistant_name}. I help you make sense of complex documents, compare details, and get to a clear answer quickly."
+    elif is_capability:
+        answer = "I can search your documents, compare rules and figures, summarize long material, and explain the answer in plain language."
+    elif is_help:
+        answer = "Of course. Tell me where you’re stuck, and we’ll start there."
     else:
-        answer = (
-            "Hi! I am ready. You can chat with me normally, or ask a specific question "
-            "from your indexed documents."
-        )
+        answer = "Hey—good to have you here. What would you like to dig into?"
 
     return QAResponse(answer=answer, sources=[], query_type="general")
 
@@ -766,40 +814,38 @@ def _not_enough_context_response(question: str) -> QAResponse:
 
 
 def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
+    assistant_name = os.getenv("ASSISTANT_NAME", "Khoj").strip() or "Khoj"
+    persona = os.getenv(
+        "ASSISTANT_PERSONA",
+        "a calm, perceptive colleague who explains difficult material in plain language",
+    ).strip()
     shared_style = (
-        "Write like a thoughtful person speaking to the user, not like a citation engine. "
-        "Do not start with phrases like 'based on the context', 'from the provided context', "
-        "'the snippets say', or 'according to the documents'. Start directly with the useful "
-        "answer. Be concise by default: aim for fewer than 70 words and 1-3 short sentences for "
-        "direct questions, up to 5 bullets "
-        "only when the user asks for a list, and longer only when the user asks for detail or a "
-        "summary. Use Markdown lightly. Keep it grounded in the "
-        "retrieved context and never invent unsupported facts. Use the chat history only to "
-        "understand what the user's follow-up refers to; do not treat chat history as evidence. "
-        "If multiple context blocks discuss the same subject with different dates, years, figures, "
-        "names, locations, rules, thresholds, statuses, assumptions, sources, pages, or exceptions, "
-        "include each relevant version instead of using only the first one. When the blocks disagree "
-        "or cover different conditions, say so clearly and compare the differences."
+        f"Your name is {assistant_name}. Your conversational character is {persona}. "
+        "Sound like someone present in a live conversation: answer the real point immediately, "
+        "use contractions where natural, vary sentence rhythm, and connect ideas smoothly. "
+        "Never claim to be human, but don't announce that you're an AI or call yourself an "
+        "assistant unless the user asks. Avoid canned openings, restating the question, response "
+        "roadmaps, generic praise, and phrases such as 'based on the context', 'the snippets say', "
+        "or 'according to the documents'. Treat retrieved context as private working notes. "
+        "For a direct question, normally use one compact paragraph of 2-4 spoken sentences. "
+        "Don't use a heading or bullets unless they genuinely make a complex answer easier to follow. "
+        "Stay faithful to the supplied context and never invent a fact. Use conversation history for "
+        "continuity, not as factual evidence. If relevant sources differ by date, rule, figure, scope, "
+        "or exception, explain the difference naturally before concluding."
     )
 
     if query_type == "summary":
         system_message = (
-            "You are Texmin AI's warm, expressive document analyst. Summarize only from the "
-            "supplied context. For broad summary requests, synthesize the major themes across "
-            "the retrieved excerpts. If coverage is partial, mention that briefly near the end "
-            "as a caveat, not as an opening refusal. Keep the summary tight and easy to hear. "
+            "Create a useful spoken summary from the supplied material. Bring related ideas together "
+            "instead of listing one excerpt after another. If coverage is partial, mention that once "
+            "near the end. Keep the flow natural and easy to hear. "
             f"{shared_style} {{language_instruction}}"
         )
     else:
         system_message = (
-            "You are Texmin AI's warm, expressive QA assistant. Answer only from the supplied "
-            "context. Speak naturally, as if a thoughtful human is explaining it out loud. "
-            "Keep sentences clear, complete, conversational, and suitable for voice. "
-            f"{shared_style} First identify the exact entity, topic, and constraints the "
-            "user is asking about, using chat history only for pronouns or follow-up context. Then "
-            "check whether the retrieved context contains multiple relevant versions or conflicting "
-            "details; if it does, present the comparison before drawing a conclusion. If the context "
-            "does not support the answer, say that simply and ask for the missing detail. "
+            f"{shared_style} Understand the exact entity and constraint being discussed before "
+            "answering. If the notes don't support a reliable answer, say what is missing in one "
+            "natural sentence and ask one focused follow-up question. "
             "{language_instruction}"
         )
 
@@ -808,9 +854,9 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "Conversation so far, summarized to recent turns:\n{chat_history}\n\n"
-                "Retrieved document context:\n{context}\n\n"
-                "Current question:\n{question}\n\nAnswer:",
+                "Recent conversation:\n{chat_history}\n\n"
+                "Working notes from the documents:\n{context}\n\n"
+                "What the user just said:\n{question}\n\nRespond naturally:",
             ),
         ]
     )
@@ -819,7 +865,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
 def answer_question(
     question: str,
     top_k: int = 3,
-    temperature: float = 0.35,
+    temperature: float = 0.5,
     chat_history: list[ChatMessage] | None = None,
 ) -> QAResponse:
     started_at = time.perf_counter()
@@ -876,7 +922,7 @@ def answer_question(
 def stream_answer_events(
     question: str,
     top_k: int = 3,
-    temperature: float = 0.35,
+    temperature: float = 0.5,
     chat_history: list[ChatMessage] | None = None,
 ) -> Iterator[dict]:
     started_at = time.perf_counter()
