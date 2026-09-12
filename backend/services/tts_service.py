@@ -1,8 +1,12 @@
 import asyncio
+import io
 import os
 import re
 import tempfile
 import threading
+import time
+import wave
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -25,10 +29,35 @@ TONE_PRESETS = {
     "energetic": {"rate": "+14%", "pitch": "+6Hz", "volume": "+8%"},
 }
 PYTTSX3_LOCK = threading.Lock()
+NEURAL_TTS_LOCK = threading.Lock()
+VOICE_HEALTH_LOCK = threading.Lock()
+VOICE_FAILURES: dict[str, tuple[int, float]] = {}
 
 
 class TTSEngineError(RuntimeError):
     pass
+
+
+def _handle_tts_loop_exception(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    error = context.get("exception")
+    if (
+        os.name == "nt"
+        and isinstance(error, ConnectionResetError)
+        and getattr(error, "winerror", None) == 10054
+    ):
+        return
+    loop.default_exception_handler(context)
+
+
+def _tts_loop_factory() -> asyncio.AbstractEventLoop:
+    loop = asyncio.SelectorEventLoop() if os.name == "nt" else asyncio.new_event_loop()
+    loop.set_exception_handler(_handle_tts_loop_exception)
+    return loop
+
+
+def _run_tts_coroutine(coroutine):
+    with asyncio.Runner(loop_factory=_tts_loop_factory) as runner:
+        return runner.run(coroutine)
 
 
 def _load_environment() -> None:
@@ -162,13 +191,103 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
             f"Unsupported audio format '{payload.response_format}'. Use 'wav' for local TTS or 'mp3' for Edge TTS."
         )
 
-    engine_name = os.getenv("TTS_ENGINE", "local").strip().lower()
+    engine_name = os.getenv("TTS_ENGINE", "auto").strip().lower()
+    fallback_names = [
+        name.strip().lower()
+        for name in os.getenv("TTS_FALLBACK_ENGINES", "local").split(",")
+        if name.strip()
+    ]
+    if engine_name == "auto":
+        engines = ["indicf5", "local"] if _contains_devanagari(payload.text) else ["kokoro", "local"]
+    else:
+        engines = [engine_name, *fallback_names]
+
+    errors = []
+    for candidate in dict.fromkeys(engines):
+        if _voice_circuit_open(candidate):
+            errors.append(f"{candidate}: temporarily disabled after repeated failures")
+            continue
+        try:
+            audio, media_type = _synthesize_with_engine(candidate, payload)
+            _validate_audio(audio, media_type)
+            _record_voice_success(candidate)
+            return audio, media_type
+        except Exception as exc:
+            _record_voice_failure(candidate)
+            errors.append(f"{candidate}: {exc}")
+
+    raise TTSEngineError("All configured offline voices failed. " + " | ".join(errors))
+
+
+def _synthesize_with_engine(engine_name: str, payload: TTSRequest) -> tuple[bytes, str]:
     if engine_name in {"local", "offline", "pyttsx3"}:
         return _synthesize_local_speech(payload)
-    if engine_name not in {"edge", "edge-tts"}:
-        raise TTSEngineError("Unknown TTS_ENGINE. Use 'local' for offline speech or 'edge' for Edge TTS.")
+    if engine_name in {"edge", "edge-tts"}:
+        return _synthesize_edge_speech(payload)
+    if engine_name == "kokoro":
+        return _synthesize_kokoro_speech(payload)
+    if engine_name in {"indicf5", "indic-f5"}:
+        return _synthesize_indicf5_speech(payload)
+    raise TTSEngineError(f"Unknown TTS engine '{engine_name}'.")
 
-    return _synthesize_edge_speech(payload)
+
+def _voice_circuit_open(engine_name: str) -> bool:
+    threshold = int(os.getenv("TTS_FAILURE_THRESHOLD", "2"))
+    cooldown = int(os.getenv("TTS_FAILURE_COOLDOWN_SECONDS", "60"))
+    with VOICE_HEALTH_LOCK:
+        failures, failed_at = VOICE_FAILURES.get(engine_name, (0, 0.0))
+    return failures >= threshold and time.monotonic() - failed_at < cooldown
+
+
+def _record_voice_failure(engine_name: str) -> None:
+    with VOICE_HEALTH_LOCK:
+        failures, _ = VOICE_FAILURES.get(engine_name, (0, 0.0))
+        VOICE_FAILURES[engine_name] = (failures + 1, time.monotonic())
+
+
+def _record_voice_success(engine_name: str) -> None:
+    with VOICE_HEALTH_LOCK:
+        VOICE_FAILURES.pop(engine_name, None)
+
+
+def _validate_audio(audio: bytes, media_type: str) -> None:
+    if len(audio) < int(os.getenv("TTS_MIN_AUDIO_BYTES", "1024")):
+        raise TTSEngineError("voice returned an empty or truncated audio segment")
+    if media_type != "audio/wav":
+        return
+    try:
+        with wave.open(io.BytesIO(audio), "rb") as wav_file:
+            duration = wav_file.getnframes() / max(1, wav_file.getframerate())
+            sample = wav_file.readframes(min(wav_file.getnframes(), wav_file.getframerate()))
+    except (wave.Error, EOFError) as exc:
+        raise TTSEngineError(f"voice returned an invalid WAV file: {exc}") from exc
+    if duration < 0.08 or not sample or not any(sample):
+        raise TTSEngineError("voice returned silent or abnormally short audio")
+
+
+def tts_runtime_status() -> dict:
+    with VOICE_HEALTH_LOCK:
+        failures = {name: count for name, (count, _failed_at) in VOICE_FAILURES.items()}
+    status = {
+        "status": "ready",
+        "engine": os.getenv("TTS_ENGINE", "auto"),
+        "fallback_engines": os.getenv("TTS_FALLBACK_ENGINES", "local"),
+        "failures": failures,
+    }
+    engine = status["engine"].strip().lower()
+    if engine in {"auto", "kokoro"}:
+        try:
+            _kokoro_pipeline(os.getenv("KOKORO_LANGUAGE", "a"))
+        except TTSEngineError as exc:
+            status["status"] = "unavailable"
+            status["error"] = str(exc)
+    return status
+
+
+def warm_up_tts() -> None:
+    status = tts_runtime_status()
+    if status["status"] != "ready":
+        raise TTSEngineError(status.get("error", "TTS warm-up failed."))
 
 
 def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
@@ -183,7 +302,7 @@ def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
     segments = _speech_segments(spoken_text, voice, hindi_voice)
 
     try:
-        audio = asyncio.run(_generate_segmented_audio(segments, rate, pitch, volume))
+        audio = _run_tts_coroutine(_generate_segmented_audio(segments, rate, pitch, volume))
     except Exception as exc:
         voices = ", ".join(sorted({segment_voice for segment_voice, _ in segments}))
         raise TTSEngineError(f"Edge TTS could not synthesize voice '{voices}': {exc}") from exc
@@ -270,6 +389,123 @@ def _configure_local_engine(engine, payload: TTSRequest, spoken_text: str) -> No
     base_volume = float(engine.getProperty("volume") or 1.0)
     adjusted_volume = max(0.0, min(1.0, base_volume + (_parse_percent(volume) / 100)))
     engine.setProperty("volume", adjusted_volume)
+
+
+def _audio_array_to_wav(audio, sample_rate: int = 24000) -> bytes:
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise TTSEngineError("Neural TTS requires numpy.") from exc
+
+    samples = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if samples.size == 0:
+        raise TTSEngineError("Neural TTS returned no samples.")
+    peak = float(np.max(np.abs(samples)))
+    if peak > 1.0:
+        samples = samples / peak
+    pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+    return output.getvalue()
+
+
+@lru_cache(maxsize=2)
+def _kokoro_pipeline(language_code: str):
+    try:
+        from kokoro import KPipeline
+    except ImportError as exc:
+        raise TTSEngineError("Kokoro is not installed.") from exc
+    try:
+        return KPipeline(lang_code=language_code)
+    except Exception as exc:
+        raise TTSEngineError(f"Kokoro could not load its local model: {exc}") from exc
+
+
+def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    if _contains_devanagari(payload.text):
+        raise TTSEngineError("Kokoro is not the configured Hindi voice; trying the Indic fallback.")
+
+    spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    if not spoken_text:
+        raise TTSEngineError("There is no speakable text after formatting was removed.")
+
+    requested_voice = (payload.voice_id or "").strip()
+    voice = requested_voice if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", requested_voice) else os.getenv(
+        "KOKORO_VOICE", "af_heart"
+    )
+    language_code = os.getenv("KOKORO_LANGUAGE", "a")
+    rate, _pitch, _volume = _prosody_settings(payload)
+    speed = max(0.65, min(1.35, 1 + (_parse_percent(rate) / 100)))
+
+    try:
+        with NEURAL_TTS_LOCK:
+            generated = _kokoro_pipeline(language_code)(spoken_text, voice=voice, speed=speed)
+            parts = [audio for _graphemes, _phonemes, audio in generated]
+        if not parts:
+            raise TTSEngineError("Kokoro returned no audio segments.")
+        import numpy as np
+
+        audio = np.concatenate([np.asarray(part, dtype=np.float32).reshape(-1) for part in parts])
+        return _audio_array_to_wav(audio), "audio/wav"
+    except TTSEngineError:
+        raise
+    except Exception as exc:
+        raise TTSEngineError(f"Kokoro synthesis failed for voice '{voice}': {exc}") from exc
+
+
+@lru_cache(maxsize=1)
+def _indicf5_model():
+    try:
+        import torch
+        from transformers import AutoModel
+    except ImportError as exc:
+        raise TTSEngineError("IndicF5 requires torch and transformers.") from exc
+
+    model_location = os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5")
+    offline = os.getenv("OFFLINE_MODE", "true").lower() in {"1", "true", "yes", "on"}
+    try:
+        model = AutoModel.from_pretrained(
+            model_location,
+            trust_remote_code=True,
+            local_files_only=offline,
+        )
+        if os.getenv("INDICF5_DEVICE", "cuda") == "cuda" and torch.cuda.is_available():
+            model = model.cuda()
+        return model.eval()
+    except Exception as exc:
+        raise TTSEngineError(f"IndicF5 could not load from '{model_location}': {exc}") from exc
+
+
+def _synthesize_indicf5_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    if not _contains_devanagari(payload.text):
+        raise TTSEngineError("IndicF5 is reserved for Indic-script speech in automatic mode.")
+
+    reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
+    reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
+    if not reference_audio or not reference_text:
+        raise TTSEngineError("INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required.")
+    if not Path(reference_audio).exists():
+        raise TTSEngineError(f"IndicF5 reference audio does not exist: {reference_audio}")
+
+    spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    try:
+        with NEURAL_TTS_LOCK:
+            audio = _indicf5_model()(
+                spoken_text,
+                ref_audio_path=reference_audio,
+                ref_text=reference_text,
+            )
+        if hasattr(audio, "detach"):
+            audio = audio.detach().float().cpu().numpy()
+        return _audio_array_to_wav(audio), "audio/wav"
+    except TTSEngineError:
+        raise
+    except Exception as exc:
+        raise TTSEngineError(f"IndicF5 synthesis failed: {exc}") from exc
 
 
 def _synthesize_local_speech(payload: TTSRequest) -> tuple[bytes, str]:

@@ -29,6 +29,7 @@ class QAResponse(BaseModel):
     answer: str
     sources: list[SourceChunk]
     query_type: str = "document"
+    timings_ms: dict[str, float] = Field(default_factory=dict)
 
 
 class TTSRequest(BaseModel):

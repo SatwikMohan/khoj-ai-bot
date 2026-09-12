@@ -1,5 +1,7 @@
+import json
 import os
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -8,15 +10,23 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import ChatOllama
 
 from helpers.request_models import ChatMessage, QAResponse, SourceChunk
+from services.embedding_service import (
+    PromptedOllamaEmbeddings,
+    embedding_profile,
+    model_is_available,
+    ollama_model_names,
+)
+from services.lexical_service import lexical_search
+from services.reranker_service import rerank_documents
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
 DEFAULT_VECTOR_DB_DIR = REPO_ROOT / "vector_db"
-DEFAULT_RELEVANCE_THRESHOLD = 0.15
+DEFAULT_RELEVANCE_THRESHOLD = 0.25
 DEFAULT_CONTEXT_MAX_CHARS = 8000
 DEFAULT_RETRIEVAL_FETCH_K = 16
 DEFAULT_CHAT_HISTORY_MAX_TURNS = 4
@@ -236,10 +246,6 @@ def _general_response(question: str) -> QAResponse:
     return QAResponse(answer=answer, sources=[], query_type="general")
 
 
-def _collection_name() -> str:
-    return os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
-
-
 def _vector_db_dir() -> Path:
     return _resolve_path(os.getenv("VECTOR_DB_DIR"), DEFAULT_VECTOR_DB_DIR)
 
@@ -266,17 +272,54 @@ def _ollama_keep_alive() -> int:
     return _env_int("OLLAMA_KEEP_ALIVE", 1800)
 
 
-@lru_cache(maxsize=1)
-def _embeddings() -> OllamaEmbeddings:
-    _load_environment()
-    return OllamaEmbeddings(
-        model=os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma"),
+def _active_index() -> tuple[str, str]:
+    db_dir = _vector_db_dir()
+    manifest_path = db_dir / "ingestion_manifest.json"
+    if not manifest_path.exists():
+        raise QAEngineError(
+            f"Index manifest not found at {manifest_path}. Run `python train_engine.py` first."
+        )
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise QAEngineError(f"Index manifest is unreadable: {exc}") from exc
+
+    collection_name = manifest.get("active_collection")
+    indexed_profile = manifest.get("settings", {}).get("embedding_profile", {})
+    configured_profile = embedding_profile()
+    if not collection_name or indexed_profile.get("fingerprint") != configured_profile.fingerprint:
+        indexed_model = manifest.get("settings", {}).get("embedding_model", "unknown")
+        raise QAEngineError(
+            "The vector index is incompatible with the configured embedding model. "
+            f"Index={indexed_model}, configured={configured_profile.model}. "
+            "Build a new blue-green index with `python train_engine.py`."
+        )
+    return str(collection_name), configured_profile.fingerprint
+
+
+@lru_cache(maxsize=4)
+def _embeddings(profile_fingerprint: str) -> PromptedOllamaEmbeddings:
+    profile = embedding_profile()
+    if profile.fingerprint != profile_fingerprint:
+        raise QAEngineError("Embedding configuration changed while the service was running.")
+    return PromptedOllamaEmbeddings(
+        profile=profile,
         base_url=_ollama_base_url(),
         keep_alive=_ollama_keep_alive(),
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=4)
+def _vector_store_for(collection_name: str, profile_fingerprint: str, db_dir: str) -> Chroma:
+    return Chroma(
+        collection_name=collection_name,
+        embedding_function=_embeddings(profile_fingerprint),
+        persist_directory=db_dir,
+        collection_metadata={"hnsw:space": "cosine"},
+    )
+
+
 def _vector_store() -> Chroma:
     _load_environment()
     db_dir = _vector_db_dir()
@@ -284,13 +327,8 @@ def _vector_store() -> Chroma:
         raise QAEngineError(
             f"Vector database not found at {db_dir}. Run `python train_engine.py` first."
         )
-
-    return Chroma(
-        collection_name=_collection_name(),
-        embedding_function=_embeddings(),
-        persist_directory=str(db_dir),
-        collection_metadata={"hnsw:space": "cosine"},
-    )
+    collection_name, profile_fingerprint = _active_index()
+    return _vector_store_for(collection_name, profile_fingerprint, str(db_dir))
 
 
 @lru_cache(maxsize=8)
@@ -320,8 +358,60 @@ def warm_up_qa_engine() -> None:
     if not _env_bool("QA_WARMUP_ON_STARTUP", True):
         return
 
-    _embeddings().embed_query("warm up document retrieval")
+    installed_models = ollama_model_names(_ollama_base_url())
+    profile = embedding_profile()
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b")
+    missing = [
+        model
+        for model in (profile.model, chat_model)
+        if not model_is_available(model, installed_models)
+    ]
+    if missing:
+        raise QAEngineError(
+            "Required Ollama models are not installed: "
+            f"{', '.join(missing)}. Pull them before starting the backend."
+        )
+
+    _vector_store()
+    _, profile_fingerprint = _active_index()
+    _embeddings(profile_fingerprint).embed_query("warm up document retrieval")
     _llm(0.1).invoke("Reply with: ready")
+
+
+def runtime_status() -> dict:
+    _load_environment()
+    profile = embedding_profile()
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b")
+    status = {
+        "status": "ok",
+        "ollama": "unavailable",
+        "chat_model": chat_model,
+        "embedding_model": profile.model,
+        "index": "unavailable",
+    }
+    try:
+        installed = ollama_model_names(_ollama_base_url())
+        missing = [
+            model
+            for model in (profile.model, chat_model)
+            if not model_is_available(model, installed)
+        ]
+        status["ollama"] = "ready" if not missing else "missing_models"
+        status["missing_models"] = missing
+    except RuntimeError as exc:
+        status["status"] = "degraded"
+        status["ollama_error"] = str(exc)
+
+    try:
+        collection_name, _ = _active_index()
+        status["index"] = "ready"
+        status["collection"] = collection_name
+    except QAEngineError as exc:
+        status["status"] = "degraded"
+        status["index_error"] = str(exc)
+    if status["ollama"] != "ready" or status["index"] != "ready":
+        status["status"] = "degraded"
+    return status
 
 
 def _doc_key(doc) -> tuple:
@@ -458,6 +548,32 @@ def _format_chat_history(chat_history: list[ChatMessage] | None) -> str:
 
 
 def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) -> str:
+    normalized = _normalized_query(question)
+    follow_up_markers = {
+        "it",
+        "its",
+        "that",
+        "this",
+        "they",
+        "them",
+        "those",
+        "these",
+        "he",
+        "she",
+        "there",
+        "same",
+        "previous",
+        "above",
+        "unka",
+        "uska",
+        "iske",
+        "uske",
+    }
+    words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
+    is_follow_up = len(words) <= 10 and bool(words & follow_up_markers)
+    if not is_follow_up:
+        return question
+
     recent_history = []
     for message in (chat_history or [])[-4:]:
         role = _message_role(message).strip().lower()
@@ -472,6 +588,27 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
 
     history_text = " ".join(recent_history)
     return _trim_text(f"Current question: {question}. Recent conversation: {history_text}", 900)
+
+
+def _hybrid_rank(dense_docs: list, lexical_docs: list, limit: int):
+    rrf_constant = _env_int("HYBRID_RRF_K", 60)
+    scores: dict[tuple, float] = {}
+    documents = {}
+
+    for rank, doc in enumerate(dense_docs, start=1):
+        key = _doc_key(doc)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_constant + rank)
+        documents[key] = doc
+
+    for rank, doc in enumerate(lexical_docs, start=1):
+        key = _doc_key(doc)
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_constant + rank)
+        documents.setdefault(key, doc)
+
+    ranked = sorted(documents.values(), key=lambda doc: scores[_doc_key(doc)], reverse=True)
+    for doc in ranked:
+        doc.metadata["hybrid_score"] = round(scores[_doc_key(doc)], 6)
+    return ranked[:limit]
 
 
 def _diversity_key(doc) -> tuple[str, str]:
@@ -512,18 +649,34 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
     threshold = float(os.getenv("RELEVANCE_SCORE_THRESHOLD", str(DEFAULT_RELEVANCE_THRESHOLD)))
 
     scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
-    fallback_by_key = {}
     relevant_by_key = {}
     for doc, score in scored_docs:
         if not _has_meaningful_content(doc):
             continue
         doc.metadata["relevance_score"] = round(float(score), 4)
-        fallback_by_key[_doc_key(doc)] = doc
         if score >= threshold:
             relevant_by_key[_doc_key(doc)] = doc
 
+    dense_docs = list(relevant_by_key.values())
+    if _env_bool("HYBRID_SEARCH_ENABLED", True):
+        collection_name, _ = _active_index()
+        lexical_docs = lexical_search(
+            _vector_db_dir(),
+            collection_name,
+            question,
+            fetch_k,
+        )
+        lexical_docs = [doc for doc in lexical_docs if _has_meaningful_content(doc)]
+        if dense_docs or lexical_docs:
+            candidate_count = max(top_k, _env_int("RERANK_CANDIDATES", 12))
+            candidates = _hybrid_rank(dense_docs, lexical_docs, candidate_count)
+            return _diversify_docs(rerank_documents(question, candidates, top_k), top_k)
+
     if not relevant_by_key:
-        return _diversify_docs(list(fallback_by_key.values()), top_k)
+        if _env_bool("ALLOW_LOW_RELEVANCE_FALLBACK", False):
+            fallback_docs = [doc for doc, _score in scored_docs if _has_meaningful_content(doc)]
+            return _diversify_docs(fallback_docs, top_k)
+        return []
 
     if not _env_bool("RETRIEVAL_MMR_ENABLED", False):
         return _diversify_docs(list(relevant_by_key.values()), top_k)
@@ -669,24 +822,34 @@ def answer_question(
     temperature: float = 0.35,
     chat_history: list[ChatMessage] | None = None,
 ) -> QAResponse:
+    started_at = time.perf_counter()
     _load_environment()
     if _is_general_query(question):
-        return _general_response(question)
+        response = _general_response(question)
+        response.timings_ms = {"total": round((time.perf_counter() - started_at) * 1000, 1)}
+        return response
 
     vector_store = _vector_store()
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _history_aware_query(question, chat_history)
 
+    retrieval_started_at = time.perf_counter()
     if query_type == "summary":
         docs = _retrieve_summary_context(vector_store, retrieval_query, top_k)
     else:
         docs = _retrieve_context(vector_store, retrieval_query, top_k)
 
     if not docs:
-        return _not_enough_context_response(question)
+        response = _not_enough_context_response(question)
+        response.timings_ms = {
+            "retrieval": round((time.perf_counter() - retrieval_started_at) * 1000, 1),
+            "total": round((time.perf_counter() - started_at) * 1000, 1),
+        }
+        return response
 
     language_style = _detect_language_style(question)
     chain = _prompt_for_query(query_type) | _llm(temperature) | StrOutputParser()
+    generation_started_at = time.perf_counter()
     answer = chain.invoke(
         {
             "context": _format_context(docs),
@@ -696,7 +859,18 @@ def answer_question(
         }
     )
 
-    return QAResponse(answer=answer.strip(), sources=_source_chunks(docs), query_type=query_type)
+    timings = {
+        "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
+        "generation": round((time.perf_counter() - generation_started_at) * 1000, 1),
+        "total": round((time.perf_counter() - started_at) * 1000, 1),
+    }
+    print(json.dumps({"event": "qa_completed", "query_type": query_type, **timings}))
+    return QAResponse(
+        answer=answer.strip(),
+        sources=_source_chunks(docs),
+        query_type=query_type,
+        timings_ms=timings,
+    )
 
 
 def stream_answer_events(
@@ -705,6 +879,7 @@ def stream_answer_events(
     temperature: float = 0.35,
     chat_history: list[ChatMessage] | None = None,
 ) -> Iterator[dict]:
+    started_at = time.perf_counter()
     _load_environment()
     if _is_general_query(question):
         response = _general_response(question)
@@ -713,6 +888,7 @@ def stream_answer_events(
             "answer": response.answer,
             "sources": _source_dicts(response.sources),
             "query_type": response.query_type,
+            "timings_ms": {"total": round((time.perf_counter() - started_at) * 1000, 1)},
         }
         return
 
@@ -721,6 +897,7 @@ def stream_answer_events(
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _history_aware_query(question, chat_history)
 
+    retrieval_started_at = time.perf_counter()
     if query_type == "summary":
         docs = _retrieve_summary_context(vector_store, retrieval_query, top_k)
     else:
@@ -733,6 +910,10 @@ def stream_answer_events(
             "answer": response.answer,
             "sources": _source_dicts(response.sources),
             "query_type": response.query_type,
+            "timings_ms": {
+                "retrieval": round((time.perf_counter() - retrieval_started_at) * 1000, 1),
+                "total": round((time.perf_counter() - started_at) * 1000, 1),
+            },
         }
         return
 
@@ -746,16 +927,28 @@ def stream_answer_events(
     }
 
     answer_parts = []
+    generation_started_at = time.perf_counter()
+    first_token_ms = None
     yield {"type": "status", "message": ""}
     for token in chain.stream(inputs):
         if not token:
             continue
+        if first_token_ms is None:
+            first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
         answer_parts.append(token)
         yield {"type": "token", "text": token}
 
+    timings = {
+        "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
+        "first_token": first_token_ms or 0.0,
+        "generation": round((time.perf_counter() - generation_started_at) * 1000, 1),
+        "total": round((time.perf_counter() - started_at) * 1000, 1),
+    }
+    print(json.dumps({"event": "qa_stream_completed", "query_type": query_type, **timings}))
     yield {
         "type": "done",
         "answer": "".join(answer_parts).strip(),
         "sources": _source_dicts(_source_chunks(docs)),
         "query_type": query_type,
+        "timings_ms": timings,
     }

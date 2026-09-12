@@ -1,10 +1,15 @@
 from fastapi import APIRouter, HTTPException, Response
 
 from helpers.request_models import TTSRequest
-from services.tts_service import TTSEngineError, synthesize_speech
+from services.tts_service import TTSEngineError, synthesize_speech, tts_runtime_status
 
 
 router = APIRouter(prefix="/tts", tags=["tts"])
+
+
+@router.get("/health")
+def text_to_speech_health() -> dict:
+    return tts_runtime_status()
 
 
 @router.post("/speech")

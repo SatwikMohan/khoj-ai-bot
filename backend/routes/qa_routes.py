@@ -41,4 +41,11 @@ def stream_question(payload: QARequest) -> StreamingResponse:
             error_event = {"type": "error", "message": f"Streaming failed: {exc}"}
             yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )

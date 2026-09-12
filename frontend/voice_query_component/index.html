@@ -136,14 +136,16 @@
     const preview = document.getElementById("voicePreview");
     const canvas = document.getElementById("waveCanvas");
     const canvasContext = canvas.getContext("2d");
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // Final transcription is always performed by the private DGX service. Keeping the
+    // browser recognizer disabled prevents Chrome/Edge from sending microphone audio to a vendor.
+    const SpeechRecognition = null;
     const storageModeKey = "texmin_voice_conversation";
     const storageResumeKey = "texmin_voice_resume_at";
     const storageWaitingKey = "texmin_voice_waiting_since";
     const storageInterruptKey = "texmin_voice_interrupt_at";
     const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
     const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
-    const noTranscriptSilenceLimitMs = 1850;
+    const noTranscriptSilenceLimitMs = 650;
     const transcriptSilenceLimitMs = 850;
     const finalTranscriptSilenceLimitMs = 520;
     const continuedSpeechThreshold = 0.055;
@@ -172,6 +174,10 @@
     let interruptVoiceStartedAt = 0;
     let interruptPending = false;
     let interruptArmed = false;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let recordingMime = "audio/webm";
+    let submissionPending = false;
 
     function sendStreamlitMessage(type, data) {
       window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -351,6 +357,79 @@
       drawLiveWave();
     }
 
+    function startRecorder() {
+      if (!mediaStream || !window.MediaRecorder || (mediaRecorder && mediaRecorder.state === "recording")) {
+        return;
+      }
+      recordedChunks = [];
+      const mimeCandidates = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
+      recordingMime = mimeCandidates.find((mime) => MediaRecorder.isTypeSupported(mime)) || "";
+      mediaRecorder = recordingMime
+        ? new MediaRecorder(mediaStream, { mimeType: recordingMime })
+        : new MediaRecorder(mediaStream);
+      recordingMime = mediaRecorder.mimeType || recordingMime || "audio/webm";
+      mediaRecorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size) recordedChunks.push(event.data);
+      });
+      mediaRecorder.start(200);
+    }
+
+    function discardRecording() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.onstop = null;
+        mediaRecorder.stop();
+      }
+      mediaRecorder = null;
+      recordedChunks = [];
+      submissionPending = false;
+    }
+
+    function submitRecordedAudio(fallbackText = "") {
+      if (submissionPending) return;
+      submissionPending = true;
+      const recorder = mediaRecorder;
+      if (!recorder || recorder.state === "inactive") {
+        submissionPending = false;
+        const submitted = submitTranscript(fallbackText);
+        stopMeter();
+        if (!submitted) {
+          statusText.textContent = "I did not catch speech yet.";
+          setButtonState("idle");
+        }
+        return;
+      }
+
+      recorder.addEventListener("stop", () => {
+        const blob = new Blob(recordedChunks, { type: recordingMime || "audio/webm" });
+        mediaRecorder = null;
+        recordedChunks = [];
+        stopMeter();
+        if (!blob.size) {
+          submissionPending = false;
+          submitTranscript(fallbackText);
+          return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const encoded = String(reader.result || "").split(",", 2)[1] || "";
+          setComponentValue({
+            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            text: "",
+            transcript_hint: fallbackText,
+            audio_b64: encoded,
+            audio_mime: blob.type || recordingMime || "audio/webm",
+          });
+          localStorage.setItem(storageModeKey, "on");
+          localStorage.setItem(storageWaitingKey, String(Date.now()));
+          setButtonState("waiting");
+          statusText.textContent = "Transcribing locally...";
+          submissionPending = false;
+        };
+        reader.readAsDataURL(blob);
+      }, { once: true });
+      recorder.stop();
+    }
+
     function stopMeter() {
       if (animationId) {
         cancelAnimationFrame(animationId);
@@ -376,8 +455,7 @@
       if (recognition) {
         recognition.stop();
       } else {
-        submitTranscript(latestTranscript);
-        stopMeter();
+        submitRecordedAudio(latestTranscript);
       }
     }
 
@@ -422,12 +500,11 @@
           }
           return;
         }
-        statusText.textContent = event.error === "not-allowed"
-          ? "Microphone permission was blocked."
-          : `Speech recognition paused: ${event.error}`;
-        listening = false;
-        setButtonState("idle");
-        stopMeter();
+        if (listening) {
+          listening = false;
+          statusText.textContent = "Using offline speech recognition...";
+          submitRecordedAudio(currentTranscript());
+        }
       };
 
       instance.onend = () => {
@@ -440,14 +517,7 @@
           return;
         }
         const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
-        const submitted = submitTranscript(transcript);
-        if (!submitted) {
-          statusText.textContent = heardSpeech
-            ? "I heard audio, but the browser did not return text. Try Chrome or Edge over HTTPS."
-            : "I did not catch speech yet.";
-          setButtonState("idle");
-        }
-        stopMeter();
+        submitRecordedAudio(transcript);
       };
 
       return instance;
@@ -455,10 +525,6 @@
 
     async function startListening() {
       if (listening || interruptPending) return;
-      if (!SpeechRecognition) {
-        statusText.textContent = "Speech recognition works best in Chrome or Edge.";
-        return;
-      }
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         statusText.textContent = "Microphone access is not available in this browser.";
         return;
@@ -479,8 +545,13 @@
 
       try {
         await startMeter();
-        recognition = buildRecognition();
-        recognition.start();
+        startRecorder();
+        if (SpeechRecognition) {
+          recognition = buildRecognition();
+          recognition.start();
+        } else {
+          statusText.textContent = "Listening with offline speech recognition...";
+        }
       } catch (error) {
         console.error(error);
         listening = false;
@@ -521,6 +592,7 @@
         recognition.abort();
         recognition = null;
       }
+      discardRecording();
       stopMeter();
       setButtonState("idle");
       statusText.textContent = "Conversation paused.";
@@ -543,6 +615,7 @@
       statusText.textContent = "Listening...";
 
       if (recognitionAlreadyRunning) {
+        startRecorder();
         interruptPending = false;
         return;
       }

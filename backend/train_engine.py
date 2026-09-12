@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
 import chromadb
@@ -12,10 +14,12 @@ from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openpyxl import load_workbook
 from pptx import Presentation
+
+from services.embedding_service import PromptedOllamaEmbeddings, embedding_profile
+from services.lexical_service import add_lexical_chunks, delete_lexical_ids, reset_lexical_collection
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -23,7 +27,7 @@ REPO_ROOT = PROJECT_ROOT
 RAW_DATA_DIR = REPO_ROOT / "raw_data_files"
 VECTOR_DB_DIR = REPO_ROOT / "vector_db"
 MANIFEST_FILE_NAME = "ingestion_manifest.json"
-INGESTION_VERSION = 5
+INGESTION_VERSION = 6
 OCR_WARNING_KEYS: set[str] = set()
 TEXT_EXTENSIONS = {
     ".txt",
@@ -74,10 +78,12 @@ def resolve_path(value: str | None, default: Path) -> Path:
 
 
 def chunk_settings() -> dict:
+    profile = embedding_profile()
     return {
         "version": INGESTION_VERSION,
         "embedding_provider": "ollama",
-        "embedding_model": os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma"),
+        "embedding_model": profile.model,
+        "embedding_profile": profile.as_dict(),
         "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         "chunk_size": int(os.getenv("CHUNK_SIZE", "850")),
         "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "150")),
@@ -435,7 +441,7 @@ def manifest_path(vector_db_dir: Path) -> Path:
 def load_manifest(vector_db_dir: Path) -> dict:
     path = manifest_path(vector_db_dir)
     if not path.exists():
-        return {"settings": chunk_settings(), "files": {}}
+        return {"settings": {}, "files": {}}
 
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -445,11 +451,16 @@ def load_manifest(vector_db_dir: Path) -> dict:
 
 def save_manifest(vector_db_dir: Path, manifest: dict) -> None:
     path = manifest_path(vector_db_dir)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path.replace(path)
 
 
-def create_vector_store(reset_collection: bool = False) -> tuple[Chroma, Path, str]:
-    collection_name = os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
+def create_vector_store(
+    collection_name: str | None = None,
+    reset_collection: bool = False,
+) -> tuple[Chroma, Path, str]:
+    collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
     vector_db_dir = resolve_path(os.getenv("VECTOR_DB_DIR"), VECTOR_DB_DIR)
 
     vector_db_dir.mkdir(parents=True, exist_ok=True)
@@ -460,8 +471,9 @@ def create_vector_store(reset_collection: bool = False) -> tuple[Chroma, Path, s
         except Exception:
             pass
 
-    embeddings = OllamaEmbeddings(
-        model=os.getenv("OLLAMA_EMBED_MODEL", "embeddinggemma"),
+    profile = embedding_profile()
+    embeddings = PromptedOllamaEmbeddings(
+        profile=profile,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         keep_alive=int(os.getenv("OLLAMA_KEEP_ALIVE", "1800")),
     )
@@ -469,7 +481,12 @@ def create_vector_store(reset_collection: bool = False) -> tuple[Chroma, Path, s
         client=client,
         collection_name=collection_name,
         embedding_function=embeddings,
-        collection_metadata={"hnsw:space": "cosine"},
+        collection_metadata={
+            "hnsw:space": "cosine",
+            "embedding_model": profile.model,
+            "embedding_profile": profile.fingerprint,
+            "ingestion_version": INGESTION_VERSION,
+        },
     )
     return vector_store, vector_db_dir, collection_name
 
@@ -479,7 +496,12 @@ def delete_ids(vector_store: Chroma, ids: list[str]) -> None:
         vector_store.delete(ids=ids)
 
 
-def add_chunks(vector_store: Chroma, chunks: list[Document]) -> list[str]:
+def add_chunks(
+    vector_store: Chroma,
+    vector_db_dir: Path,
+    collection_name: str,
+    chunks: list[Document],
+) -> list[str]:
     batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
     ids = [chunk_id(chunk) for chunk in chunks]
 
@@ -487,7 +509,58 @@ def add_chunks(vector_store: Chroma, chunks: list[Document]) -> list[str]:
         end = start + batch_size
         vector_store.add_documents(chunks[start:end], ids=ids[start:end])
         print(f"Embedded chunks {start + 1}-{min(end, len(chunks))} of {len(chunks)}")
+    add_lexical_chunks(vector_db_dir, collection_name, chunks, ids)
     return ids
+
+
+def versioned_collection_name(base_name: str, settings: dict, force_rebuild: bool) -> str:
+    settings_fingerprint = hashlib.sha1(
+        json.dumps(settings, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:12]
+    name = f"{base_name}__{settings_fingerprint}__v{INGESTION_VERSION}"
+    if force_rebuild:
+        name = f"{name}__{int(time.time())}"
+    return name[:63]
+
+
+def prepare_file(
+    path: Path,
+    raw_data_dir: Path,
+) -> tuple[list[Document], list[Document], str | None]:
+    try:
+        documents = load_file(path, raw_data_dir)
+        return documents, split_documents(documents) if documents else [], None
+    except Exception as exc:
+        return [], [], str(exc)
+
+
+def iter_prepared_files(work_items: list[tuple], raw_data_dir: Path):
+    workers = max(1, min(8, int(os.getenv("INGESTION_WORKERS", "2"))))
+    if workers == 1:
+        for item in work_items:
+            yield item, prepare_file(item[1], raw_data_dir)
+        return
+
+    iterator = iter(work_items)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="texmin-ingest") as executor:
+        in_flight = {}
+        for _ in range(workers * 2):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            in_flight[executor.submit(prepare_file, item[1], raw_data_dir)] = item
+
+        while in_flight:
+            completed, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in completed:
+                item = in_flight.pop(future)
+                yield item, future.result()
+                try:
+                    next_item = next(iterator)
+                except StopIteration:
+                    continue
+                in_flight[executor.submit(prepare_file, next_item[1], raw_data_dir)] = next_item
 
 
 def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
@@ -499,23 +572,50 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
         raise RuntimeError(f"No supported documents found in {raw_data_dir}")
 
     current_settings = chunk_settings()
-    vector_store, vector_db_dir, _ = create_vector_store(reset_collection=force_rebuild)
+    vector_db_dir = resolve_path(os.getenv("VECTOR_DB_DIR"), VECTOR_DB_DIR)
+    vector_db_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(vector_db_dir)
     settings_changed = manifest.get("settings") != current_settings
+    base_collection_name = os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
+    building_new_collection = force_rebuild or settings_changed
 
-    if settings_changed and not force_rebuild:
-        print("Embedding settings changed. Rebuilding the collection once for consistency.")
-        vector_store, vector_db_dir, _ = create_vector_store(reset_collection=True)
-        manifest = {"settings": current_settings, "files": {}}
-    elif force_rebuild:
-        manifest = {"settings": current_settings, "files": {}}
+    if building_new_collection:
+        collection_name = versioned_collection_name(
+            base_collection_name,
+            current_settings,
+            force_rebuild,
+        )
+        print(
+            "Building a new collection before switching traffic: "
+            f"{collection_name}. The current collection remains available."
+        )
+        vector_store, vector_db_dir, _ = create_vector_store(
+            collection_name=collection_name,
+            reset_collection=True,
+        )
+        reset_lexical_collection(vector_db_dir, collection_name)
+        manifest = {
+            "schema_version": 2,
+            "settings": current_settings,
+            "active_collection": collection_name,
+            "files": {},
+        }
+    else:
+        collection_name = manifest.get("active_collection") or base_collection_name
+        vector_store, vector_db_dir, _ = create_vector_store(collection_name=collection_name)
 
     manifest.setdefault("files", {})
+    manifest.setdefault("failures", {})
     current_files = {raw_relative_source(path, raw_data_dir): path for path in raw_files}
 
     stale_sources = sorted(set(manifest["files"]) - set(current_files))
     for source in stale_sources:
         delete_ids(vector_store, manifest["files"][source].get("ids", []))
+        delete_lexical_ids(
+            vector_db_dir,
+            collection_name,
+            manifest["files"][source].get("ids", []),
+        )
         del manifest["files"][source]
         print(f"Removed stale embeddings: {source}")
 
@@ -523,30 +623,67 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
     skipped_count = 0
     document_count = 0
     chunk_count = 0
+    failed_count = 0
+    work_items = []
 
     for source, path in sorted(current_files.items()):
-        current_hash = file_hash(path)
         previous_entry = manifest["files"].get(source)
-        if previous_entry and previous_entry.get("hash") == current_hash:
+        stat = path.stat()
+        if (
+            previous_entry
+            and env_flag("FAST_FILE_CHECK", True)
+            and previous_entry.get("size") == stat.st_size
+            and previous_entry.get("mtime_ns") == stat.st_mtime_ns
+        ):
             skipped_count += 1
             continue
 
+        current_hash = file_hash(path)
+        if previous_entry and previous_entry.get("hash") == current_hash:
+            previous_entry["size"] = stat.st_size
+            previous_entry["mtime_ns"] = stat.st_mtime_ns
+            skipped_count += 1
+            continue
+
+        work_items.append((source, path, current_hash, stat.st_size, stat.st_mtime_ns))
+
+    print(
+        f"Preparing {len(work_items)} changed files with "
+        f"{max(1, min(8, int(os.getenv('INGESTION_WORKERS', '2'))))} extraction workers."
+    )
+    for item, prepared in iter_prepared_files(work_items, raw_data_dir):
+        source, path, current_hash, file_size, mtime_ns = item
+        documents, chunks, preparation_error = prepared
+        previous_entry = manifest["files"].get(source)
+
+        if preparation_error:
+            failed_count += 1
+            manifest["failures"][source] = preparation_error
+            print(f"Could not prepare {source}: {preparation_error}")
+            continue
+        manifest["failures"].pop(source, None)
+
         if previous_entry:
             delete_ids(vector_store, previous_entry.get("ids", []))
+            delete_lexical_ids(
+                vector_db_dir,
+                collection_name,
+                previous_entry.get("ids", []),
+            )
 
-        documents = load_file(path, raw_data_dir)
         if not documents:
             manifest["files"].pop(source, None)
             continue
 
-        chunks = split_documents(documents)
         if not chunks:
             manifest["files"].pop(source, None)
             continue
 
-        ids = add_chunks(vector_store, chunks)
+        ids = add_chunks(vector_store, vector_db_dir, collection_name, chunks)
         manifest["files"][source] = {
             "hash": current_hash,
+            "size": file_size,
+            "mtime_ns": mtime_ns,
             "ids": ids,
             "document_count": len(documents),
             "chunk_count": len(chunks),
@@ -555,13 +692,27 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
         document_count += len(documents)
         chunk_count += len(chunks)
         print(f"Updated embeddings: {source} ({len(chunks)} chunks)")
+        if not building_new_collection:
+            manifest["settings"] = current_settings
+            manifest["schema_version"] = 2
+            manifest["active_collection"] = collection_name
+            save_manifest(vector_db_dir, manifest)
+
+    if building_new_collection and failed_count:
+        raise RuntimeError(
+            f"The candidate index has {failed_count} failed source files and was not promoted. "
+            "Fix the reported extraction errors and rerun ingestion."
+        )
 
     manifest["settings"] = current_settings
+    manifest["schema_version"] = 2
+    manifest["active_collection"] = collection_name
     save_manifest(vector_db_dir, manifest)
     print(
         "Training complete. "
         f"Updated {changed_count} files, skipped {skipped_count} unchanged files, "
-        f"removed {len(stale_sources)} stale files, embedded {document_count} documents "
+        f"failed {failed_count} files, removed {len(stale_sources)} stale files, "
+        f"embedded {document_count} documents "
         f"into {chunk_count} chunks."
     )
 
@@ -579,7 +730,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-rebuild",
         action="store_true",
-        help="Delete and rebuild the whole Chroma collection.",
+        help="Build a fresh versioned collection and promote it atomically.",
     )
     return parser.parse_args()
 

@@ -1,6 +1,6 @@
 services:
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.34.0
     container_name: texmin-ollama
     restart: unless-stopped
     volumes:
@@ -9,6 +9,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_KV_CACHE_TYPE: q8_0
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_NUM_PARALLEL: "2"
     deploy:
       resources:
         reservations:
@@ -16,14 +20,47 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
-  backend:
+  ollama-model-init:
+    image: ollama/ollama:0.34.0
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama pull "$${OLLAMA_CHAT_MODEL}" && ollama pull "$${OLLAMA_EMBED_MODEL}"
+
+  backend-model-init:
     build:
       context: ./backend
-    container_name: texmin-backend
-    restart: unless-stopped
     depends_on:
-      - ollama
+      ollama-model-init:
+        condition: service_completed_successfully
+    env_file:
+      - ./backend/.env
+    environment:
+      OFFLINE_MODE: "false"
+      HF_HOME: /models/huggingface
+      WHISPER_MODEL_DIR: /models/whisper
+    volumes:
+      - ai_models:/models
+    command: ["python", "scripts/provision_models.py"]
+
+  index-init:
+    build:
+      context: ./backend
+    depends_on:
+      backend-model-init:
+        condition: service_completed_successfully
     env_file:
       - ./backend/.env
     environment:
@@ -33,12 +70,43 @@ services:
     volumes:
       - ./backend/raw_data_files:/app/raw_data_files:ro
       - ./backend/vector_db:/app/vector_db
+    command: ["python", "train_engine.py"]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: texmin-backend
+    restart: unless-stopped
+    depends_on:
+      index-init:
+        condition: service_completed_successfully
+    env_file:
+      - ./backend/.env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      RAW_DATA_DIR: /app/raw_data_files
+      VECTOR_DB_DIR: /app/vector_db
+      HF_HOME: /models/huggingface
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      WHISPER_MODEL_DIR: /models/whisper
+    volumes:
+      - ./backend/raw_data_files:/app/raw_data_files:ro
+      - ./backend/vector_db:/app/vector_db
+      - ai_models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready').read()"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 180s
 
   frontend:
     build:
@@ -53,7 +121,7 @@ services:
       QA_API_URL: http://backend:8000
       AVATAR_MODEL_FILE: assets/scene.gltf
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"]
       interval: 30s
@@ -61,5 +129,25 @@ services:
       retries: 5
       start_period: 30s
 
+  gateway:
+    image: caddy:2.10.2-alpine
+    container_name: texmin-gateway
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   ollama_models:
+  ai_models:
+  caddy_data:
+  caddy_config:

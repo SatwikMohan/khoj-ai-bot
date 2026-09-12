@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from html import escape
 
@@ -14,8 +15,13 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
-DEFAULT_TTS_VOICE = os.getenv("TTS_VOICE", os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural"))
-DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "edge").strip().lower()
+DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
+DEFAULT_TTS_VOICE = os.getenv(
+    "TTS_VOICE",
+    os.getenv("KOKORO_VOICE", "af_heart")
+    if DEFAULT_TTS_ENGINE in {"auto", "kokoro"}
+    else os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural"),
+)
 DEFAULT_AUDIO_MIME = "audio/mpeg" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "audio/wav"
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_AVATAR_MODEL_PATH = APP_DIR / "assets" / "avatar.glb"
@@ -41,7 +47,7 @@ MODEL_SEARCH_PATTERNS = (
     "*.obj",
 )
 
-VOICE_OPTIONS = {
+ONLINE_VOICE_OPTIONS = {
     "English India - Neerja": "en-IN-NeerjaNeural",
     "English India - Prabhat": "en-IN-PrabhatNeural",
     "English multilingual - Ava": "en-US-AvaMultilingualNeural",
@@ -59,6 +65,19 @@ VOICE_OPTIONS = {
     "Chinese Mandarin - Xiaoxiao": "zh-CN-XiaoxiaoNeural",
     "Japanese Japan - Nanami": "ja-JP-NanamiNeural",
 }
+OFFLINE_VOICE_OPTIONS = {
+    "Natural English - Heart": "af_heart",
+    "Natural English - Bella": "af_bella",
+    "Natural English - Nicole": "af_nicole",
+    "Natural English - Adam": "am_adam",
+    "Natural British English - Emma": "bf_emma",
+    "Natural British English - George": "bm_george",
+}
+VOICE_OPTIONS = (
+    OFFLINE_VOICE_OPTIONS
+    if DEFAULT_TTS_ENGINE in {"auto", "kokoro", "indicf5", "indic-f5"}
+    else ONLINE_VOICE_OPTIONS
+)
 CUSTOM_VOICE_LABEL = "Custom voice name"
 TONE_OPTIONS = ["neutral", "warm", "cheerful", "calm", "serious", "energetic", "custom"]
 
@@ -1935,7 +1954,12 @@ def render_speech_to_text_control() -> None:
 
 
 def render_voice_query_component() -> str | None:
-    value = voice_query_component(default=None, key="texmin_voice_query", height=92)
+    value = voice_query_component(
+        default=None,
+        key="texmin_voice_query",
+        height=92,
+        server_stt=True,
+    )
     if not value:
         return None
 
@@ -1945,12 +1969,51 @@ def render_voice_query_component() -> str | None:
     else:
         query_id = str(value.get("id", ""))
         text = str(value.get("text", "")).strip()
+        audio_b64 = str(value.get("audio_b64", ""))
+        audio_mime = str(value.get("audio_mime", "audio/webm"))
+        if audio_b64 and query_id != st.session_state.last_voice_query_id:
+            text, transcription_error = ask_stt(audio_b64, audio_mime)
+            if transcription_error:
+                st.warning(transcription_error)
 
     if not text or query_id == st.session_state.last_voice_query_id:
         return None
 
     st.session_state.last_voice_query_id = query_id
     return text
+
+
+def ask_stt(audio_b64: str, audio_mime: str) -> tuple[str, str | None]:
+    url = st.session_state.api_url.rstrip("/") + "/stt/transcribe"
+    try:
+        audio = base64.b64decode(audio_b64, validate=True)
+    except (ValueError, TypeError):
+        return "", "The microphone recording was invalid. Please try again."
+
+    extension_by_mime = {
+        "audio/webm": ".webm",
+        "audio/ogg": ".ogg",
+        "audio/wav": ".wav",
+        "audio/mp4": ".m4a",
+    }
+    base_mime = audio_mime.split(";", 1)[0].lower()
+    extension = extension_by_mime.get(base_mime, ".webm")
+    try:
+        response = requests.post(
+            url,
+            files={"audio": (f"recording{extension}", audio, base_mime)},
+            data={"language": ""},
+            timeout=120,
+        )
+    except requests.RequestException as exc:
+        return "", f"Offline speech recognition could not connect to {url}. {exc}"
+    if not response.ok:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        return "", f"Offline speech recognition failed: {detail}"
+    return str(response.json().get("text", "")).strip(), None
 
 
 def resume_voice_listener_without_audio() -> None:
@@ -2160,6 +2223,45 @@ def ask_api_stream(
         else None
     )
     queue_sender = st.container() if queue_id else None
+    tts_executor: ThreadPoolExecutor | None = None
+    tts_futures: dict[int, tuple[Future, str]] = {}
+    next_audio_sequence = 0
+    tts_config = _current_tts_config()
+
+    def submit_tts(segment: str) -> None:
+        nonlocal queue_sequence, tts_executor
+        if not queue_id:
+            return
+        if tts_executor is None:
+            tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="texmin-tts")
+        sequence = queue_sequence
+        queue_sequence += 1
+        tts_futures[sequence] = (tts_executor.submit(_request_tts, segment, tts_config), segment)
+
+    def flush_tts(block: bool = False) -> None:
+        nonlocal next_audio_sequence, audio_error, audio_mime
+        if queue_sender is None:
+            return
+        while next_audio_sequence in tts_futures:
+            future, segment = tts_futures[next_audio_sequence]
+            if not block and not future.done():
+                break
+            segment_audio, segment_mime, segment_error = future.result()
+            del tts_futures[next_audio_sequence]
+            if segment_error:
+                audio_error = segment_error
+            elif segment_audio:
+                audio_chunks.append(segment_audio)
+                audio_mime = segment_mime
+                _send_avatar_queue_event(
+                    queue_sender,
+                    queue_id,
+                    next_audio_sequence,
+                    segment_audio,
+                    segment,
+                    segment_mime,
+                )
+            next_audio_sequence += 1
 
     if queue_id:
         with avatar_container:
@@ -2217,7 +2319,7 @@ def ask_api_stream(
                 return "", [], f"API returned {response.status_code}: {detail}", None, DEFAULT_AUDIO_MIME, None
 
             render_streaming_message(container, "", status)
-            for line in response.iter_lines(decode_unicode=True):
+            for line in response.iter_lines(decode_unicode=True, chunk_size=1):
                 if not line or not line.startswith("data:"):
                     continue
 
@@ -2239,29 +2341,19 @@ def ask_api_stream(
                     if queue_id and not audio_error:
                         segments, speech_buffer = _split_speakable_prefix(speech_buffer)
                         for segment in segments:
-                            segment_audio, segment_mime, segment_error = ask_tts(segment)
-                            if segment_error:
-                                audio_error = segment_error
-                                break
-                            if segment_audio and queue_sender is not None:
-                                audio_chunks.append(segment_audio)
-                                audio_mime = segment_mime
-                                _send_avatar_queue_event(
-                                    queue_sender,
-                                    queue_id,
-                                    queue_sequence,
-                                    segment_audio,
-                                    segment,
-                                    segment_mime,
-                                )
-                                queue_sequence += 1
+                            submit_tts(segment)
+                        flush_tts()
                 elif event_type == "done":
                     answer = event.get("answer") or answer
                     sources = event.get("sources", [])
                     render_streaming_message(container, answer, status)
                 elif event_type == "error":
+                    if tts_executor is not None:
+                        tts_executor.shutdown(wait=False, cancel_futures=True)
                     return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
     except requests.RequestException as exc:
+        if tts_executor is not None:
+            tts_executor.shutdown(wait=False, cancel_futures=True)
         return "", [], f"Could not reach the FastAPI server at {url}. {exc}", None, audio_mime, audio_error
 
     if queue_id and queue_sender is not None:
@@ -2269,25 +2361,14 @@ def ask_api_stream(
         if not remaining_speech and not audio_chunks:
             remaining_speech = answer.strip()
         if remaining_speech and not audio_error:
-            segment_audio, segment_mime, segment_error = ask_tts(remaining_speech)
-            if segment_error:
-                audio_error = segment_error
-            elif segment_audio:
-                audio_chunks.append(segment_audio)
-                audio_mime = segment_mime
-                _send_avatar_queue_event(
-                    queue_sender,
-                    queue_id,
-                    queue_sequence,
-                    segment_audio,
-                    remaining_speech,
-                    segment_mime,
-                )
-                queue_sequence += 1
+            submit_tts(remaining_speech)
+        flush_tts(block=True)
+        if tts_executor is not None:
+            tts_executor.shutdown(wait=True, cancel_futures=False)
         _send_avatar_queue_event(
             queue_sender,
             queue_id,
-            queue_sequence,
+            next_audio_sequence,
             final=True,
         )
         audio_bytes = audio_chunks[0] if len(audio_chunks) == 1 else None
@@ -2307,24 +2388,36 @@ def ask_api_stream(
     return answer.strip(), sources, None, audio_bytes, audio_mime, audio_error
 
 
-def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:
-    if not st.session_state.tts_enabled:
-        return None, DEFAULT_AUDIO_MIME, None
-
-    voice_id = st.session_state.tts_voice_id.strip()
-    if not voice_id:
-        return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
-
-    url = st.session_state.api_url.rstrip("/") + "/tts/speech"
-    payload = {
-        "text": text,
-        "voice_id": voice_id,
+def _current_tts_config() -> dict:
+    return {
+        "enabled": bool(st.session_state.tts_enabled),
+        "voice_id": st.session_state.tts_voice_id.strip(),
         "tone": st.session_state.tts_tone,
         "rate": st.session_state.tts_rate.strip() or "+0%",
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
+        "max_words": st.session_state.tts_max_words,
+        "api_url": st.session_state.api_url.rstrip("/"),
+    }
+
+
+def _request_tts(text: str, config: dict) -> tuple[bytes | None, str, str | None]:
+    if not config["enabled"]:
+        return None, DEFAULT_AUDIO_MIME, None
+
+    voice_id = config["voice_id"]
+    if not voice_id:
+        return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
+
+    url = config["api_url"] + "/tts/speech"
+    payload = {
+        "text": text,
+        "voice_id": voice_id,
+        "tone": config["tone"],
+        "rate": config["rate"],
+        "pitch": config["pitch"],
         "volume": "+0%",
         "response_format": "mp3" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "wav",
-        "max_words": st.session_state.tts_max_words,
+        "max_words": config["max_words"],
     }
 
     try:
@@ -2341,6 +2434,10 @@ def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:
 
     audio_mime = response.headers.get("content-type", DEFAULT_AUDIO_MIME).split(";", 1)[0]
     return response.content, audio_mime or DEFAULT_AUDIO_MIME, None
+
+
+def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:
+    return _request_tts(text, _current_tts_config())
 
 
 def get_voice_query_param() -> str | None:
