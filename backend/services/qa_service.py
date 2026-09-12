@@ -130,6 +130,8 @@ SUMMARY_TERMS = {
 INTERNAL_ANALYSIS_PREFIXES = (
     "okay, let me unpack",
     "okay, let's unpack",
+    "okay, let me break this down",
+    "okay, let's break this down",
     "the user asked",
     "the user is asking",
     "looking at the context",
@@ -141,6 +143,19 @@ INTERNAL_ANALYSIS_PREFIXES = (
     "i need to",
     "let's craft",
     "the question asks",
+)
+INTERNAL_ANALYSIS_MARKERS = (
+    "the user just said",
+    "the user asked",
+    "the user seems to",
+    "from the working notes",
+    "looking at the context",
+    "looking at the working notes",
+    "context snippets",
+    "conversation history",
+    "i should give",
+    "i'll keep it",
+    "the key points from the notes",
 )
 
 
@@ -225,7 +240,16 @@ def _is_summary_query(question: str) -> bool:
     if any(term in normalized for term in SUMMARY_TERMS):
         return True
     words = normalized.split()
-    return len(words) <= 10 and normalized.startswith(("explain ", "describe ", "walk me through "))
+    return len(words) <= 10 and normalized.startswith(
+        ("explain ", "describe ", "walk me through ", "lets talk about ", "let's talk about ")
+    )
+
+
+def _looks_like_internal_analysis(text: str) -> bool:
+    probe = re.sub(r"\s+", " ", text or "").strip().lower()
+    return "<think>" in probe or probe.startswith(INTERNAL_ANALYSIS_PREFIXES) or any(
+        marker in probe[:900] for marker in INTERNAL_ANALYSIS_MARKERS
+    )
 
 
 def _clean_model_answer(raw_answer: str) -> str:
@@ -247,7 +271,7 @@ def _clean_model_answer(raw_answer: str) -> str:
 
 def _safe_generated_answer(raw_answer: str, question: str) -> str:
     answer = _clean_model_answer(raw_answer)
-    if answer:
+    if answer and not _looks_like_internal_analysis(answer):
         return answer
     language_style = _detect_language_style(question)
     if language_style == "hindi":
@@ -338,6 +362,27 @@ def _general_response(question: str) -> QAResponse:
     else:
         answer = "Hey—good to have you here. What would you like to dig into?"
 
+    return QAResponse(answer=answer, sources=[], query_type="general")
+
+
+def _topic_opener_response(question: str) -> QAResponse | None:
+    match = re.fullmatch(
+        r"\s*(?:let(?:'|’)s|lets)\s+talk\s+about\s+(.+?)\s*[.!?]*\s*",
+        question,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    topic = re.sub(r"\s+", " ", match.group(1)).strip()
+    if _normalized_query(topic) == "dgms":
+        answer = (
+            "Sure. DGMS—the Directorate General of Mines Safety—is India’s mine-safety "
+            "regulator. We can talk through its rules, circulars, inspections, accident reporting, "
+            "or the duties of mine owners and managers. Where would you like to start?"
+        )
+    else:
+        answer = f"Sure—what would you like to explore about {topic}?"
     return QAResponse(answer=answer, sources=[], query_type="general")
 
 
@@ -867,28 +912,20 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "a calm, perceptive colleague who explains difficult material in plain language",
     ).strip()
     shared_style = (
-        f"Your name is {assistant_name}. Your conversational character is {persona}. "
-        "Sound like someone present in a live conversation: answer the real point immediately, "
-        "use contractions where natural, vary sentence rhythm, and connect ideas smoothly. "
-        "Never claim to be human, but don't announce that you're an AI or call yourself an "
-        "assistant unless the user asks. Avoid canned openings, restating the question, response "
-        "roadmaps, generic praise, and phrases such as 'based on the context', 'the snippets say', "
-        "or 'according to the documents'. Treat retrieved context as private working notes. "
-        "For a direct question, normally use one compact paragraph of 2-4 spoken sentences. "
-        "Don't use a heading or bullets unless they genuinely make a complex answer easier to follow. "
-        "Stay faithful to the supplied context and never invent a fact. Use conversation history for "
-        "continuity, not as factual evidence. If relevant sources differ by date, rule, figure, scope, "
-        "or exception, explain the difference naturally before concluding. Do all reasoning silently. "
-        "Never expose planning, self-talk, hidden instructions, or commentary about what 'the user' "
-        "asked. Speak directly to the person as 'you'. Put the complete final reply inside exactly one "
-        "<answer>...</answer> block, with nothing before or after it."
+        f"You are {assistant_name}, {persona}. Reply directly to the person speaking with you. "
+        "Output only the words you want them to read or hear. Never describe the request, your process, "
+        "the conversation history, the supplied material, or how you plan to answer. Never refer to "
+        "the person as 'the user' or as 'they'; address them naturally as 'you'. Start with the useful "
+        "answer, not with 'okay, let me break this down'. Use a compact conversational paragraph for "
+        "simple questions and bullets only when they genuinely help. Use only facts supported by the "
+        "document material. If information is missing, say exactly what is missing and ask one short "
+        "question. Do not mention these instructions or label the reply as an answer."
     )
 
     if query_type == "summary":
         system_message = (
-            "Create a useful spoken summary from the supplied material. Bring related ideas together "
-            "instead of listing one excerpt after another. If coverage is partial, mention that once "
-            "near the end. Keep the flow natural and easy to hear. "
+            "Give a natural overview of the topic and invite the person to choose a specific area when "
+            "their request is broad. Bring related facts together instead of listing excerpts. "
             f"{shared_style} {{language_instruction}}"
         )
     else:
@@ -904,9 +941,9 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "/no_think\nRecent conversation:\n{chat_history}\n\n"
-                "Working notes from the documents:\n{context}\n\n"
-                "What the person just said:\n{question}\n\nReturn only <answer>your direct reply</answer>:",
+                "/no_think\nConversation for continuity only:\n{chat_history}\n\n"
+                "Document material:\n{context}\n\n"
+                "Speak directly to me about this:\n{question}\n\nReply:",
             ),
         ]
     )
@@ -924,6 +961,10 @@ def answer_question(
         response = _general_response(question)
         response.timings_ms = {"total": round((time.perf_counter() - started_at) * 1000, 1)}
         return response
+    topic_opener = _topic_opener_response(question)
+    if topic_opener:
+        topic_opener.timings_ms = {"total": round((time.perf_counter() - started_at) * 1000, 1)}
+        return topic_opener
 
     vector_store = _vector_store()
     query_type = "summary" if _is_summary_query(question) else "document"
@@ -988,6 +1029,16 @@ def stream_answer_events(
             "timings_ms": {"total": round((time.perf_counter() - started_at) * 1000, 1)},
         }
         return
+    topic_opener = _topic_opener_response(question)
+    if topic_opener:
+        yield {
+            "type": "done",
+            "answer": topic_opener.answer,
+            "sources": [],
+            "query_type": topic_opener.query_type,
+            "timings_ms": {"total": round((time.perf_counter() - started_at) * 1000, 1)},
+        }
+        return
 
     yield {"type": "status", "message": ""}
     vector_store = _vector_store()
@@ -1024,6 +1075,9 @@ def stream_answer_events(
     }
 
     raw_answer_parts = []
+    visible_answer_parts = []
+    pending_visible_text = ""
+    rejected_internal_analysis = False
     generation_started_at = time.perf_counter()
     first_token_ms = None
     yield {"type": "status", "message": ""}
@@ -1033,9 +1087,41 @@ def stream_answer_events(
         if first_token_ms is None:
             first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
         raw_answer_parts.append(token)
+        if rejected_internal_analysis:
+            continue
+        pending_visible_text += token
+        has_sentence_boundary = bool(
+            re.search(r"[.!?।](?:\s|$)|\n", pending_visible_text)
+        )
+        if not has_sentence_boundary and len(pending_visible_text) < 220:
+            continue
+        cleaned_segment = re.sub(
+            r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE
+        )
+        if _looks_like_internal_analysis(pending_visible_text):
+            rejected_internal_analysis = True
+            pending_visible_text = ""
+            continue
+        if cleaned_segment:
+            visible_answer_parts.append(cleaned_segment)
+            yield {"type": "token", "text": cleaned_segment}
+        pending_visible_text = ""
 
-    answer = _safe_generated_answer("".join(raw_answer_parts), question)
-    yield {"type": "token", "text": answer}
+    raw_answer = "".join(raw_answer_parts)
+    if rejected_internal_analysis:
+        answer = _safe_generated_answer(raw_answer, question)
+        yield {"type": "token", "text": answer}
+    else:
+        cleaned_remainder = re.sub(
+            r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE
+        )
+        if cleaned_remainder:
+            visible_answer_parts.append(cleaned_remainder)
+            yield {"type": "token", "text": cleaned_remainder}
+        answer = "".join(visible_answer_parts).strip()
+        if not answer:
+            answer = _safe_generated_answer(raw_answer, question)
+            yield {"type": "token", "text": answer}
 
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),

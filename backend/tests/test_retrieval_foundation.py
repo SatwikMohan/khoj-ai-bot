@@ -14,6 +14,8 @@ from services.qa_service import (
     _history_aware_query,
     _is_general_query,
     _is_summary_query,
+    _looks_like_internal_analysis,
+    _topic_opener_response,
 )
 from services.stt_service import STTEngineError, transcribe_audio
 from services.tts_service import TTSEngineError, _validate_audio
@@ -59,6 +61,16 @@ class ConversationStyleTests(unittest.TestCase):
 
     def test_broad_explanation_uses_summary_retrieval(self):
         self.assertTrue(_is_summary_query("Explain the DGMS rules"))
+
+    def test_topic_opener_addresses_the_person_directly(self):
+        response = _topic_opener_response("lets talk about dgms")
+        self.assertIsNotNone(response)
+        self.assertIn("DGMS", response.answer)
+        self.assertNotIn("the user", response.answer.lower())
+
+    def test_narrated_planning_is_detected_before_streaming(self):
+        leaked = "Okay, let me break this down. The user just said let's talk about DGMS."
+        self.assertTrue(_looks_like_internal_analysis(leaked))
 
 
 class LexicalIndexTests(unittest.TestCase):
