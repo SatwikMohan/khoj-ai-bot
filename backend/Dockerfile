@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl espeak libespeak1 \
+    && apt-get install -y --no-install-recommends build-essential curl espeak libespeak1 tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

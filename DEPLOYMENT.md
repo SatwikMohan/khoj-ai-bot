@@ -54,5 +54,7 @@ python -m streamlit run app.py
 
 For local non-Docker runs, set `OLLAMA_BASE_URL=http://localhost:11434` and `QA_API_URL=http://127.0.0.1:8000`.
 The QA API sends recent chat history with each question, but the backend trims it before prompting so document context still gets most of the token budget.
+Document ingestion OCRs scanned PDF pages and standalone image files when `OCR_ENABLED=true`.
+The backend Docker image includes Tesseract with English and Hindi language data; for local non-Docker runs, install Tesseract separately and keep it on `PATH`.
 Text-to-speech defaults to `TTS_ENGINE=local`, which uses the operating system's offline voices.
 Use `TTS_ENGINE=edge` only if you explicitly want Edge TTS and have internet access.

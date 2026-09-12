@@ -12,6 +12,9 @@ chromadb
 cryptography>=3.1
 fonttools
 pypdf
+Pillow
+pytesseract
+PyMuPDF
 docx2txt
 openpyxl
 python-pptx

@@ -8,8 +8,8 @@ class ChatMessage(BaseModel):
 
 class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="User question for the QA bot.")
-    top_k: int = Field(8, ge=1, le=10, description="Number of context chunks to retrieve.")
-    temperature: float = Field(0.55, ge=0, le=1, description="Controls response warmth/variation.")
+    top_k: int = Field(3, ge=1, le=10, description="Number of context chunks to retrieve.")
+    temperature: float = Field(0.35, ge=0, le=1, description="Controls response warmth/variation.")
     chat_history: list[ChatMessage] = Field(
         default_factory=list,
         description="Recent conversation turns used only to interpret follow-up questions.",

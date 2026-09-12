@@ -17,11 +17,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
 DEFAULT_VECTOR_DB_DIR = REPO_ROOT / "vector_db"
 DEFAULT_RELEVANCE_THRESHOLD = 0.15
-DEFAULT_CONTEXT_MAX_CHARS = 24000
-DEFAULT_RETRIEVAL_FETCH_K = 60
-DEFAULT_CHAT_HISTORY_MAX_TURNS = 8
-DEFAULT_CHAT_HISTORY_MAX_CHARS = 2400
-DEFAULT_CHAT_HISTORY_MESSAGE_CHARS = 520
+DEFAULT_CONTEXT_MAX_CHARS = 8000
+DEFAULT_RETRIEVAL_FETCH_K = 16
+DEFAULT_CHAT_HISTORY_MAX_TURNS = 4
+DEFAULT_CHAT_HISTORY_MAX_CHARS = 1200
+DEFAULT_CHAT_HISTORY_MESSAGE_CHARS = 320
 DEFAULT_MIN_RETRIEVED_TEXT_CHARS = 40
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -298,9 +298,10 @@ def _chat_llm(model: str, base_url: str, temperature: float) -> ChatOllama:
     return ChatOllama(
         model=model,
         base_url=base_url,
+        reasoning=False,
         temperature=temperature,
         keep_alive=_ollama_keep_alive(),
-        num_predict=_env_int("OLLAMA_NUM_PREDICT", 900),
+        num_predict=_env_int("OLLAMA_NUM_PREDICT", 180),
         num_ctx=_env_int("OLLAMA_NUM_CTX", 8192),
     )
 
@@ -458,11 +459,11 @@ def _format_chat_history(chat_history: list[ChatMessage] | None) -> str:
 
 def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) -> str:
     recent_history = []
-    for message in (chat_history or [])[-6:]:
+    for message in (chat_history or [])[-4:]:
         role = _message_role(message).strip().lower()
         if role not in {"user", "assistant"}:
             continue
-        content = _trim_text(_message_content(message), 240)
+        content = _trim_text(_message_content(message), 180)
         if content:
             recent_history.append(f"{role}: {content}")
 
@@ -470,7 +471,7 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         return question
 
     history_text = " ".join(recent_history)
-    return _trim_text(f"Current question: {question}. Recent conversation: {history_text}", 1600)
+    return _trim_text(f"Current question: {question}. Recent conversation: {history_text}", 900)
 
 
 def _diversity_key(doc) -> tuple[str, str]:
@@ -524,7 +525,7 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
     if not relevant_by_key:
         return _diversify_docs(list(fallback_by_key.values()), top_k)
 
-    if not _env_bool("RETRIEVAL_MMR_ENABLED", True):
+    if not _env_bool("RETRIEVAL_MMR_ENABLED", False):
         return _diversify_docs(list(relevant_by_key.values()), top_k)
 
     lambda_mult = float(os.getenv("MMR_LAMBDA_MULT", "0.25"))
@@ -554,8 +555,8 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
 
 
 def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int):
-    summary_k = max(top_k, int(os.getenv("SUMMARY_CONTEXT_CHUNKS", "14")))
-    fetch_k = max(summary_k, int(os.getenv("SUMMARY_FETCH_K", "80")))
+    summary_k = max(top_k, int(os.getenv("SUMMARY_CONTEXT_CHUNKS", "8")))
+    fetch_k = max(summary_k, int(os.getenv("SUMMARY_FETCH_K", "32")))
     lambda_mult = float(os.getenv("SUMMARY_MMR_LAMBDA_MULT", "0.2"))
     filter_kwargs = _target_filter(question)
     expanded_query = (
@@ -616,8 +617,10 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "Write like a thoughtful person speaking to the user, not like a citation engine. "
         "Do not start with phrases like 'based on the context', 'from the provided context', "
         "'the snippets say', or 'according to the documents'. Start directly with the useful "
-        "answer. Use Markdown naturally: short paragraphs, headings, bullets, bold emphasis, "
-        "and tables when comparison or figures are clearer in a table. Keep it grounded in the "
+        "answer. Be concise by default: aim for fewer than 70 words and 1-3 short sentences for "
+        "direct questions, up to 5 bullets "
+        "only when the user asks for a list, and longer only when the user asks for detail or a "
+        "summary. Use Markdown lightly. Keep it grounded in the "
         "retrieved context and never invent unsupported facts. Use the chat history only to "
         "understand what the user's follow-up refers to; do not treat chat history as evidence. "
         "If multiple context blocks discuss the same subject with different dates, years, figures, "
@@ -631,15 +634,15 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             "You are Texmin AI's warm, expressive document analyst. Summarize only from the "
             "supplied context. For broad summary requests, synthesize the major themes across "
             "the retrieved excerpts. If coverage is partial, mention that briefly near the end "
-            "as a caveat, not as an opening refusal. Make the answer feel alive, clear, and "
-            f"presentation-ready. {shared_style} {{language_instruction}}"
+            "as a caveat, not as an opening refusal. Keep the summary tight and easy to hear. "
+            f"{shared_style} {{language_instruction}}"
         )
     else:
         system_message = (
             "You are Texmin AI's warm, expressive QA assistant. Answer only from the supplied "
             "context. Speak naturally, as if a thoughtful human is explaining it out loud. "
-            "Let sentences feel clear, complete, conversational, and suitable for future lip "
-            f"sync. {shared_style} First identify the exact entity, topic, and constraints the "
+            "Keep sentences clear, complete, conversational, and suitable for voice. "
+            f"{shared_style} First identify the exact entity, topic, and constraints the "
             "user is asking about, using chat history only for pronouns or follow-up context. Then "
             "check whether the retrieved context contains multiple relevant versions or conflicting "
             "details; if it does, present the comparison before drawing a conclusion. If the context "
@@ -662,8 +665,8 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
 
 def answer_question(
     question: str,
-    top_k: int = 8,
-    temperature: float = 0.55,
+    top_k: int = 3,
+    temperature: float = 0.35,
     chat_history: list[ChatMessage] | None = None,
 ) -> QAResponse:
     _load_environment()
@@ -698,8 +701,8 @@ def answer_question(
 
 def stream_answer_events(
     question: str,
-    top_k: int = 8,
-    temperature: float = 0.55,
+    top_k: int = 3,
+    temperature: float = 0.35,
     chat_history: list[ChatMessage] | None = None,
 ) -> Iterator[dict]:
     _load_environment()
@@ -713,7 +716,7 @@ def stream_answer_events(
         }
         return
 
-    yield {"type": "status", "message": "Searching your document library"}
+    yield {"type": "status", "message": ""}
     vector_store = _vector_store()
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _history_aware_query(question, chat_history)
@@ -743,7 +746,7 @@ def stream_answer_events(
     }
 
     answer_parts = []
-    yield {"type": "status", "message": "Writing the answer"}
+    yield {"type": "status", "message": ""}
     for token in chain.stream(inputs):
         if not token:
             continue

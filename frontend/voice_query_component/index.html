@@ -140,8 +140,20 @@
     const storageModeKey = "texmin_voice_conversation";
     const storageResumeKey = "texmin_voice_resume_at";
     const storageWaitingKey = "texmin_voice_waiting_since";
-    const silenceLimitMs = 6500;
+    const storageInterruptKey = "texmin_voice_interrupt_at";
+    const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
+    const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
+    const noTranscriptSilenceLimitMs = 1850;
+    const transcriptSilenceLimitMs = 850;
+    const finalTranscriptSilenceLimitMs = 520;
+    const continuedSpeechThreshold = 0.055;
+    const resumeDelayMs = 40;
+    const resumePollMs = 120;
+    const waitingFreshMs = 300000;
     const voiceThreshold = 0.025;
+    const waitingVoiceThreshold = 0.04;
+    const interruptVoiceThreshold = 0.07;
+    const interruptHoldMs = 160;
 
     let recognition = null;
     let listening = false;
@@ -155,7 +167,11 @@
     let latestTranscript = "";
     let heardSpeech = false;
     let lastVoiceAt = 0;
+    let lastTranscriptAt = 0;
     let lastResumeAt = localStorage.getItem(storageResumeKey) || "";
+    let interruptVoiceStartedAt = 0;
+    let interruptPending = false;
+    let interruptArmed = false;
 
     function sendStreamlitMessage(type, data) {
       window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -202,12 +218,39 @@
       if (state === "listening") {
         label.textContent = "Listening";
       } else if (state === "waiting") {
-        label.textContent = "Waiting";
+        label.textContent = "Interrupt";
       } else {
         label.textContent = localStorage.getItem(storageModeKey) === "on"
           ? "Resume conversation"
           : "Start conversation";
       }
+    }
+
+    function isWaitingForAssistant() {
+      return localStorage.getItem(storageModeKey) === "on"
+        && Boolean(localStorage.getItem(storageWaitingKey));
+    }
+
+    function assistantIsSpeaking() {
+      const speakingAt = Number(localStorage.getItem(storageAvatarSpeakingKey) || 0);
+      return speakingAt > 0 && Date.now() - speakingAt < 1800;
+    }
+
+    function requestAvatarInterrupt() {
+      localStorage.setItem(storageInterruptKey, String(Date.now()));
+    }
+
+    function inputIsSuppressed() {
+      const suppressedUntil = Number(localStorage.getItem(storageInputSuppressedUntilKey) || 0);
+      return suppressedUntil > Date.now();
+    }
+
+    function currentTranscript() {
+      return (latestTranscript || finalTranscript || interimTranscript).trim();
+    }
+
+    function transcriptQuietLimit() {
+      return interimTranscript ? transcriptSilenceLimitMs : finalTranscriptSilenceLimitMs;
     }
 
     function submitTranscript(text) {
@@ -219,7 +262,7 @@
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         text: cleaned,
       });
-      statusText.textContent = "Sending that to KHOJ...";
+      statusText.textContent = "";
       setButtonState("waiting");
       return true;
     }
@@ -237,14 +280,32 @@
         sum += value * value;
       }
       const volume = Math.min(1, Math.sqrt(sum / waveData.length) * 4.2);
+      const now = Date.now();
       if (listening) {
-        const now = Date.now();
-        if (volume > voiceThreshold) {
+        const hasTranscript = Boolean(currentTranscript());
+        if (hasTranscript) {
+          if (volume > continuedSpeechThreshold) {
+            lastTranscriptAt = now;
+          } else if (now - (lastTranscriptAt || lastVoiceAt) > transcriptQuietLimit()) {
+            finishUtterance();
+            return;
+          }
+        } else if (volume > voiceThreshold) {
           heardSpeech = true;
           lastVoiceAt = now;
-        } else if (heardSpeech && now - lastVoiceAt > silenceLimitMs) {
+        } else if (heardSpeech && now - lastVoiceAt > noTranscriptSilenceLimitMs) {
           finishUtterance();
           return;
+        }
+      } else if (isWaitingForAssistant() && !inputIsSuppressed()) {
+        const bargeInThreshold = assistantIsSpeaking() ? interruptVoiceThreshold : waitingVoiceThreshold;
+        if (volume > bargeInThreshold) {
+          if (!interruptVoiceStartedAt) interruptVoiceStartedAt = now;
+          if (now - interruptVoiceStartedAt > interruptHoldMs) {
+            interruptAndListen();
+          }
+        } else {
+          interruptVoiceStartedAt = 0;
         }
       }
 
@@ -273,7 +334,13 @@
     }
 
     async function startMeter() {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       audioContext = new AudioContext();
       analyser = audioContext.createAnalyser();
@@ -305,7 +372,7 @@
     function finishUtterance() {
       if (!listening) return;
       listening = false;
-      statusText.textContent = "I heard you. Let me answer...";
+      statusText.textContent = "";
       if (recognition) {
         recognition.stop();
       } else {
@@ -337,13 +404,24 @@
         latestTranscript = [finalTranscript, interimTranscript].filter(Boolean).join(" ").trim();
         if (latestTranscript) {
           heardSpeech = true;
-          lastVoiceAt = Date.now();
+          const now = Date.now();
+          lastVoiceAt = now;
+          lastTranscriptAt = now;
         }
-        preview.textContent = latestTranscript;
-        statusText.textContent = "Listening...";
+        if (listening) {
+          preview.textContent = latestTranscript;
+          statusText.textContent = "Listening...";
+        }
       };
 
       instance.onerror = (event) => {
+        recognition = null;
+        if (interruptArmed && !listening) {
+          if (event.error !== "no-speech" && event.error !== "aborted") {
+            console.info(`Interrupt recognition paused: ${event.error}`);
+          }
+          return;
+        }
         statusText.textContent = event.error === "not-allowed"
           ? "Microphone permission was blocked."
           : `Speech recognition paused: ${event.error}`;
@@ -353,7 +431,15 @@
       };
 
       instance.onend = () => {
-        const transcript = (finalTranscript || latestTranscript || interimTranscript).trim();
+        recognition = null;
+        if (interruptArmed && !listening) {
+          finalTranscript = "";
+          interimTranscript = "";
+          latestTranscript = "";
+          window.setTimeout(startInterruptMeter, resumeDelayMs);
+          return;
+        }
+        const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
         const submitted = submitTranscript(transcript);
         if (!submitted) {
           statusText.textContent = heardSpeech
@@ -368,6 +454,7 @@
     }
 
     async function startListening() {
+      if (listening || interruptPending) return;
       if (!SpeechRecognition) {
         statusText.textContent = "Speech recognition works best in Chrome or Edge.";
         return;
@@ -380,9 +467,11 @@
       finalTranscript = "";
       interimTranscript = "";
       latestTranscript = "";
+      interruptArmed = false;
       localStorage.removeItem(storageWaitingKey);
       heardSpeech = false;
       lastVoiceAt = Date.now();
+      lastTranscriptAt = 0;
       preview.textContent = "";
       listening = true;
       setButtonState("listening");
@@ -401,10 +490,33 @@
       }
     }
 
+    async function startInterruptMeter() {
+      if (listening || interruptPending || !isWaitingForAssistant()) return;
+      try {
+        interruptArmed = true;
+        if (!mediaStream) await startMeter();
+        if (!isWaitingForAssistant() || listening) return;
+        if (SpeechRecognition && !recognition) {
+          finalTranscript = "";
+          interimTranscript = "";
+          latestTranscript = "";
+          recognition = buildRecognition();
+          recognition.start();
+        }
+        setButtonState("waiting");
+        statusText.textContent = assistantIsSpeaking()
+          ? "KHOJ is speaking. Speak or tap to interrupt."
+          : "Speak anytime. I can catch the next question.";
+      } catch (error) {
+        console.info("Interrupt listening could not start yet.", error);
+      }
+    }
+
     function endConversation() {
       localStorage.setItem(storageModeKey, "off");
       localStorage.removeItem(storageWaitingKey);
       listening = false;
+      interruptArmed = false;
       if (recognition) {
         recognition.abort();
         recognition = null;
@@ -414,14 +526,46 @@
       statusText.textContent = "Conversation paused.";
     }
 
-    function handleButtonClick() {
-      const active = localStorage.getItem(storageModeKey) === "on";
-      if (listening || active) {
-        endConversation();
-      } else {
-        localStorage.setItem(storageModeKey, "on");
-        startListening();
+    function interruptAndListen() {
+      if (listening || interruptPending) return;
+      interruptPending = true;
+      const recognitionAlreadyRunning = Boolean(recognition);
+      requestAvatarInterrupt();
+      localStorage.setItem(storageModeKey, "on");
+      localStorage.removeItem(storageWaitingKey);
+      interruptVoiceStartedAt = 0;
+      interruptArmed = false;
+      listening = true;
+      heardSpeech = heardSpeech || Boolean(currentTranscript());
+      lastVoiceAt = Date.now();
+      preview.textContent = currentTranscript();
+      setButtonState("listening");
+      statusText.textContent = "Listening...";
+
+      if (recognitionAlreadyRunning) {
+        interruptPending = false;
+        return;
       }
+
+      listening = false;
+      stopMeter();
+      window.setTimeout(() => {
+        interruptPending = false;
+        startListening();
+      }, resumeDelayMs);
+    }
+
+    function handleButtonClick() {
+      if (listening) {
+        finishUtterance();
+        return;
+      }
+      if (isWaitingForAssistant()) {
+        interruptAndListen();
+        return;
+      }
+      localStorage.setItem(storageModeKey, "on");
+      startListening();
     }
 
     function maybeResumeAfterAvatar() {
@@ -430,22 +574,42 @@
       if (mode === "on" && resumeAt && resumeAt !== lastResumeAt && !listening) {
         lastResumeAt = resumeAt;
         localStorage.removeItem(storageWaitingKey);
-        window.setTimeout(startListening, 500);
+        if (recognition && interruptArmed) {
+          finalTranscript = "";
+          interimTranscript = "";
+          latestTranscript = "";
+          interruptArmed = false;
+          heardSpeech = false;
+          lastVoiceAt = Date.now();
+          lastTranscriptAt = 0;
+          preview.textContent = "";
+          listening = true;
+          setButtonState("listening");
+          statusText.textContent = "Listening...";
+          return;
+        }
+        interruptArmed = false;
+        stopMeter();
+        window.setTimeout(startListening, resumeDelayMs);
       }
     }
 
     button.addEventListener("click", handleButtonClick);
     window.addEventListener("storage", maybeResumeAfterAvatar);
-    window.setInterval(maybeResumeAfterAvatar, 700);
+    window.setInterval(() => {
+      maybeResumeAfterAvatar();
+      startInterruptMeter();
+    }, resumePollMs);
 
     setComponentReady();
     drawIdleWave();
 
     const waitingSince = Number(localStorage.getItem(storageWaitingKey) || 0);
-    const waitingIsFresh = waitingSince > 0 && Date.now() - waitingSince < 15000;
+    const waitingIsFresh = waitingSince > 0 && Date.now() - waitingSince < waitingFreshMs;
     if (localStorage.getItem(storageModeKey) === "on" && waitingIsFresh) {
       setButtonState("waiting");
-      statusText.textContent = "I'll listen after KHOJ finishes speaking.";
+      statusText.textContent = "I'll listen next. Speak or tap to interrupt.";
+      startInterruptMeter();
     } else {
       localStorage.setItem(storageModeKey, "off");
       localStorage.removeItem(storageWaitingKey);

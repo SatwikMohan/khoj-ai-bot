@@ -425,9 +425,9 @@ def init_state() -> None:
     if "api_url" not in st.session_state:
         st.session_state.api_url = DEFAULT_API_URL
     if "top_k" not in st.session_state:
-        st.session_state.top_k = 8
+        st.session_state.top_k = 3
     if "temperature" not in st.session_state:
-        st.session_state.temperature = 0.55
+        st.session_state.temperature = 0.35
     if "tts_enabled" not in st.session_state:
         st.session_state.tts_enabled = True
     if "tts_voice_id" not in st.session_state:
@@ -445,7 +445,7 @@ def init_state() -> None:
     if "tts_pitch" not in st.session_state:
         st.session_state.tts_pitch = os.getenv("TTS_PITCH", os.getenv("EDGE_TTS_PITCH", "+0Hz"))
     if "tts_max_words" not in st.session_state:
-        st.session_state.tts_max_words = 260
+        st.session_state.tts_max_words = 140
     if "avatar_enabled" not in st.session_state:
         st.session_state.avatar_enabled = True
     if "last_voice_query_id" not in st.session_state:
@@ -706,6 +706,11 @@ def render_lip_sync_avatar(
             const queueId = {queue_id_json};
             const initialAudioMime = {audio_mime_json};
             const queuedPlayback = Boolean(queueId);
+            const storageInterruptKey = "texmin_voice_interrupt_at";
+            const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
+            const storageWaitingKey = "texmin_voice_waiting_since";
+            const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
+            const waitingCueText = "";
             const avatar = document.getElementById("avatar");
             const audio = document.getElementById("voice");
             const avatarLine = document.getElementById("avatarLine");
@@ -736,6 +741,11 @@ def render_lip_sync_avatar(
             let finalQueueSequence = null;
             let queueFinalized = !queuedPlayback;
             let queuePlaying = false;
+            let queueInterrupted = false;
+            let speakingHeartbeat = null;
+            let lastInterruptAt = "";
+            let cueUtterance = null;
+            let waitingCueStarted = false;
             const clock = new THREE.Clock();
             const avatarFitHeight = 2.25;
             const avatarVerticalCenter = 0.52;
@@ -1162,8 +1172,130 @@ def render_lip_sync_avatar(
                 }}
             }}
 
+            function suppressVoiceInput(durationMs) {{
+                try {{
+                    window.localStorage.setItem(
+                        storageInputSuppressedUntilKey,
+                        String(Date.now() + durationMs)
+                    );
+                }} catch (error) {{
+                    console.info("Could not suppress microphone input during cue.", error);
+                }}
+            }}
+
+            function stopWaitingCue() {{
+                if (!cueUtterance) return;
+                try {{
+                    if (window.speechSynthesis) {{
+                        window.speechSynthesis.cancel();
+                    }}
+                }} catch (error) {{
+                    console.info("Could not stop waiting cue.", error);
+                }}
+                cueUtterance = null;
+            }}
+
+            function speakWaitingCue() {{
+                if (waitingCueStarted || !waitingCueText || !shouldAutoplay || queueInterrupted) return;
+                if (!audio.paused || audio.currentSrc) return;
+                if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) return;
+                waitingCueStarted = true;
+                try {{
+                    const utterance = new SpeechSynthesisUtterance(waitingCueText);
+                    cueUtterance = utterance;
+                    utterance.lang = navigator.language || "en-IN";
+                    if (!["en", "hi"].includes(utterance.lang.slice(0, 2).toLowerCase())) {{
+                        utterance.lang = "en-IN";
+                    }}
+                    utterance.rate = 1.04;
+                    utterance.pitch = 1;
+                    utterance.volume = 0.85;
+                    utterance.onstart = () => suppressVoiceInput(1900);
+                    utterance.onend = () => {{
+                        if (cueUtterance === utterance) {{
+                            cueUtterance = null;
+                        }}
+                    }};
+                    utterance.onerror = utterance.onend;
+                    window.speechSynthesis.cancel();
+                    window.speechSynthesis.speak(utterance);
+                }} catch (error) {{
+                    cueUtterance = null;
+                    console.info("Browser waiting cue could not play.", error);
+                }}
+            }}
+
+            function setAvatarSpeaking(active) {{
+                try {{
+                    if (speakingHeartbeat) {{
+                        window.clearInterval(speakingHeartbeat);
+                        speakingHeartbeat = null;
+                    }}
+                    if (active) {{
+                        const markSpeaking = () => {{
+                            window.localStorage.setItem(storageAvatarSpeakingKey, String(Date.now()));
+                        }};
+                        markSpeaking();
+                        speakingHeartbeat = window.setInterval(markSpeaking, 600);
+                    }} else {{
+                        window.localStorage.removeItem(storageAvatarSpeakingKey);
+                    }}
+                }} catch (error) {{
+                    console.info("Could not update avatar speaking state.", error);
+                }}
+            }}
+
+            function resetSpeechMotion() {{
+                speaking = false;
+                targetMouthOpen = 0;
+                targetMouthWide = 0;
+                targetMouthRound = 0;
+                targetMouthPress = 0;
+            }}
+
+            function stopAvatarPlaybackForInterrupt() {{
+                queueInterrupted = true;
+                stopWaitingCue();
+                audioQueue.length = 0;
+                pendingQueueItems.clear();
+                queuePlaying = false;
+                queueFinalized = true;
+                finalQueueSequence = nextQueueSequence;
+                try {{
+                    audio.pause();
+                    audio.removeAttribute("src");
+                    audio.load();
+                }} catch (error) {{
+                    console.info("Avatar audio was already stopped.", error);
+                }}
+                setAvatarSpeaking(false);
+                resetSpeechMotion();
+                avatarLine.textContent = "Listening...";
+                signalListenerResume();
+            }}
+
+            function currentInterruptSignal() {{
+                try {{
+                    const interruptAt = Number(window.localStorage.getItem(storageInterruptKey) || 0);
+                    const waitingSince = Number(window.localStorage.getItem(storageWaitingKey) || 0);
+                    if (!interruptAt) return "";
+                    if (waitingSince && interruptAt < waitingSince - 250) return "";
+                    return String(interruptAt);
+                }} catch (error) {{
+                    return "";
+                }}
+            }}
+
+            function maybeHandleAvatarInterrupt() {{
+                const interruptAt = currentInterruptSignal();
+                if (!interruptAt || interruptAt === lastInterruptAt) return;
+                lastInterruptAt = interruptAt;
+                stopAvatarPlaybackForInterrupt();
+            }}
+
             async function playVoiceAutomatically() {{
                 try {{
+                    stopWaitingCue();
                     audio.volume = 1;
                     await prepareAudioGraph();
                     if (audio.paused) {{
@@ -1171,11 +1303,16 @@ def render_lip_sync_avatar(
                     }}
                 }} catch (error) {{
                     console.info("Automatic avatar audio playback was blocked by the browser.", error);
+                    setAvatarSpeaking(false);
                     signalListenerResume();
                 }}
             }}
 
             async function playNextQueuedAudio() {{
+                if (queueInterrupted) {{
+                    queuePlaying = false;
+                    return;
+                }}
                 if (!audioQueue.length) {{
                     queuePlaying = false;
                     if (
@@ -1186,6 +1323,7 @@ def render_lip_sync_avatar(
                 }}
 
                 const item = audioQueue.shift();
+                stopWaitingCue();
                 queuePlaying = true;
                 speechText = item.text || "";
                 avatarLine.textContent = speechText;
@@ -1198,6 +1336,7 @@ def render_lip_sync_avatar(
                 }} catch (error) {{
                     console.info("Queued avatar audio playback was blocked.", error);
                     queuePlaying = false;
+                    setAvatarSpeaking(false);
                     signalListenerResume();
                 }}
             }}
@@ -1205,6 +1344,7 @@ def render_lip_sync_avatar(
             window.addEventListener("message", (event) => {{
                 const message = event.data || {{}};
                 if (message.type !== "texmin:avatar-queue" || message.queueId !== queueId) return;
+                if (queueInterrupted) return;
                 if (message.audio) {{
                     pendingQueueItems.set(message.sequence, {{
                         audio: message.audio,
@@ -1233,6 +1373,7 @@ def render_lip_sync_avatar(
             }}
 
             audio.addEventListener("play", async () => {{
+                setAvatarSpeaking(true);
                 try {{
                     await prepareAudioGraph();
                 }} catch (error) {{
@@ -1241,24 +1382,20 @@ def render_lip_sync_avatar(
             }});
 
             audio.addEventListener("pause", () => {{
-                speaking = false;
-                targetMouthOpen = 0;
-                targetMouthWide = 0;
-                targetMouthRound = 0;
-                targetMouthPress = 0;
+                setAvatarSpeaking(false);
+                resetSpeechMotion();
             }});
             audio.addEventListener("ended", () => {{
-                speaking = false;
-                targetMouthOpen = 0;
-                targetMouthWide = 0;
-                targetMouthRound = 0;
-                targetMouthPress = 0;
+                setAvatarSpeaking(false);
+                resetSpeechMotion();
                 if (queuedPlayback) {{
                     playNextQueuedAudio();
                 }} else {{
                     signalListenerResume();
                 }}
             }});
+            window.addEventListener("storage", maybeHandleAvatarInterrupt);
+            window.setInterval(maybeHandleAvatarInterrupt, 250);
             loadModel();
             requestAnimationFrame(drawAvatar);
             if (!queuedPlayback) {{
@@ -1266,6 +1403,8 @@ def render_lip_sync_avatar(
                 audio.addEventListener("loadedmetadata", scheduleAutoplay, {{ once: true }});
                 window.addEventListener("load", scheduleAutoplay, {{ once: true }});
                 window.setTimeout(scheduleAutoplay, 650);
+            }} else {{
+                window.setTimeout(speakWaitingCue, 180);
             }}
         </script>
         """,
@@ -1451,7 +1590,11 @@ def render_speech_to_text_control() -> None:
             let latestTranscript = "";
             let heardSpeech = false;
             let lastVoiceAt = 0;
-            const silenceLimitMs = 6500;
+            let lastTranscriptAt = 0;
+            const noTranscriptSilenceLimitMs = 1850;
+            const transcriptSilenceLimitMs = 850;
+            const finalTranscriptSilenceLimitMs = 520;
+            const continuedSpeechThreshold = 0.055;
             const voiceThreshold = 0.025;
 
             function drawIdleWave() {
@@ -1488,10 +1631,18 @@ def render_speech_to_text_control() -> None:
                 const volume = Math.min(1, Math.sqrt(sum / waveData.length) * 4.2);
                 if (listening) {
                     const now = Date.now();
-                    if (volume > voiceThreshold) {
+                    const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
+                    if (transcript) {
+                        const quietLimit = interimTranscript ? transcriptSilenceLimitMs : finalTranscriptSilenceLimitMs;
+                        if (volume > continuedSpeechThreshold) {
+                            lastTranscriptAt = now;
+                        } else if (now - (lastTranscriptAt || lastVoiceAt) > quietLimit) {
+                            stopRecording("silence");
+                        }
+                    } else if (volume > voiceThreshold) {
                         heardSpeech = true;
                         lastVoiceAt = now;
-                    } else if (heardSpeech && now - lastVoiceAt > silenceLimitMs) {
+                    } else if (heardSpeech && now - lastVoiceAt > noTranscriptSilenceLimitMs) {
                         stopRecording("silence");
                     }
                 }
@@ -1676,7 +1827,9 @@ def render_speech_to_text_control() -> None:
                     latestTranscript = visibleText.trim();
                     if (latestTranscript) {{
                         heardSpeech = true;
-                        lastVoiceAt = Date.now();
+                        const now = Date.now();
+                        lastVoiceAt = now;
+                        lastTranscriptAt = now;
                     }}
                     preview.textContent = visibleText;
                     statusText.textContent = interimTranscript ? "Listening..." : "Speech recognized.";
@@ -1701,7 +1854,7 @@ def render_speech_to_text_control() -> None:
                         }
                     }
 
-                    const transcript = (finalTranscript || latestTranscript || interimTranscript).trim();
+                    const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
                     const submitted = submitTranscript(transcript);
                     statusText.textContent = submitted
                         ? "Sending voice query..."
@@ -1732,6 +1885,7 @@ def render_speech_to_text_control() -> None:
                 latestTranscript = "";
                 heardSpeech = false;
                 lastVoiceAt = Date.now();
+                lastTranscriptAt = 0;
                 preview.textContent = "";
                 listening = true;
                 setButtonState(true);
@@ -1810,10 +1964,21 @@ def resume_voice_listener_without_audio() -> None:
     )
 
 
+def clear_voice_interrupt_signal() -> None:
+    components.html(
+        """
+        <script>
+            window.localStorage.removeItem("texmin_voice_interrupt_at");
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _chat_history_payload(exclude_latest_user: bool = False) -> list[dict]:
     messages = st.session_state.messages[:-1] if exclude_latest_user else st.session_state.messages
     history = []
-    for message in messages[-10:]:
+    for message in messages[-6:]:
         role = message.get("role")
         content = " ".join(str(message.get("content", "")).split())
         if role not in {"user", "assistant"} or not content or message.get("error"):
@@ -1821,7 +1986,7 @@ def _chat_history_payload(exclude_latest_user: bool = False) -> list[dict]:
         history.append(
             {
                 "role": role,
-                "content": content[:900],
+                "content": content[:420],
             }
         )
     return history
@@ -1853,7 +2018,10 @@ def ask_api(question: str) -> tuple[str, list[dict], str | None]:
 
 
 def render_streaming_message(container, content: str, status: str = "") -> None:
-    display_content = content.strip() or status or "Thinking..."
+    display_content = content.strip() or status.strip()
+    if not display_content:
+        container.empty()
+        return
     content_html = markdown_to_html(display_content)
     container.markdown(
         f"""
@@ -1882,15 +2050,23 @@ def _split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
         cursor = match.end()
 
     remainder = normalized[cursor:].strip()
-    if not segments and len(normalized) >= 260:
+    if not segments and len(normalized) >= 170:
         split_at = max(
-            normalized.rfind(",", 0, 220),
-            normalized.rfind(";", 0, 220),
-            normalized.rfind(" ", 0, 220),
+            normalized.rfind(",", 0, 165),
+            normalized.rfind(";", 0, 165),
+            normalized.rfind(":", 0, 165),
+            normalized.rfind(" - ", 0, 165),
         )
+        if split_at <= 80 and len(normalized) >= 230:
+            split_at = normalized.rfind(" ", 0, 205)
         if split_at > 80:
-            segments.append(normalized[:split_at].strip())
-            remainder = normalized[split_at:].strip()
+            split_end = split_at
+            if normalized[split_at : split_at + 3] == " - ":
+                split_end = split_at + 3
+            elif normalized[split_at] in ",;:":
+                split_end = split_at + 1
+            segments.append(normalized[:split_end].strip(" ,;:-"))
+            remainder = normalized[split_end:].strip()
 
     return segments, remainder
 
@@ -1970,7 +2146,7 @@ def ask_api_stream(
     }
     answer = ""
     sources = []
-    status = "Searching your document library..."
+    status = ""
     speech_buffer = ""
     audio_chunks = []
     audio_mime = DEFAULT_AUDIO_MIME
@@ -1989,7 +2165,7 @@ def ask_api_stream(
         with avatar_container:
             render_lip_sync_avatar(
                 "",
-                "Preparing voice...",
+                "",
                 autoplay=True,
                 resume_listener_on_end=True,
                 queue_id=queue_id,
@@ -2267,10 +2443,9 @@ if not st.session_state.messages:
     st.markdown(
         """
         <div class="empty-state">
-            <h2>Ask a question from your document library.</h2>
+            <h2>Ask your documents.</h2>
             <p>
-                I will search the vector database, pull the most relevant context, and answer in a clear,
-                human-sounding voice while keeping the response grounded in your files.
+                Short, grounded answers with less waiting between question and reply.
             </p>
         </div>
         """,
@@ -2296,6 +2471,7 @@ if not question and st.session_state.avatar_enabled and latest_audio_b64:
     )
 
 if question:
+    clear_voice_interrupt_signal()
     with live_response_container:
         user_message = {"role": "user", "content": question}
         st.session_state.messages.append(user_message)

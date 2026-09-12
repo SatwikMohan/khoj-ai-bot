@@ -1,6 +1,7 @@
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ REPO_ROOT = PROJECT_ROOT
 RAW_DATA_DIR = REPO_ROOT / "raw_data_files"
 VECTOR_DB_DIR = REPO_ROOT / "vector_db"
 MANIFEST_FILE_NAME = "ingestion_manifest.json"
-INGESTION_VERSION = 4
+INGESTION_VERSION = 5
+OCR_WARNING_KEYS: set[str] = set()
 TEXT_EXTENSIONS = {
     ".txt",
     ".md",
@@ -38,6 +40,16 @@ TEXT_EXTENSIONS = {
     ".xml",
     ".yaml",
     ".yml",
+}
+IMAGE_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
 }
 
 
@@ -70,6 +82,9 @@ def chunk_settings() -> dict:
         "chunk_size": int(os.getenv("CHUNK_SIZE", "850")),
         "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "150")),
         "collection_name": os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa"),
+        "ocr_enabled": ocr_enabled(),
+        "ocr_lang": os.getenv("OCR_LANG", "eng+hin"),
+        "ocr_pdf_dpi": int(os.getenv("OCR_PDF_DPI", "200")),
     }
 
 
@@ -108,6 +123,144 @@ def read_text(path: Path) -> str:
         except UnicodeDecodeError:
             continue
     return path.read_text(errors="ignore")
+
+
+def env_flag(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def ocr_enabled() -> bool:
+    return env_flag("OCR_ENABLED", True)
+
+
+def warn_once(key: str, message: str) -> None:
+    if key in OCR_WARNING_KEYS:
+        return
+    OCR_WARNING_KEYS.add(key)
+    print(message)
+
+
+def normalized_text_length(text: str) -> int:
+    return len(" ".join((text or "").split()))
+
+
+def ocr_image(image, source_label: str = "image") -> str:
+    if not ocr_enabled():
+        return ""
+
+    try:
+        import pytesseract
+        from PIL import ImageOps
+    except ImportError as exc:
+        warn_once(
+            "ocr-python-deps",
+            f"OCR skipped for {source_label}: install pytesseract and Pillow. {exc}",
+        )
+        return ""
+
+    prepared_image = ImageOps.grayscale(image)
+    configured_lang = os.getenv("OCR_LANG", "eng+hin").strip() or "eng"
+    languages = [configured_lang]
+    if configured_lang != "eng":
+        languages.append("eng")
+
+    config = os.getenv("OCR_TESSERACT_CONFIG", "--psm 6")
+    for index, language in enumerate(languages):
+        try:
+            return pytesseract.image_to_string(prepared_image, lang=language, config=config).strip()
+        except pytesseract.pytesseract.TesseractNotFoundError as exc:
+            warn_once(
+                "ocr-tesseract-missing",
+                f"OCR skipped for {source_label}: Tesseract is not installed or not on PATH. {exc}",
+            )
+            return ""
+        except pytesseract.pytesseract.TesseractError as exc:
+            if index + 1 < len(languages):
+                warn_once(
+                    f"ocr-lang-{language}",
+                    f"OCR language '{language}' failed for {source_label}; falling back to English. {exc}",
+                )
+                continue
+            warn_once(
+                f"ocr-error-{language}",
+                f"OCR failed for {source_label} with language '{language}'. {exc}",
+            )
+            return ""
+
+    return ""
+
+
+def load_image(path: Path, raw_data_dir: Path) -> list[Document]:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        warn_once("ocr-pillow-missing", f"OCR skipped for {relative_source(path)}: install Pillow. {exc}")
+        return []
+
+    try:
+        with Image.open(path) as image:
+            text = ocr_image(image, relative_source(path))
+    except Exception as exc:
+        print(f"Could not OCR image {relative_source(path)}: {exc}")
+        return []
+
+    if not text.strip():
+        print(f"Skipping image with no OCR text: {relative_source(path)}")
+        return []
+
+    metadata = base_metadata(path, raw_data_dir)
+    metadata.update({"ocr": True, "ocr_source": "image"})
+    return [Document(page_content=text, metadata=metadata)]
+
+
+def load_pdf_ocr_pages(path: Path, raw_data_dir: Path, page_numbers: list[int] | None) -> list[Document]:
+    if page_numbers == [] or not ocr_enabled():
+        return []
+
+    try:
+        import fitz
+        from PIL import Image
+    except ImportError as exc:
+        warn_once(
+            "ocr-pdf-deps",
+            f"PDF OCR skipped for {relative_source(path)}: install PyMuPDF and Pillow. {exc}",
+        )
+        return []
+
+    documents = []
+    dpi = int(os.getenv("OCR_PDF_DPI", "200"))
+    try:
+        with fitz.open(str(path)) as pdf:
+            if page_numbers is None:
+                page_numbers = list(range(pdf.page_count))
+            for page_number in page_numbers:
+                if page_number < 0 or page_number >= pdf.page_count:
+                    continue
+
+                page = pdf.load_page(page_number)
+                pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+                with Image.open(io.BytesIO(pixmap.tobytes("png"))) as image:
+                    text = ocr_image(image, f"{relative_source(path)} page {page_number + 1}")
+
+                if not text.strip():
+                    continue
+
+                metadata = base_metadata(path, raw_data_dir)
+                metadata.update(
+                    {
+                        "page": page_number,
+                        "ocr": True,
+                        "ocr_source": "pdf_page",
+                    }
+                )
+                documents.append(Document(page_content=text, metadata=metadata))
+    except Exception as exc:
+        print(f"Could not OCR PDF {relative_source(path)}: {exc}")
+
+    return documents
 
 
 def file_hash(path: Path) -> str:
@@ -162,13 +315,26 @@ def load_pptx(path: Path) -> str:
 
 def load_pdf(path: Path, raw_data_dir: Path) -> list[Document]:
     documents = []
-    loaded_documents = PyPDFLoader(str(path)).load()
     min_text_chars = int(os.getenv("MIN_EXTRACTED_TEXT_CHARS", "80"))
-    for document in loaded_documents:
-        if len(" ".join(document.page_content.split())) < min_text_chars:
+    try:
+        loaded_documents = PyPDFLoader(str(path)).load()
+    except Exception as exc:
+        print(f"Could not extract PDF text from {relative_source(path)}; trying OCR. {exc}")
+        return load_pdf_ocr_pages(path, raw_data_dir, None)
+
+    low_text_pages = []
+    for fallback_page_number, document in enumerate(loaded_documents):
+        try:
+            page_number = int(document.metadata.get("page", fallback_page_number))
+        except (TypeError, ValueError):
+            page_number = fallback_page_number
+        if normalized_text_length(document.page_content) < min_text_chars:
+            low_text_pages.append(page_number)
             continue
         document.metadata.update(base_metadata(path, raw_data_dir))
         documents.append(document)
+
+    documents.extend(load_pdf_ocr_pages(path, raw_data_dir, low_text_pages))
     return documents
 
 
@@ -178,6 +344,8 @@ def load_file(path: Path, raw_data_dir: Path) -> list[Document]:
 
     if suffix == ".pdf":
         return load_pdf(path, raw_data_dir)
+    if suffix in IMAGE_EXTENSIONS:
+        return load_image(path, raw_data_dir)
     if suffix == ".csv":
         text = load_csv(path)
     elif suffix == ".json":
