@@ -8,7 +8,13 @@ from langchain_core.documents import Document
 
 from services.embedding_service import embedding_profile
 from services.lexical_service import add_lexical_chunks, lexical_search
-from services.qa_service import _general_response, _history_aware_query, _is_general_query
+from services.qa_service import (
+    _clean_model_answer,
+    _general_response,
+    _history_aware_query,
+    _is_general_query,
+    _is_summary_query,
+)
 from services.stt_service import STTEngineError, transcribe_audio
 from services.tts_service import TTSEngineError, _validate_audio
 
@@ -46,6 +52,13 @@ class ConversationStyleTests(unittest.TestCase):
     def test_hindi_greeting_is_recognized_without_retrieval(self):
         self.assertTrue(_is_general_query("नमस्ते।"))
         self.assertIn("नमस्ते", _general_response("नमस्ते।").answer)
+
+    def test_private_reasoning_is_removed_from_tagged_answer(self):
+        raw = "<think>The user asked about DGMS.</think><answer>DGMS rules govern mine safety.</answer>"
+        self.assertEqual(_clean_model_answer(raw), "DGMS rules govern mine safety.")
+
+    def test_broad_explanation_uses_summary_retrieval(self):
+        self.assertTrue(_is_summary_query("Explain the DGMS rules"))
 
 
 class LexicalIndexTests(unittest.TestCase):

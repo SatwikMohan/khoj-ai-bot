@@ -194,11 +194,12 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     engine_name = os.getenv("TTS_ENGINE", "auto").strip().lower()
     fallback_names = [
         name.strip().lower()
-        for name in os.getenv("TTS_FALLBACK_ENGINES", "local").split(",")
+        for name in os.getenv("TTS_FALLBACK_ENGINES", "").split(",")
         if name.strip()
     ]
     if engine_name == "auto":
-        engines = ["indicf5", "local"] if _contains_devanagari(payload.text) else ["kokoro", "local"]
+        primary_engine = "indicf5" if _contains_devanagari(payload.text) else "kokoro"
+        engines = [primary_engine, *fallback_names]
     else:
         engines = [engine_name, *fallback_names]
 
@@ -271,13 +272,15 @@ def tts_runtime_status() -> dict:
     status = {
         "status": "ready",
         "engine": os.getenv("TTS_ENGINE", "auto"),
-        "fallback_engines": os.getenv("TTS_FALLBACK_ENGINES", "local"),
+        "fallback_engines": os.getenv("TTS_FALLBACK_ENGINES", ""),
         "failures": failures,
     }
     engine = status["engine"].strip().lower()
     if engine in {"auto", "kokoro"}:
         try:
-            _kokoro_pipeline(os.getenv("KOKORO_LANGUAGE", "a"))
+            voice = os.getenv("KOKORO_VOICE", "af_heart")
+            _warm_kokoro_voice(os.getenv("KOKORO_LANGUAGE", "a"), voice)
+            status["voice"] = voice
         except TTSEngineError as exc:
             status["status"] = "unavailable"
             status["error"] = str(exc)
@@ -425,6 +428,34 @@ def _kokoro_pipeline(language_code: str):
         raise TTSEngineError(f"Kokoro could not load its local model: {exc}") from exc
 
 
+@lru_cache(maxsize=16)
+def _warm_kokoro_voice(language_code: str, voice: str) -> None:
+    try:
+        with NEURAL_TTS_LOCK:
+            generated = _kokoro_pipeline(language_code)("Voice ready.", voice=voice, speed=1.0)
+            if next(iter(generated), None) is None:
+                raise TTSEngineError(f"Kokoro voice '{voice}' returned no audio.")
+    except TTSEngineError:
+        raise
+    except Exception as exc:
+        raise TTSEngineError(f"Kokoro voice '{voice}' is unavailable offline: {exc}") from exc
+
+
+def _kokoro_voice_candidates(requested_voice: str) -> list[str]:
+    default_voice = os.getenv("KOKORO_VOICE", "af_heart").strip() or "af_heart"
+    primary_voice = (
+        requested_voice
+        if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", requested_voice)
+        else default_voice
+    )
+    fallback_voices = [
+        voice.strip()
+        for voice in os.getenv("KOKORO_FALLBACK_VOICES", "af_bella,bf_emma").split(",")
+        if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice.strip())
+    ]
+    return list(dict.fromkeys([primary_voice, default_voice, *fallback_voices]))
+
+
 def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
     if _contains_devanagari(payload.text):
         raise TTSEngineError("Kokoro is not the configured Hindi voice; trying the Indic fallback.")
@@ -434,27 +465,27 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
         raise TTSEngineError("There is no speakable text after formatting was removed.")
 
     requested_voice = (payload.voice_id or "").strip()
-    voice = requested_voice if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", requested_voice) else os.getenv(
-        "KOKORO_VOICE", "af_heart"
-    )
+    voices = _kokoro_voice_candidates(requested_voice)
     language_code = os.getenv("KOKORO_LANGUAGE", "a")
     rate, _pitch, _volume = _prosody_settings(payload)
     speed = max(0.65, min(1.35, 1 + (_parse_percent(rate) / 100)))
 
-    try:
-        with NEURAL_TTS_LOCK:
-            generated = _kokoro_pipeline(language_code)(spoken_text, voice=voice, speed=speed)
-            parts = [audio for _graphemes, _phonemes, audio in generated]
-        if not parts:
-            raise TTSEngineError("Kokoro returned no audio segments.")
-        import numpy as np
+    errors = []
+    for voice in voices:
+        try:
+            with NEURAL_TTS_LOCK:
+                generated = _kokoro_pipeline(language_code)(spoken_text, voice=voice, speed=speed)
+                parts = [audio for _graphemes, _phonemes, audio in generated]
+            if not parts:
+                raise TTSEngineError("returned no audio segments")
+            import numpy as np
 
-        audio = np.concatenate([np.asarray(part, dtype=np.float32).reshape(-1) for part in parts])
-        return _audio_array_to_wav(audio), "audio/wav"
-    except TTSEngineError:
-        raise
-    except Exception as exc:
-        raise TTSEngineError(f"Kokoro synthesis failed for voice '{voice}': {exc}") from exc
+            audio = np.concatenate([np.asarray(part, dtype=np.float32).reshape(-1) for part in parts])
+            return _audio_array_to_wav(audio), "audio/wav"
+        except Exception as exc:
+            errors.append(f"{voice}: {exc}")
+
+    raise TTSEngineError("Kokoro voices failed. " + " | ".join(errors))
 
 
 @lru_cache(maxsize=1)

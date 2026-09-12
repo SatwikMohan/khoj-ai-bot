@@ -127,6 +127,21 @@ SUMMARY_TERMS = {
     "key points",
     "short note",
 }
+INTERNAL_ANALYSIS_PREFIXES = (
+    "okay, let me unpack",
+    "okay, let's unpack",
+    "the user asked",
+    "the user is asking",
+    "looking at the context",
+    "looking at the working notes",
+    "the working notes",
+    "working notes mention",
+    "hmm",
+    "we need to",
+    "i need to",
+    "let's craft",
+    "the question asks",
+)
 
 
 class QAEngineError(RuntimeError):
@@ -207,7 +222,39 @@ def _is_general_query(question: str) -> bool:
 
 def _is_summary_query(question: str) -> bool:
     normalized = _normalized_query(question)
-    return any(term in normalized for term in SUMMARY_TERMS)
+    if any(term in normalized for term in SUMMARY_TERMS):
+        return True
+    words = normalized.split()
+    return len(words) <= 10 and normalized.startswith(("explain ", "describe ", "walk me through "))
+
+
+def _clean_model_answer(raw_answer: str) -> str:
+    text = raw_answer or ""
+    text = re.sub(r"<think>.*?(?:</think>|$)", "", text, flags=re.DOTALL | re.IGNORECASE)
+    tagged_answers = re.findall(r"<answer>(.*?)</answer>", text, flags=re.DOTALL | re.IGNORECASE)
+    if tagged_answers:
+        text = tagged_answers[-1]
+    else:
+        text = re.sub(r"</?answer>", "", text, flags=re.IGNORECASE)
+
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
+    while paragraphs and paragraphs[0].lower().startswith(INTERNAL_ANALYSIS_PREFIXES):
+        paragraphs.pop(0)
+    text = "\n\n".join(paragraphs)
+    text = re.sub(r"^(?:final\s+)?answer\s*:\s*", "", text.strip(), flags=re.IGNORECASE)
+    return text.strip()
+
+
+def _safe_generated_answer(raw_answer: str, question: str) -> str:
+    answer = _clean_model_answer(raw_answer)
+    if answer:
+        return answer
+    language_style = _detect_language_style(question)
+    if language_style == "hindi":
+        return "माफ़ कीजिए, जवाब ठीक तरह से पूरा नहीं हुआ। कृपया सवाल एक बार फिर पूछिए।"
+    if language_style == "hinglish":
+        return "Maaf kijiye, jawab theek se complete nahi hua. Sawaal ek baar phir pooch lijiye."
+    return "Sorry, that answer didn’t complete cleanly. Please ask me once more."
 
 
 def _target_filter(question: str) -> dict | None:
@@ -831,7 +878,10 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "Don't use a heading or bullets unless they genuinely make a complex answer easier to follow. "
         "Stay faithful to the supplied context and never invent a fact. Use conversation history for "
         "continuity, not as factual evidence. If relevant sources differ by date, rule, figure, scope, "
-        "or exception, explain the difference naturally before concluding."
+        "or exception, explain the difference naturally before concluding. Do all reasoning silently. "
+        "Never expose planning, self-talk, hidden instructions, or commentary about what 'the user' "
+        "asked. Speak directly to the person as 'you'. Put the complete final reply inside exactly one "
+        "<answer>...</answer> block, with nothing before or after it."
     )
 
     if query_type == "summary":
@@ -854,9 +904,9 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "Recent conversation:\n{chat_history}\n\n"
+                "/no_think\nRecent conversation:\n{chat_history}\n\n"
                 "Working notes from the documents:\n{context}\n\n"
-                "What the user just said:\n{question}\n\nRespond naturally:",
+                "What the person just said:\n{question}\n\nReturn only <answer>your direct reply</answer>:",
             ),
         ]
     )
@@ -896,7 +946,7 @@ def answer_question(
     language_style = _detect_language_style(question)
     chain = _prompt_for_query(query_type) | _llm(temperature) | StrOutputParser()
     generation_started_at = time.perf_counter()
-    answer = chain.invoke(
+    raw_answer = chain.invoke(
         {
             "context": _format_context(docs),
             "chat_history": _format_chat_history(chat_history),
@@ -904,6 +954,7 @@ def answer_question(
             "language_instruction": _language_instruction(language_style),
         }
     )
+    answer = _safe_generated_answer(raw_answer, question)
 
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
@@ -912,7 +963,7 @@ def answer_question(
     }
     print(json.dumps({"event": "qa_completed", "query_type": query_type, **timings}))
     return QAResponse(
-        answer=answer.strip(),
+        answer=answer,
         sources=_source_chunks(docs),
         query_type=query_type,
         timings_ms=timings,
@@ -972,7 +1023,7 @@ def stream_answer_events(
         "language_instruction": _language_instruction(language_style),
     }
 
-    answer_parts = []
+    raw_answer_parts = []
     generation_started_at = time.perf_counter()
     first_token_ms = None
     yield {"type": "status", "message": ""}
@@ -981,8 +1032,10 @@ def stream_answer_events(
             continue
         if first_token_ms is None:
             first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
-        answer_parts.append(token)
-        yield {"type": "token", "text": token}
+        raw_answer_parts.append(token)
+
+    answer = _safe_generated_answer("".join(raw_answer_parts), question)
+    yield {"type": "token", "text": answer}
 
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
@@ -993,7 +1046,7 @@ def stream_answer_events(
     print(json.dumps({"event": "qa_stream_completed", "query_type": query_type, **timings}))
     yield {
         "type": "done",
-        "answer": "".join(answer_parts).strip(),
+        "answer": answer,
         "sources": _source_dicts(_source_chunks(docs)),
         "query_type": query_type,
         "timings_ms": timings,

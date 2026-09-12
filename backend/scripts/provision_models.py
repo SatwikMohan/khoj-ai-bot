@@ -26,11 +26,25 @@ def provision_whisper() -> None:
     )
 
 
-def provision_kokoro() -> None:
+def kokoro_voices() -> list[str]:
+    configured = os.getenv(
+        "KOKORO_PROVISION_VOICES",
+        "af_heart,af_bella,af_nicole,am_adam,bf_emma,bm_george",
+    )
+    return list(dict.fromkeys(voice.strip() for voice in configured.split(",") if voice.strip()))
+
+
+def provision_kokoro(voices: list[str]) -> None:
     from kokoro import KPipeline
 
-    print("Provisioning Kokoro model and English phonemizer assets")
-    KPipeline(lang_code=os.getenv("KOKORO_LANGUAGE", "a"))
+    print(f"Provisioning Kokoro model, phonemizer assets, and voices: {', '.join(voices)}")
+    pipeline = KPipeline(lang_code=os.getenv("KOKORO_LANGUAGE", "a"))
+    for voice in voices:
+        generated = pipeline("Voice ready.", voice=voice, speed=1.0)
+        first_segment = next(iter(generated), None)
+        if first_segment is None:
+            raise RuntimeError(f"Kokoro voice '{voice}' returned no audio during provisioning.")
+        print(f"Provisioned Kokoro voice: {voice}")
 
 
 def provision_indicf5() -> None:
@@ -56,10 +70,12 @@ def provision_reranker() -> None:
 if __name__ == "__main__":
     model_root = Path(os.getenv("MODEL_ROOT", "/models"))
     marker = model_root / "provisioned.json"
+    configured_kokoro_voices = kokoro_voices()
     desired = {
         "whisper": os.getenv("WHISPER_MODEL", "large-v3-turbo"),
         "reranker": os.getenv("RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
         "kokoro_language": os.getenv("KOKORO_LANGUAGE", "a"),
+        "kokoro_voices": configured_kokoro_voices,
         "indicf5": env_flag("PROVISION_INDICF5", False),
         "indicf5_model": os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5"),
     }
@@ -72,7 +88,7 @@ if __name__ == "__main__":
             pass
 
     provision_whisper()
-    provision_kokoro()
+    provision_kokoro(configured_kokoro_voices)
     provision_reranker()
     provision_indicf5()
     model_root.mkdir(parents=True, exist_ok=True)
