@@ -11,6 +11,23 @@ def env_flag(name: str, default: bool = True) -> bool:
 
 
 def provision_whisper() -> None:
+    engine = os.getenv("STT_ENGINE", "faster-whisper").strip().lower()
+    if engine in {"transformers", "pytorch", "torch"}:
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+        model = os.getenv(
+            "WHISPER_TRANSFORMERS_MODEL", "openai/whisper-large-v3-turbo"
+        )
+        print(f"Provisioning PyTorch Whisper model: {model}")
+        AutoProcessor.from_pretrained(model, local_files_only=False)
+        AutoModelForSpeechSeq2Seq.from_pretrained(
+            model,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+            local_files_only=False,
+        )
+        return
+
     from faster_whisper import WhisperModel
 
     model = os.getenv("WHISPER_MODEL", "large-v3-turbo")
@@ -72,7 +89,13 @@ if __name__ == "__main__":
     marker = model_root / "provisioned.json"
     configured_kokoro_voices = kokoro_voices()
     desired = {
-        "whisper": os.getenv("WHISPER_MODEL", "large-v3-turbo"),
+        "stt_engine": os.getenv("STT_ENGINE", "faster-whisper"),
+        "whisper": (
+            os.getenv("WHISPER_TRANSFORMERS_MODEL", "openai/whisper-large-v3-turbo")
+            if os.getenv("STT_ENGINE", "faster-whisper").strip().lower()
+            in {"transformers", "pytorch", "torch"}
+            else os.getenv("WHISPER_MODEL", "large-v3-turbo")
+        ),
         "reranker": os.getenv("RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
         "kokoro_language": os.getenv("KOKORO_LANGUAGE", "a"),
         "kokoro_voices": configured_kokoro_voices,

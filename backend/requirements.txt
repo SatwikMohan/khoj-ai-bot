@@ -24,3 +24,4 @@ faster-whisper>=1.1,<2
 python-multipart>=0.0.9
 kokoro>=0.9.4,<1
 transformers>=4.51,<5
+accelerate>=1,<2

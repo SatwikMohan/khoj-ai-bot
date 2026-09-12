@@ -77,6 +77,10 @@ services:
       context: ./backend
     container_name: texmin-backend
     restart: unless-stopped
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
     depends_on:
       index-init:
         condition: service_completed_successfully
