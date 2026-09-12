@@ -11,6 +11,7 @@ from services.embedding_service import embedding_profile
 from services.lexical_service import add_lexical_chunks, lexical_search
 from services.qa_service import (
     _clean_model_answer,
+    _direct_answer_content,
     _general_response,
     _history_aware_query,
     _is_general_query,
@@ -82,6 +83,23 @@ class ConversationStyleTests(unittest.TestCase):
         for leaked in leaks:
             with self.subTest(leaked=leaked):
                 self.assertTrue(_looks_like_internal_analysis(leaked))
+
+    def test_valid_answer_is_salvaged_after_narrated_planning(self):
+        raw = (
+            "The user asked for an overview. I should keep it concise. "
+            "DGMS regulates occupational safety in Indian mines."
+        )
+        self.assertEqual(
+            _direct_answer_content(raw),
+            "DGMS regulates occupational safety in Indian mines.",
+        )
+
+    def test_context_framing_is_removed_without_losing_answer(self):
+        raw = "Based on the provided context, DGMS issues mine-safety circulars."
+        self.assertEqual(
+            _direct_answer_content(raw),
+            "DGMS issues mine-safety circulars.",
+        )
 
     def test_more_topic_openers_are_answered_directly(self):
         for question in ("Can we talk about DGMS?", "I want to talk about DGMS"):

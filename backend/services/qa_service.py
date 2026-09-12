@@ -165,8 +165,8 @@ INTERNAL_ANALYSIS_PATTERNS = tuple(
         r"\bthey (?:asked|said|want|need|seem|requested)\b",
         r"\b(?:he|she) (?:asked|said|wants?|needs?|seems?|requested)\b",
         r"\b(?:the person|the questioner) (?:asked|said|wants?|needs?|seems?|requested)\b",
-        r"\b(?:based on|from|looking at|according to) (?:the )?(?:provided |retrieved |supplied )?(?:context|notes|snippets|documents?)\b",
-        r"\b(?:working notes|context snippets|retrieved context|provided context|supplied material|conversation history|chat history)\b",
+        r"\b(?:based on|from|looking at|according to) (?:the )?(?:private |provided |retrieved |supplied )?(?:context|notes|snippets|documents?|facts|evidence|reference material)\b",
+        r"\b(?:working notes|context snippets|retrieved context|provided context|supplied material|conversation history|conversation memory|chat history)\b",
         r"\b(?:the )?(?:key points|information) (?:from|in) (?:the )?(?:notes|context|documents?)\b",
         r"\bi (?:see|can see|notice) (?:that )?(?:the )?(?:context|notes|documents?|snippets?)\b",
         r"\b(?:i need to|i should|i will|i'll|we need to|let me|let's) (?:answer|explain|respond|give|craft|keep|break|unpack|analy[sz]e|check|look)\b",
@@ -281,23 +281,45 @@ def _clean_model_answer(raw_answer: str) -> str:
         text = re.sub(r"</?answer>", "", text, flags=re.IGNORECASE)
 
     paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text) if paragraph.strip()]
-    while paragraphs and paragraphs[0].lower().startswith(INTERNAL_ANALYSIS_PREFIXES):
-        paragraphs.pop(0)
     text = "\n\n".join(paragraphs)
     text = re.sub(r"^(?:final\s+)?answer\s*:\s*", "", text.strip(), flags=re.IGNORECASE)
     return text.strip()
 
 
-def _safe_generated_answer(raw_answer: str, question: str) -> str:
+def _direct_answer_content(raw_answer: str) -> str:
     answer = _clean_model_answer(raw_answer)
-    if answer and not _looks_like_internal_analysis(answer):
+    if not answer:
+        return ""
+
+    direct_parts = []
+    for part in re.split(r"(?<=[.!?।])(?:\s+|$)|\n+", answer):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        candidate = re.sub(
+            r"^(?:(?:based on|according to|from|looking at) "
+            r"(?:the )?(?:private |provided |retrieved |supplied )?(?:context|notes|snippets|documents?|facts|evidence|reference material)"
+            r"|(?:the )?(?:context|notes|documents?) (?:show|shows|state|states|say|says|indicate|indicates) that)"
+            r"\s*[,;:]?\s*",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        ).strip()
+        if candidate and not _looks_like_internal_analysis(candidate):
+            direct_parts.append(candidate)
+    return " ".join(direct_parts).strip()
+
+
+def _safe_generated_answer(raw_answer: str, question: str) -> str:
+    answer = _direct_answer_content(raw_answer)
+    if answer:
         return answer
     language_style = _detect_language_style(question)
     if language_style == "hindi":
-        return "माफ़ कीजिए, जवाब ठीक तरह से पूरा नहीं हुआ। कृपया सवाल एक बार फिर पूछिए।"
+        return "इसका भरोसेमंद जवाब देने के लिए मुझे थोड़ा और स्पष्ट विवरण चाहिए। आप किस हिस्से के बारे में जानना चाहते हैं?"
     if language_style == "hinglish":
-        return "Maaf kijiye, jawab theek se complete nahi hua. Sawaal ek baar phir pooch lijiye."
-    return "Sorry, that answer didn’t complete cleanly. Please ask me once more."
+        return "Iska reliable jawab dene ke liye mujhe thodi aur clear detail chahiye. Aap kis part ke baare mein jaanna chahte hain?"
+    return "I need a little more specific detail to answer reliably. Which part would you like to focus on?"
 
 
 def _repair_generated_answer(
@@ -317,9 +339,8 @@ def _repair_generated_answer(
             ),
             (
                 "human",
-                "/no_think\n<reference>{context}</reference>\n<question>{question}</question>\n"
-                "Rewrite any useful supported content below as the direct reply only. Ignore its "
-                "planning or narration.\n<draft>{draft}</draft>\n<answer>",
+                "/no_think\nPrivate reference material:\n{context}\n\nQuestion:\n{question}\n\n"
+                "Write the direct reply now. Start immediately with the useful information:",
             ),
         ]
     )
@@ -328,11 +349,11 @@ def _repair_generated_answer(
         {
             "context": context,
             "question": question,
-            "draft": _clean_model_answer(raw_answer),
             "language_instruction": _language_instruction(language_style),
         }
     )
-    return _safe_generated_answer(repaired, question)
+    direct_answer = _direct_answer_content(repaired)
+    return direct_answer or _safe_generated_answer(raw_answer, question)
 
 
 def _target_filter(question: str) -> dict | None:
@@ -973,7 +994,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "answer, not with 'okay, let me break this down'. Use a compact conversational paragraph for "
         "simple questions and bullets only when they genuinely help. Use only facts supported by the "
         "document material. If information is missing, say exactly what is missing and ask one short "
-        "question. Put the reply inside <answer> and </answer>; output nothing outside those tags."
+        "question. Return only the direct reply and nothing else."
     )
 
     if query_type == "summary":
@@ -995,8 +1016,9 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "/no_think\n<conversation>{chat_history}</conversation>\n"
-                "<reference>{context}</reference>\n<question>{question}</question>\n<answer>",
+                "/no_think\nPrivate conversation memory:\n{chat_history}\n\n"
+                "Private reference material:\n{context}\n\nMessage to answer:\n{question}\n\n"
+                "Reply directly now:",
             ),
         ]
     )
@@ -1049,8 +1071,8 @@ def answer_question(
             "language_instruction": _language_instruction(language_style),
         }
     )
-    answer = _safe_generated_answer(raw_answer, question)
-    if _looks_like_internal_analysis(raw_answer):
+    answer = _direct_answer_content(raw_answer)
+    if not answer:
         answer = _repair_generated_answer(
             raw_answer, question, formatted_context, language_style
         )
@@ -1158,6 +1180,12 @@ def stream_answer_events(
             r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE
         )
         if _looks_like_internal_analysis(pending_visible_text):
+            salvaged_segment = _direct_answer_content(pending_visible_text)
+            if salvaged_segment:
+                visible_answer_parts.append(salvaged_segment)
+                yield {"type": "token", "text": salvaged_segment}
+                pending_visible_text = ""
+                continue
             rejected_internal_analysis = True
             pending_visible_text = ""
             continue
