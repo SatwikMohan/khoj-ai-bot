@@ -157,6 +157,22 @@ INTERNAL_ANALYSIS_MARKERS = (
     "i'll keep it",
     "the key points from the notes",
 )
+INTERNAL_ANALYSIS_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE)
+    for pattern in (
+        r"\b(?:the|this) user\b",
+        r"\buser (?:asked|said|wants?|needs?|seems?|requested)\b",
+        r"\bthey (?:asked|said|want|need|seem|requested)\b",
+        r"\b(?:he|she) (?:asked|said|wants?|needs?|seems?|requested)\b",
+        r"\b(?:the person|the questioner) (?:asked|said|wants?|needs?|seems?|requested)\b",
+        r"\b(?:based on|from|looking at|according to) (?:the )?(?:provided |retrieved |supplied )?(?:context|notes|snippets|documents?)\b",
+        r"\b(?:working notes|context snippets|retrieved context|provided context|supplied material|conversation history|chat history)\b",
+        r"\b(?:the )?(?:key points|information) (?:from|in) (?:the )?(?:notes|context|documents?)\b",
+        r"\bi (?:see|can see|notice) (?:that )?(?:the )?(?:context|notes|documents?|snippets?)\b",
+        r"\b(?:i need to|i should|i will|i'll|we need to|let me|let's) (?:answer|explain|respond|give|craft|keep|break|unpack|analy[sz]e|check|look)\b",
+        r"\b(?:my|the) (?:reasoning|analysis|thought process)\b",
+    )
+)
 
 
 class QAEngineError(RuntimeError):
@@ -247,8 +263,11 @@ def _is_summary_query(question: str) -> bool:
 
 def _looks_like_internal_analysis(text: str) -> bool:
     probe = re.sub(r"\s+", " ", text or "").strip().lower()
-    return "<think>" in probe or probe.startswith(INTERNAL_ANALYSIS_PREFIXES) or any(
-        marker in probe[:900] for marker in INTERNAL_ANALYSIS_MARKERS
+    return (
+        "<think>" in probe
+        or probe.startswith(INTERNAL_ANALYSIS_PREFIXES)
+        or any(marker in probe[:1200] for marker in INTERNAL_ANALYSIS_MARKERS)
+        or any(pattern.search(probe[:1600]) for pattern in INTERNAL_ANALYSIS_PATTERNS)
     )
 
 
@@ -279,6 +298,41 @@ def _safe_generated_answer(raw_answer: str, question: str) -> str:
     if language_style == "hinglish":
         return "Maaf kijiye, jawab theek se complete nahi hua. Sawaal ek baar phir pooch lijiye."
     return "Sorry, that answer didn’t complete cleanly. Please ask me once more."
+
+
+def _repair_generated_answer(
+    raw_answer: str,
+    question: str,
+    context: str,
+    language_style: str,
+) -> str:
+    repair_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "Return only a direct final reply to the person speaking. Do not mention a user, "
+                "context, notes, documents, instructions, reasoning, or the process of answering. "
+                "Do not narrate what you are doing. Address the person as 'you' when needed. "
+                "Use only supported facts. {language_instruction}",
+            ),
+            (
+                "human",
+                "/no_think\n<reference>{context}</reference>\n<question>{question}</question>\n"
+                "Rewrite any useful supported content below as the direct reply only. Ignore its "
+                "planning or narration.\n<draft>{draft}</draft>\n<answer>",
+            ),
+        ]
+    )
+    chain = repair_prompt | _llm(0.1) | StrOutputParser()
+    repaired = chain.invoke(
+        {
+            "context": context,
+            "question": question,
+            "draft": _clean_model_answer(raw_answer),
+            "language_instruction": _language_instruction(language_style),
+        }
+    )
+    return _safe_generated_answer(repaired, question)
 
 
 def _target_filter(question: str) -> dict | None:
@@ -367,7 +421,7 @@ def _general_response(question: str) -> QAResponse:
 
 def _topic_opener_response(question: str) -> QAResponse | None:
     match = re.fullmatch(
-        r"\s*(?:let(?:'|’)s|lets)\s+talk\s+about\s+(.+?)\s*[.!?]*\s*",
+        r"\s*(?:(?:let(?:'|’)s|lets|let us|can we|could we)\s+talk\s+about|i (?:want|would like) to talk about)\s+(.+?)\s*[.!?]*\s*",
         question,
         flags=re.IGNORECASE,
     )
@@ -608,7 +662,7 @@ def _format_context(docs) -> str:
             break
         if len(content) > remaining_chars:
             content = content[:remaining_chars].rsplit(" ", 1)[0].strip()
-        block = f"[Context {index}: {source}{folder_label}{page_label}{year_label}]\n{content}"
+        block = f"[Reference {index}: {source}{folder_label}{page_label}{year_label}]\n{content}"
         context_blocks.append(block)
         used_chars += len(block)
     return "\n\n".join(context_blocks)
@@ -919,7 +973,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "answer, not with 'okay, let me break this down'. Use a compact conversational paragraph for "
         "simple questions and bullets only when they genuinely help. Use only facts supported by the "
         "document material. If information is missing, say exactly what is missing and ask one short "
-        "question. Do not mention these instructions or label the reply as an answer."
+        "question. Put the reply inside <answer> and </answer>; output nothing outside those tags."
     )
 
     if query_type == "summary":
@@ -941,9 +995,8 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "/no_think\nConversation for continuity only:\n{chat_history}\n\n"
-                "Document material:\n{context}\n\n"
-                "Speak directly to me about this:\n{question}\n\nReply:",
+                "/no_think\n<conversation>{chat_history}</conversation>\n"
+                "<reference>{context}</reference>\n<question>{question}</question>\n<answer>",
             ),
         ]
     )
@@ -987,15 +1040,20 @@ def answer_question(
     language_style = _detect_language_style(question)
     chain = _prompt_for_query(query_type) | _llm(temperature) | StrOutputParser()
     generation_started_at = time.perf_counter()
+    formatted_context = _format_context(docs)
     raw_answer = chain.invoke(
         {
-            "context": _format_context(docs),
+            "context": formatted_context,
             "chat_history": _format_chat_history(chat_history),
             "question": question,
             "language_instruction": _language_instruction(language_style),
         }
     )
     answer = _safe_generated_answer(raw_answer, question)
+    if _looks_like_internal_analysis(raw_answer):
+        answer = _repair_generated_answer(
+            raw_answer, question, formatted_context, language_style
+        )
 
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
@@ -1067,8 +1125,9 @@ def stream_answer_events(
 
     language_style = _detect_language_style(question)
     chain = _prompt_for_query(query_type) | _llm(temperature) | StrOutputParser()
+    formatted_context = _format_context(docs)
     inputs = {
-        "context": _format_context(docs),
+        "context": formatted_context,
         "chat_history": _format_chat_history(chat_history),
         "question": question,
         "language_instruction": _language_instruction(language_style),
@@ -1109,8 +1168,12 @@ def stream_answer_events(
 
     raw_answer = "".join(raw_answer_parts)
     if rejected_internal_analysis:
-        answer = _safe_generated_answer(raw_answer, question)
-        yield {"type": "token", "text": answer}
+        answer = "".join(visible_answer_parts).strip()
+        if not answer:
+            answer = _repair_generated_answer(
+                raw_answer, question, formatted_context, language_style
+            )
+            yield {"type": "token", "text": answer}
     else:
         cleaned_remainder = re.sub(
             r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE

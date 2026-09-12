@@ -145,17 +145,19 @@
     const storageInterruptKey = "texmin_voice_interrupt_at";
     const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
     const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
-    const noTranscriptSilenceLimitMs = 650;
+    const noTranscriptSilenceLimitMs = 700;
     const transcriptSilenceLimitMs = 850;
     const finalTranscriptSilenceLimitMs = 520;
     const continuedSpeechThreshold = 0.055;
+    const calibrationDurationMs = 700;
+    const speechConfirmationMs = 180;
     const resumeDelayMs = 40;
     const resumePollMs = 120;
     const waitingFreshMs = 300000;
-    const voiceThreshold = 0.025;
-    const waitingVoiceThreshold = 0.04;
-    const interruptVoiceThreshold = 0.07;
-    const interruptHoldMs = 160;
+    const voiceThreshold = 0.04;
+    const waitingVoiceThreshold = 0.065;
+    const interruptVoiceThreshold = 0.09;
+    const interruptHoldMs = 260;
 
     let recognition = null;
     let listening = false;
@@ -178,6 +180,44 @@
     let recordedChunks = [];
     let recordingMime = "audio/webm";
     let submissionPending = false;
+    let calibrationStartedAt = 0;
+    let calibrationSamples = [];
+    let noiseFloor = 0.008;
+    let speechCandidateAt = 0;
+
+    function percentile(values, ratio) {
+      if (!values.length) return 0;
+      const sorted = [...values].sort((left, right) => left - right);
+      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+    }
+
+    function calibrating(now = Date.now()) {
+      return calibrationStartedAt > 0 && now - calibrationStartedAt < calibrationDurationMs;
+    }
+
+    function updateNoiseFloor(volume, now) {
+      if (calibrating(now)) {
+        calibrationSamples.push(volume);
+        if (calibrationSamples.length > 80) calibrationSamples.shift();
+        noiseFloor = Math.max(0.004, percentile(calibrationSamples, 0.35));
+        return;
+      }
+
+      const speechThreshold = Math.max(voiceThreshold, noiseFloor * 2.6 + 0.012);
+      if (!heardSpeech && volume < speechThreshold * 0.82) {
+        noiseFloor = noiseFloor * 0.96 + volume * 0.04;
+      }
+    }
+
+    function activeVoiceThreshold(waiting = false, speaking = false) {
+      const adaptive = noiseFloor * (waiting ? 3.2 : 2.6) + (waiting ? 0.02 : 0.012);
+      const minimum = speaking
+        ? interruptVoiceThreshold
+        : waiting
+          ? waitingVoiceThreshold
+          : voiceThreshold;
+      return Math.max(minimum, adaptive);
+    }
 
     function sendStreamlitMessage(type, data) {
       window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
@@ -287,24 +327,37 @@
       }
       const volume = Math.min(1, Math.sqrt(sum / waveData.length) * 4.2);
       const now = Date.now();
+      updateNoiseFloor(volume, now);
       if (listening) {
+        if (calibrating(now)) {
+          statusText.textContent = "Checking background noise...";
+        } else if (statusText.textContent === "Checking background noise...") {
+          statusText.textContent = "Listening...";
+        }
         const hasTranscript = Boolean(currentTranscript());
         if (hasTranscript) {
-          if (volume > continuedSpeechThreshold) {
+          const threshold = Math.max(continuedSpeechThreshold, noiseFloor * 2.0 + 0.01);
+          if (volume > threshold) {
             lastTranscriptAt = now;
           } else if (now - (lastTranscriptAt || lastVoiceAt) > transcriptQuietLimit()) {
             finishUtterance();
             return;
           }
-        } else if (volume > voiceThreshold) {
-          heardSpeech = true;
-          lastVoiceAt = now;
+        } else if (!calibrating(now) && volume > activeVoiceThreshold()) {
+          if (!speechCandidateAt) speechCandidateAt = now;
+          if (now - speechCandidateAt >= speechConfirmationMs) {
+            heardSpeech = true;
+            lastVoiceAt = now;
+          }
+        } else if (!heardSpeech) {
+          speechCandidateAt = 0;
         } else if (heardSpeech && now - lastVoiceAt > noTranscriptSilenceLimitMs) {
           finishUtterance();
           return;
         }
-      } else if (isWaitingForAssistant() && !inputIsSuppressed()) {
-        const bargeInThreshold = assistantIsSpeaking() ? interruptVoiceThreshold : waitingVoiceThreshold;
+      } else if (!calibrating(now) && isWaitingForAssistant() && !inputIsSuppressed()) {
+        const speaking = assistantIsSpeaking();
+        const bargeInThreshold = activeVoiceThreshold(true, speaking);
         if (volume > bargeInThreshold) {
           if (!interruptVoiceStartedAt) interruptVoiceStartedAt = now;
           if (now - interruptVoiceStartedAt > interruptHoldMs) {
@@ -345,6 +398,7 @@
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
+          channelCount: 1,
         },
       });
       const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -354,6 +408,10 @@
       waveData = new Uint8Array(analyser.fftSize);
       const source = audioContext.createMediaStreamSource(mediaStream);
       source.connect(analyser);
+      calibrationStartedAt = Date.now();
+      calibrationSamples = [];
+      noiseFloor = 0.008;
+      speechCandidateAt = 0;
       drawLiveWave();
     }
 
@@ -452,6 +510,13 @@
       if (!listening) return;
       listening = false;
       statusText.textContent = "";
+      if (!heardSpeech && !currentTranscript()) {
+        discardRecording();
+        stopMeter();
+        statusText.textContent = "I did not hear clear speech. Please try again.";
+        setButtonState("idle");
+        return;
+      }
       if (recognition) {
         recognition.stop();
       } else {
@@ -536,6 +601,7 @@
       interruptArmed = false;
       localStorage.removeItem(storageWaitingKey);
       heardSpeech = false;
+      speechCandidateAt = 0;
       lastVoiceAt = Date.now();
       lastTranscriptAt = 0;
       preview.textContent = "";

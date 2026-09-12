@@ -212,9 +212,44 @@ def _decode_audio(path: str):
     max_seconds = float(os.getenv("WHISPER_MAX_AUDIO_SECONDS", "30"))
     if len(audio) > int(16000 * max_seconds):
         audio = audio[: int(16000 * max_seconds)]
-    if float(np.max(np.abs(audio))) < 0.001:
-        raise STTEngineError("Speech was not detected in the recording.")
+    _validate_speech_signal(audio, np)
     return audio
+
+
+def _validate_speech_signal(audio, np_module=None) -> None:
+    if np_module is None:
+        try:
+            import numpy as np_module
+        except ImportError as exc:
+            raise STTEngineError("Offline speech validation requires NumPy.") from exc
+
+    minimum_duration = float(os.getenv("STT_MIN_SPEECH_SECONDS", "0.35"))
+    if len(audio) < int(16000 * minimum_duration):
+        raise STTEngineError("Speech was not detected in the recording.")
+
+    peak = float(np_module.max(np_module.abs(audio)))
+    rms = float(np_module.sqrt(np_module.mean(np_module.square(audio))))
+    if peak < float(os.getenv("STT_MIN_AUDIO_PEAK", "0.012")) or rms < float(
+        os.getenv("STT_MIN_AUDIO_RMS", "0.0025")
+    ):
+        raise STTEngineError("Speech was not detected in the recording.")
+
+    frame_size = 320
+    usable = len(audio) - (len(audio) % frame_size)
+    if usable < frame_size * 4:
+        return
+    frames = audio[:usable].reshape(-1, frame_size)
+    frame_rms = np_module.sqrt(np_module.mean(np_module.square(frames), axis=1))
+    noise_floor = float(np_module.percentile(frame_rms, 20))
+    speech_level = float(np_module.percentile(frame_rms, 90))
+    minimum_snr_db = float(os.getenv("STT_MIN_SNR_DB", "4.0"))
+    snr_db = 20.0 * float(np_module.log10((speech_level + 1e-6) / (noise_floor + 1e-6)))
+    active_threshold = max(noise_floor * 2.0, float(os.getenv("STT_MIN_FRAME_RMS", "0.004")))
+    active_ratio = float(np_module.mean(frame_rms >= active_threshold))
+    if snr_db < minimum_snr_db or active_ratio < float(
+        os.getenv("STT_MIN_ACTIVE_FRAME_RATIO", "0.02")
+    ):
+        raise STTEngineError("Only background noise was detected. Please speak closer to the microphone.")
 
 
 def _transcribe_transformers(model_state: dict, path: str, language: str | None):

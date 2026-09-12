@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import io
 import wave
+import numpy as np
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -17,7 +18,7 @@ from services.qa_service import (
     _looks_like_internal_analysis,
     _topic_opener_response,
 )
-from services.stt_service import STTEngineError, transcribe_audio
+from services.stt_service import STTEngineError, _validate_speech_signal, transcribe_audio
 from services.tts_service import TTSEngineError, _validate_audio
 
 
@@ -72,6 +73,23 @@ class ConversationStyleTests(unittest.TestCase):
         leaked = "Okay, let me break this down. The user just said let's talk about DGMS."
         self.assertTrue(_looks_like_internal_analysis(leaked))
 
+    def test_third_person_and_context_narration_are_rejected(self):
+        leaks = (
+            "They asked for a general discussion about DGMS.",
+            "Based on the provided context, DGMS is a regulator.",
+            "I should give a concise overview of mine safety.",
+        )
+        for leaked in leaks:
+            with self.subTest(leaked=leaked):
+                self.assertTrue(_looks_like_internal_analysis(leaked))
+
+    def test_more_topic_openers_are_answered_directly(self):
+        for question in ("Can we talk about DGMS?", "I want to talk about DGMS"):
+            with self.subTest(question=question):
+                response = _topic_opener_response(question)
+                self.assertIsNotNone(response)
+                self.assertNotIn("the user", response.answer.lower())
+
 
 class LexicalIndexTests(unittest.TestCase):
     def test_exact_regulation_identifier_is_retrievable(self):
@@ -106,6 +124,12 @@ class SpeechReliabilityTests(unittest.TestCase):
     def test_empty_microphone_recording_is_rejected_before_model_load(self):
         with self.assertRaises(STTEngineError):
             transcribe_audio(b"")
+
+    def test_stationary_background_noise_is_rejected(self):
+        rng = np.random.default_rng(7)
+        noise = rng.normal(0.0, 0.006, 16000).astype(np.float32)
+        with self.assertRaises(STTEngineError):
+            _validate_speech_signal(noise)
 
 
 if __name__ == "__main__":
