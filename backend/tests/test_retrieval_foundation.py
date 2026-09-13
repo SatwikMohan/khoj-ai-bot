@@ -46,6 +46,32 @@ class RetrievalQueryTests(unittest.TestCase):
         result = _history_aware_query("When did it apply?", history)
         self.assertIn("Recent conversation", result)
 
+    def test_short_about_followup_keeps_previous_user_topic(self):
+        history = [
+            {"role": "user", "content": "Let's discuss the DGMS rules"},
+            {"role": "assistant", "content": "What would you like to explore?"},
+        ]
+        result = _history_aware_query("I want to know about the circulars", history)
+        self.assertIn("DGMS rules", result)
+        self.assertIn("circulars", result)
+
+    def test_standalone_metric_question_does_not_inherit_old_topic(self):
+        history = [{"role": "user", "content": "Tell me about DGMS circulars"}]
+        question = "number of critical mines"
+        self.assertEqual(_history_aware_query(question, history), question)
+
+    def test_polluted_assistant_history_is_not_used_for_followup_retrieval(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": "First, I need to identify the most relevant references.",
+            }
+        ]
+        self.assertEqual(
+            _history_aware_query("What did it require?", history),
+            "What did it require?",
+        )
+
 
 class ConversationStyleTests(unittest.TestCase):
     def test_wellbeing_gets_a_specific_conversational_reply(self):
@@ -79,6 +105,8 @@ class ConversationStyleTests(unittest.TestCase):
             "They asked for a general discussion about DGMS.",
             "Based on the provided context, DGMS is a regulator.",
             "I should give a concise overview of mine safety.",
+            'Reference 1 mentions "30 critical minerals" but not mines.',
+            "Looking at the MCQs, several values appear.",
         )
         for leaked in leaks:
             with self.subTest(leaked=leaked):

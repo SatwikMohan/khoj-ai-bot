@@ -568,9 +568,10 @@ def render_lip_sync_avatar(
     resume_listener_on_end: bool = True,
     queue_id: str | None = None,
     audio_mime: str = DEFAULT_AUDIO_MIME,
+    thinking: bool = False,
 ) -> None:
     spoken_text = " ".join((text or "").split())
-    safe_text = escape(spoken_text[:120])
+    safe_text = escape(spoken_text[:120] or ("Thinking" if thinking else ""))
     model_json = json.dumps(avatar_model_source())
     speech_text_json = json.dumps(spoken_text[:4000])
     autoplay_attr = "autoplay" if autoplay else ""
@@ -578,6 +579,9 @@ def render_lip_sync_avatar(
     resume_listener_js = "true" if resume_listener_on_end else "false"
     queue_id_json = json.dumps(queue_id or "")
     audio_mime_json = json.dumps(audio_mime or DEFAULT_AUDIO_MIME)
+    thinking_js = "true" if thinking else "false"
+    thinking_class = " thinking" if thinking else ""
+    badge_text = "THINKING" if thinking else "3D AVATAR"
     audio_src_attr = f'src="data:{audio_mime};base64,{audio_b64}"' if audio_b64 else ""
     components.html(
         f"""
@@ -668,6 +672,44 @@ def render_lip_sync_avatar(
                 letter-spacing: 0;
             }}
 
+            .texmin-avatar.thinking .avatar-badge {{
+                background: rgba(92, 124, 255, 0.2);
+                color: #dce4ff;
+                animation: thinkingPulse 1.4s ease-in-out infinite;
+            }}
+
+            .thinking-dots {{
+                display: none;
+                gap: 5px;
+                align-items: center;
+                margin-top: 10px;
+            }}
+
+            .texmin-avatar.thinking .thinking-dots {{
+                display: flex;
+            }}
+
+            .thinking-dots span {{
+                width: 6px;
+                height: 6px;
+                border-radius: 999px;
+                background: #7f9cff;
+                animation: thinkingDot 1.05s ease-in-out infinite;
+            }}
+
+            .thinking-dots span:nth-child(2) {{ animation-delay: 0.16s; }}
+            .thinking-dots span:nth-child(3) {{ animation-delay: 0.32s; }}
+
+            @keyframes thinkingPulse {{
+                0%, 100% {{ opacity: 0.62; transform: scale(0.98); }}
+                50% {{ opacity: 1; transform: scale(1.03); }}
+            }}
+
+            @keyframes thinkingDot {{
+                0%, 100% {{ opacity: 0.3; transform: translateY(0); }}
+                50% {{ opacity: 1; transform: translateY(-4px); }}
+            }}
+
             .avatar-copy {{
                 min-width: 0;
             }}
@@ -697,15 +739,16 @@ def render_lip_sync_avatar(
 
         </style>
 
-        <div class="texmin-avatar" id="avatar">
+        <div class="texmin-avatar{thinking_class}" id="avatar">
             <div class="avatar-stage">
                 <div id="avatarScene" aria-label="{escape(ASSISTANT_NAME)} 3D presenter avatar">
                     <div class="model-status" id="modelStatus">Loading 3D avatar...</div>
-                    <div class="avatar-badge">3D AVATAR</div>
+                    <div class="avatar-badge" id="avatarBadge">{badge_text}</div>
                 </div>
                 <div class="avatar-copy">
                     <div class="avatar-title">{escape(ASSISTANT_NAME)}</div>
                     <div class="avatar-line" id="avatarLine">{safe_text}</div>
+                    <div class="thinking-dots" aria-label="Thinking"><span></span><span></span><span></span></div>
                 </div>
             </div>
             <audio id="voice" controls {autoplay_attr} playsinline preload="auto" {audio_src_attr}></audio>
@@ -732,6 +775,7 @@ def render_lip_sync_avatar(
             const queueId = {queue_id_json};
             const initialAudioMime = {audio_mime_json};
             const queuedPlayback = Boolean(queueId);
+            let thinking = {thinking_js};
             const storageInterruptKey = "texmin_voice_interrupt_at";
             const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
             const storageWaitingKey = "texmin_voice_waiting_since";
@@ -740,6 +784,7 @@ def render_lip_sync_avatar(
             const avatar = document.getElementById("avatar");
             const audio = document.getElementById("voice");
             const avatarLine = document.getElementById("avatarLine");
+            const avatarBadge = document.getElementById("avatarBadge");
             const sceneHost = document.getElementById("avatarScene");
             const modelStatus = document.getElementById("modelStatus");
             let context;
@@ -1105,6 +1150,17 @@ def render_lip_sync_avatar(
                 return mouthOpen;
             }}
 
+            function setThinking(active) {{
+                thinking = Boolean(active);
+                avatar.classList.toggle("thinking", thinking);
+                avatarBadge.textContent = thinking ? "THINKING" : "3D AVATAR";
+                if (thinking) {{
+                    avatarLine.textContent = "Thinking";
+                }} else if (avatarLine.textContent === "Thinking") {{
+                    avatarLine.textContent = speechText || "Ready";
+                }}
+            }}
+
             function drawAvatar(now) {{
                 const delta = clock.getDelta();
                 if (mixer) {{
@@ -1163,13 +1219,16 @@ def render_lip_sync_avatar(
                 }});
 
                 if (avatarRoot) {{
-                    avatarRoot.rotation.y = avatarBaseYaw + Math.sin(t * 0.72) * 0.06 + speechEnergy * Math.sin(t * 5.2) * 0.012;
+                    const thinkingTurn = thinking && !speaking ? Math.sin(t * 1.15) * 0.085 : 0;
+                    avatarRoot.rotation.y = avatarBaseYaw + Math.sin(t * 0.72) * 0.06 + thinkingTurn + speechEnergy * Math.sin(t * 5.2) * 0.012;
                     const base = avatarRoot.userData.basePosition || new THREE.Vector3(0, -0.04, 0);
-                    avatarRoot.position.set(base.x, base.y + Math.sin(t * 1.3) * 0.018, base.z);
+                    const thinkingLift = thinking && !speaking ? Math.sin(t * 2.1) * 0.008 : 0;
+                    avatarRoot.position.set(base.x, base.y + Math.sin(t * 1.3) * 0.018 + thinkingLift, base.z);
                 }}
                 if (headNode) {{
-                    headNode.rotation.x = headNode.userData.restRotationX + speechEnergy * Math.sin(t * 3.1 + 0.4) * 0.006;
-                    headNode.rotation.y = headNode.userData.restRotationY;
+                    const thinkingNod = thinking && !speaking ? -0.035 + Math.sin(t * 1.8) * 0.025 : 0;
+                    headNode.rotation.x = headNode.userData.restRotationX + thinkingNod + speechEnergy * Math.sin(t * 3.1 + 0.4) * 0.006;
+                    headNode.rotation.y = headNode.userData.restRotationY + (thinking && !speaking ? Math.sin(t * 0.9) * 0.035 : 0);
                     headNode.rotation.z = headNode.userData.restRotationZ + Math.sin(t * 0.82) * 0.018 + speechEnergy * Math.sin(t * 4.4) * 0.012;
                 }}
 
@@ -1281,6 +1340,7 @@ def render_lip_sync_avatar(
 
             function stopAvatarPlaybackForInterrupt() {{
                 queueInterrupted = true;
+                setThinking(false);
                 stopWaitingCue();
                 audioQueue.length = 0;
                 pendingQueueItems.clear();
@@ -1350,6 +1410,7 @@ def render_lip_sync_avatar(
 
                 const item = audioQueue.shift();
                 stopWaitingCue();
+                setThinking(false);
                 queuePlaying = true;
                 speechText = item.text || "";
                 avatarLine.textContent = speechText;
@@ -1372,6 +1433,7 @@ def render_lip_sync_avatar(
                 if (message.type !== "texmin:avatar-queue" || message.queueId !== queueId) return;
                 if (queueInterrupted) return;
                 if (message.audio) {{
+                    setThinking(false);
                     pendingQueueItems.set(message.sequence, {{
                         audio: message.audio,
                         text: message.text || "",
@@ -1386,6 +1448,9 @@ def render_lip_sync_avatar(
                 if (message.final) {{
                     queueFinalized = true;
                     finalQueueSequence = message.finalSequence;
+                    if (!message.audio && !audioQueue.length && pendingQueueItems.size === 0) {{
+                        setThinking(false);
+                    }}
                 }}
                 if (!queuePlaying && audio.paused) playNextQueuedAudio();
             }});
@@ -2231,7 +2296,6 @@ def ask_api_stream(
     queue_id = (
         uuid.uuid4().hex
         if avatar_container is not None
-        and st.session_state.tts_enabled
         and st.session_state.avatar_enabled
         else None
     )
@@ -2284,6 +2348,7 @@ def ask_api_stream(
                 autoplay=True,
                 resume_listener_on_end=True,
                 queue_id=queue_id,
+                thinking=True,
             )
 
     try:
@@ -2329,6 +2394,8 @@ def ask_api_stream(
                     detail = response.json().get("detail", response.text)
                 except ValueError:
                     detail = response.text
+                if queue_id and queue_sender is not None:
+                    _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
                 return "", [], f"API returned {response.status_code}: {detail}", None, DEFAULT_AUDIO_MIME, None
 
             render_streaming_message(container, "", status)
@@ -2351,7 +2418,7 @@ def ask_api_stream(
                     answer += token
                     speech_buffer += token
                     render_streaming_message(container, answer, status)
-                    if queue_id and not audio_error:
+                    if queue_id and tts_config["enabled"] and not audio_error:
                         segments, speech_buffer = _split_speakable_prefix(speech_buffer)
                         for segment in segments:
                             submit_tts(segment)
@@ -2363,17 +2430,21 @@ def ask_api_stream(
                 elif event_type == "error":
                     if tts_executor is not None:
                         tts_executor.shutdown(wait=False, cancel_futures=True)
+                    if queue_id and queue_sender is not None:
+                        _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
                     return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
     except requests.RequestException as exc:
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
+        if queue_id and queue_sender is not None:
+            _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
         return "", [], f"Could not reach the FastAPI server at {url}. {exc}", None, audio_mime, audio_error
 
     if queue_id and queue_sender is not None:
         remaining_speech = speech_buffer.strip()
         if not remaining_speech and not audio_chunks:
             remaining_speech = answer.strip()
-        if remaining_speech and not audio_error:
+        if remaining_speech and tts_config["enabled"] and not audio_error:
             submit_tts(remaining_speech)
         flush_tts(block=True)
         if tts_executor is not None:

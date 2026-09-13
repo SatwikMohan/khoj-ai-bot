@@ -169,7 +169,10 @@ INTERNAL_ANALYSIS_PATTERNS = tuple(
         r"\b(?:working notes|context snippets|retrieved context|provided context|supplied material|conversation history|conversation memory|chat history)\b",
         r"\b(?:the )?(?:key points|information) (?:from|in) (?:the )?(?:notes|context|documents?)\b",
         r"\bi (?:see|can see|notice) (?:that )?(?:the )?(?:context|notes|documents?|snippets?)\b",
-        r"\b(?:i need to|i should|i will|i'll|we need to|let me|let's) (?:answer|explain|respond|give|craft|keep|break|unpack|analy[sz]e|check|look)\b",
+        r"\blooking at (?:the )?(?:references?|mcqs?|results?|material)\b",
+        r"\breference \d+ (?:mentions?|states?|says?|contains?|shows?)\b",
+        r"\b(?:wait,? )?the question (?:is|asks?)\b",
+        r"\b(?:i need to|i should|i will|i'll|we need to|let me|let's) (?:answer|explain|respond|give|craft|keep|break|unpack|analy[sz]e|check|look|identify|review|find)\b",
         r"\b(?:my|the) (?:reasoning|analysis|thought process)\b",
     )
 )
@@ -339,12 +342,12 @@ def _repair_generated_answer(
             ),
             (
                 "human",
-                "/no_think\nPrivate reference material:\n{context}\n\nQuestion:\n{question}\n\n"
+                "Private reference material:\n{context}\n\nQuestion:\n{question}\n\n"
                 "Write the direct reply now. Start immediately with the useful information:",
             ),
         ]
     )
-    chain = repair_prompt | _llm(0.1) | StrOutputParser()
+    chain = repair_prompt | _llm(0.1, reasoning=True) | StrOutputParser()
     repaired = chain.invoke(
         {
             "context": context,
@@ -546,12 +549,17 @@ def _vector_store() -> Chroma:
     return _vector_store_for(collection_name, profile_fingerprint, str(db_dir))
 
 
-@lru_cache(maxsize=8)
-def _chat_llm(model: str, base_url: str, temperature: float) -> ChatOllama:
+@lru_cache(maxsize=12)
+def _chat_llm(
+    model: str,
+    base_url: str,
+    temperature: float,
+    reasoning: bool,
+) -> ChatOllama:
     return ChatOllama(
         model=model,
         base_url=base_url,
-        reasoning=False,
+        reasoning=reasoning,
         temperature=temperature,
         keep_alive=_ollama_keep_alive(),
         num_predict=_env_int("OLLAMA_NUM_PREDICT", 180),
@@ -559,12 +567,15 @@ def _chat_llm(model: str, base_url: str, temperature: float) -> ChatOllama:
     )
 
 
-def _llm(temperature: float) -> ChatOllama:
+def _llm(temperature: float, reasoning: bool | None = None) -> ChatOllama:
     _load_environment()
+    if reasoning is None:
+        reasoning = _env_bool("QA_REASONING_ENABLED", True)
     return _chat_llm(
         os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b"),
         _ollama_base_url(),
         round(float(temperature), 2),
+        reasoning,
     )
 
 
@@ -590,7 +601,7 @@ def warm_up_qa_engine() -> None:
     _vector_store()
     _, profile_fingerprint = _active_index()
     _embeddings(profile_fingerprint).embed_query("warm up document retrieval")
-    _llm(0.1).invoke("Reply with: ready")
+    _llm(0.1, reasoning=False).invoke("Reply with: ready")
 
 
 def runtime_status() -> dict:
@@ -748,9 +759,11 @@ def _format_chat_history(chat_history: list[ChatMessage] | None) -> str:
         if role not in {"user", "assistant"}:
             continue
         content = _trim_text(_message_content(message), max_message_chars)
+        if role == "assistant" and _looks_like_internal_analysis(content):
+            continue
         if not content:
             continue
-        label = "User" if role == "user" else "Assistant"
+        label = "You said" if role == "user" else "I replied"
         line = f"{label}: {content}"
         if used_chars + len(line) > max_chars:
             break
@@ -758,7 +771,7 @@ def _format_chat_history(chat_history: list[ChatMessage] | None) -> str:
         used_chars += len(line)
 
     if not lines:
-        return "No prior conversation."
+        return "No earlier conversation."
     return "\n".join(reversed(lines))
 
 
@@ -785,24 +798,46 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         "uske",
     }
     words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
-    is_follow_up = len(words) <= 10 and bool(words & follow_up_markers)
+    explicit_follow_up_phrases = (
+        "i want to know about the ",
+        "i want to know about those ",
+        "i want to know about these ",
+        "tell me about the ",
+        "tell me about those ",
+        "tell me about these ",
+        "what about ",
+        "how about ",
+        "and what about ",
+    )
+    is_follow_up = len(words) <= 12 and (
+        bool(words & follow_up_markers)
+        or normalized.startswith(explicit_follow_up_phrases)
+    )
     if not is_follow_up:
         return question
 
-    recent_history = []
-    for message in (chat_history or [])[-4:]:
+    recent_user_messages = []
+    clean_assistant_messages = []
+    for message in (chat_history or [])[-6:]:
         role = _message_role(message).strip().lower()
         if role not in {"user", "assistant"}:
             continue
         content = _trim_text(_message_content(message), 180)
-        if content:
-            recent_history.append(f"{role}: {content}")
+        if not content:
+            continue
+        if role == "user" and not _is_general_query(content):
+            recent_user_messages.append(content)
+        elif role == "assistant" and not _looks_like_internal_analysis(content):
+            clean_assistant_messages.append(content)
 
-    if not recent_history:
+    topic_messages = recent_user_messages[-2:] or clean_assistant_messages[-1:]
+    if not topic_messages:
         return question
 
-    history_text = " ".join(recent_history)
-    return _trim_text(f"Current question: {question}. Recent conversation: {history_text}", 900)
+    history_text = " ".join(topic_messages)
+    return _trim_text(
+        f"Current question: {question}. Recent conversation topic: {history_text}", 900
+    )
 
 
 def _hybrid_rank(dense_docs: list, lexical_docs: list, limit: int):
@@ -993,8 +1028,11 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "the person as 'the user' or as 'they'; address them naturally as 'you'. Start with the useful "
         "answer, not with 'okay, let me break this down'. Use a compact conversational paragraph for "
         "simple questions and bullets only when they genuinely help. Use only facts supported by the "
-        "document material. If information is missing, say exactly what is missing and ask one short "
-        "question. Return only the direct reply and nothing else."
+        "document material. Match every number to the exact noun and unit in the question; never "
+        "substitute a related figure. For example, mineral blocks are not mines. If the material "
+        "supports only a related metric, state that distinction instead of guessing. If information "
+        "is missing, say exactly what is missing and ask one short question. Think privately and "
+        "briefly, then return only the direct reply and nothing else."
     )
 
     if query_type == "summary":
@@ -1016,7 +1054,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
             ("system", system_message),
             (
                 "human",
-                "/no_think\nPrivate conversation memory:\n{chat_history}\n\n"
+                "Private conversation memory:\n{chat_history}\n\n"
                 "Private reference material:\n{context}\n\nMessage to answer:\n{question}\n\n"
                 "Reply directly now:",
             ),
@@ -1120,7 +1158,7 @@ def stream_answer_events(
         }
         return
 
-    yield {"type": "status", "message": ""}
+    yield {"type": "status", "message": "Finding the most relevant information…"}
     vector_store = _vector_store()
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _history_aware_query(question, chat_history)
@@ -1161,7 +1199,7 @@ def stream_answer_events(
     rejected_internal_analysis = False
     generation_started_at = time.perf_counter()
     first_token_ms = None
-    yield {"type": "status", "message": ""}
+    yield {"type": "status", "message": "Thinking…"}
     for token in chain.stream(inputs):
         if not token:
             continue
@@ -1174,7 +1212,7 @@ def stream_answer_events(
         has_sentence_boundary = bool(
             re.search(r"[.!?।](?:\s|$)|\n", pending_visible_text)
         )
-        if not has_sentence_boundary and len(pending_visible_text) < 220:
+        if not has_sentence_boundary and len(pending_visible_text) < 96:
             continue
         cleaned_segment = re.sub(
             r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE
