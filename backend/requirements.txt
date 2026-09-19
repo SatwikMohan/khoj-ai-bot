@@ -25,3 +25,6 @@ python-multipart>=0.0.9
 kokoro>=0.9.4,<1
 transformers>=4.51,<5
 accelerate>=1,<2
+f5-tts==1.1.22
+pydub>=0.25,<1
+soundfile>=0.12,<1
