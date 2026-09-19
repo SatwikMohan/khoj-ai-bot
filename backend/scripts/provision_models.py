@@ -72,7 +72,12 @@ def provision_indicf5() -> None:
 
     location = os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5")
     print(f"Provisioning IndicF5 model: {location}")
-    AutoModel.from_pretrained(location, trust_remote_code=True, local_files_only=False)
+    AutoModel.from_pretrained(
+        location,
+        trust_remote_code=True,
+        local_files_only=False,
+        low_cpu_mem_usage=False,
+    )
 
 
 def provision_reranker() -> None:

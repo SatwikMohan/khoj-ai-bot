@@ -503,6 +503,7 @@ def _indicf5_model():
             model_location,
             trust_remote_code=True,
             local_files_only=offline,
+            low_cpu_mem_usage=False,
         )
         if os.getenv("INDICF5_DEVICE", "cuda") == "cuda" and torch.cuda.is_available():
             model = model.cuda()

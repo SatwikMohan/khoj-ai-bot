@@ -15,10 +15,12 @@ RUN python -m venv --system-site-packages /opt/texmin-venv
 ENV PATH="/opt/texmin-venv/bin:${PATH}"
 
 COPY requirements.txt .
+COPY scripts/patch_f5_tts.py /tmp/patch_f5_tts.py
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r requirements.txt \
     && python -m pip uninstall -y torchaudio \
     && CMAKE_BUILD_PARALLEL_LEVEL=8 USE_CUDA=1 BUILD_SOX=0 BUILD_KALDI=0 BUILD_RNNT=0 python -m pip install --no-cache-dir --no-build-isolation --no-deps "git+https://github.com/pytorch/audio.git@v2.11.0" \
+    && python /tmp/patch_f5_tts.py \
     && python -c "import torch, torchaudio; print('Verified NVIDIA Torch/TorchAudio:', torch.__version__, torchaudio.__version__)"
 
 COPY . .
