@@ -502,7 +502,7 @@ def add_chunks(
     collection_name: str,
     chunks: list[Document],
 ) -> list[str]:
-    batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
+    batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "256"))
     ids = [chunk_id(chunk) for chunk in chunks]
 
     for start in range(0, len(chunks), batch_size):
@@ -535,7 +535,7 @@ def prepare_file(
 
 
 def iter_prepared_files(work_items: list[tuple], raw_data_dir: Path):
-    workers = max(1, min(8, int(os.getenv("INGESTION_WORKERS", "2"))))
+    workers = max(1, min(8, int(os.getenv("INGESTION_WORKERS", "8"))))
     if workers == 1:
         for item in work_items:
             yield item, prepare_file(item[1], raw_data_dir)
@@ -649,7 +649,7 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
 
     print(
         f"Preparing {len(work_items)} changed files with "
-        f"{max(1, min(8, int(os.getenv('INGESTION_WORKERS', '2'))))} extraction workers."
+        f"{max(1, min(8, int(os.getenv('INGESTION_WORKERS', '8'))))} extraction workers."
     )
     for item, prepared in iter_prepared_files(work_items, raw_data_dir):
         source, path, current_hash, file_size, mtime_ns = item
