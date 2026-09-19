@@ -4,8 +4,8 @@ Install Ollama and pull the local models first:
 
 ```powershell
 irm https://ollama.com/install.ps1 | iex
-ollama pull qwen3:30b
-ollama pull embeddinggemma
+ollama pull qwen3.5:122b
+ollama pull qwen3-embedding:8b-q8_0
 ollama list
 ```
 
@@ -17,20 +17,15 @@ python -m pip install -r requirements.txt
 python train_engine.py --force-rebuild
 ```
 
-Run the FastAPI backend first:
+Run the combined application from the repository root:
 
 ```powershell
-python -m uvicorn main:app --reload
+python -m pip install -r backend/requirements.txt -r frontend/requirements.txt
+python frontend/run_combined.py
 ```
 
-Then run the Streamlit UI:
-
-```powershell
-cd ../frontend
-python -m streamlit run app.py
-```
-
-The UI calls `http://127.0.0.1:8000/qa/ask` by default. You can change the API URL from the sidebar or set `QA_API_URL`.
+The UI imports backend service functions by default, while the FastAPI endpoints remain live on
+port 8000. Set `BACKEND_CALL_MODE=http` to test the HTTP transport instead.
 
 Latency tuning defaults are set for conversational use:
 
@@ -50,5 +45,5 @@ The broader retrieval defaults help the bot compare repeated topics across diffe
 facts, years, rules, figures, and sources instead of answering from the first matching chunk only.
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
-Text-to-speech defaults to local offline system voices with `TTS_ENGINE=local`.
-Set `TTS_ENGINE=edge` only when you want Edge TTS and have internet access.
+Text-to-speech uses local Kokoro for English and provisioned IndicF5 for Hindi/mixed-script
+Hinglish when `TTS_ENGINE=auto`. Edge TTS is online-only.

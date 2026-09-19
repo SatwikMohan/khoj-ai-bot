@@ -43,7 +43,7 @@ class EmbeddingProfile:
 
 
 def embedding_profile(model: str | None = None) -> EmbeddingProfile:
-    model = (model or os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:0.6b")).strip()
+    model = (model or os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b-q8_0")).strip()
     normalized = model.lower().split(":", 1)[0]
 
     if "embeddinggemma" in normalized:

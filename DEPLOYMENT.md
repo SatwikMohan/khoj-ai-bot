@@ -1,10 +1,11 @@
 # Texmin AI Deployment
 
-This repository is split into a FastAPI backend and a Streamlit frontend:
+This repository contains a FastAPI backend and a Streamlit frontend. In deployment they run
+inside one `app` container and share the same imported Python service layer and model caches:
 
 - `backend/`: API, text-to-speech, document ingestion, and vector search.
 - `frontend/`: Streamlit chat UI and avatar assets.
-- `backend/.env`: runtime settings for the backend and Compose services.
+- `backend/.env`: runtime settings for the application and Compose services.
 - `backend/raw_data_files/`: source documents mounted into the backend container.
 - `backend/vector_db/`: persistent Chroma database mounted into the backend container.
 
@@ -27,13 +28,17 @@ Use `$oauthtoken` as the username and an NGC personal API key as the password.
 docker compose up --build
 ```
 
-Compose now performs these readiness-gated steps automatically:
+Compose performs these readiness-gated steps automatically:
 
 - pulls the configured Ollama response and embedding models;
 - provisions Faster-Whisper and Kokoro into the persistent `ai_models` volume;
 - builds a versioned vector and lexical index;
 - atomically promotes the new index only after ingestion finishes;
-- starts the API and frontend after all required models and the index are ready.
+- starts the combined application after all required models and the index are ready.
+
+Streamlit uses `BACKEND_CALL_MODE=inprocess`, so chat, STT, and TTS do not make HTTP calls.
+FastAPI still runs on port 8000 in the same application process for integrations and health
+checks. Neither an in-process call nor a call to localhost/Compose DNS requires internet.
 
 Subsequent starts can operate without internet access because model and index data are persistent.
 Start the already-provisioned stack with:
@@ -52,14 +57,32 @@ docker compose cp gateway:/data/caddy/pki/authorities/local/root.crt ./texmin-ro
 
 Trust `texmin-root.crt` once on each authorized Windows, macOS, or Linux client. Alternatively,
 use an SSH tunnel to `localhost:8501`. Check API readiness with
-`docker compose exec backend curl -f http://localhost:8000/ready`.
+`docker compose exec app curl -f http://localhost:8000/ready`.
 
-### Hindi neural voice
+### Offline Hinglish voice
 
-IndicF5 is gated and needs a licensed reference voice. After accepting the model terms, set
-`PROVISION_INDICF5=true`, `HF_TOKEN`, `INDICF5_REFERENCE_AUDIO`, and
-`INDICF5_REFERENCE_TEXT`, then rerun `backend-model-init`. Without those values Hindi falls
-back to the installed operating-system voice; English continues through Kokoro.
+Kokoro is English-only in this project. For Hinglish, use IndicF5 with mixed-script output:
+
+1. Accept the gated `ai4bharat/IndicF5` model terms while the DGX still has internet access.
+2. Put a clean 5-15 second Hindi/Hinglish WAV in `backend/voice_samples/reference.wav`.
+3. Add its exact transcript and these settings to `backend/.env`:
+
+```dotenv
+PROVISION_INDICF5=true
+HF_TOKEN=your_hugging_face_token_for_first_provisioning_only
+INDICF5_REFERENCE_AUDIO=/voices/reference.wav
+INDICF5_REFERENCE_TEXT=reference audio ka exact transcript
+RESPONSE_LANGUAGE=hinglish
+HINGLISH_SCRIPT=mixed
+TTS_ENGINE=auto
+```
+
+4. Run `docker compose up --build` once online. After provisioning succeeds, remove `HF_TOKEN`
+   from the runtime environment and use `docker compose up -d` offline.
+
+Mixed script means Hindi words are emitted in Devanagari while English words remain Latin;
+this is still spoken Hinglish and gives IndicF5 substantially better pronunciation than feeding
+Roman Hindi to an English Kokoro voice. The FastAPI `/tts/speech` endpoint remains available.
 
 ### Rebuilding and evaluation
 
@@ -73,28 +96,20 @@ docker compose run --rm index-init python train_engine.py --force-rebuild
 Populate `backend/evals/golden.jsonl`, then measure corpus-specific recall and latency:
 
 ```bash
-docker compose run --rm backend python evaluate_retrieval.py evals/golden.jsonl --top-k 5
+docker compose run --rm app python backend/evaluate_retrieval.py backend/evals/golden.jsonl --top-k 5
 ```
 
 ## Local Development
 
-Run the backend:
+For the same in-process behavior used by deployment, install both requirement files and run:
 
 ```bash
-cd backend
-python -m pip install -r requirements.txt
-python -m uvicorn main:app --reload
+python -m pip install -r backend/requirements.txt -r frontend/requirements.txt
+python frontend/run_combined.py
 ```
 
-Run the frontend in another terminal:
-
-```bash
-cd frontend
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
-
-For local non-Docker runs, set `OLLAMA_BASE_URL=http://localhost:11434` and `QA_API_URL=http://127.0.0.1:8000`.
+For local non-Docker runs, set `OLLAMA_BASE_URL=http://localhost:11434`. To test the old
+HTTP transport, set `BACKEND_CALL_MODE=http` and `QA_API_URL=http://127.0.0.1:8000`.
 The QA API sends recent chat history with each question, but the backend trims it before prompting so document context still gets most of the token budget.
 Document ingestion OCRs scanned PDF pages and standalone image files when `OCR_ENABLED=true`.
 The backend Docker image includes Tesseract with English and Hindi language data; for local non-Docker runs, install Tesseract separately and keep it on `PATH`.

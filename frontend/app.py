@@ -3,8 +3,10 @@ import base64
 import json
 import mimetypes
 import re
+import sys
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from html import escape
 
@@ -15,6 +17,7 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
+BACKEND_CALL_MODE = os.getenv("BACKEND_CALL_MODE", "inprocess").strip().lower()
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Khoj").strip() or "Khoj"
 DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(os.getenv("QA_TEMPERATURE", "0.5"))))
 DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
@@ -68,6 +71,7 @@ ONLINE_VOICE_OPTIONS = {
     "Japanese Japan - Nanami": "ja-JP-NanamiNeural",
 }
 OFFLINE_VOICE_OPTIONS = {
+    "Hinglish / Hindi - IndicF5 reference voice": "indicf5",
     "Natural English - Heart": "af_heart",
     "Natural English - Bella": "af_bella",
     "Natural English - Nicole": "af_nicole",
@@ -2055,6 +2059,60 @@ def render_voice_query_component() -> str | None:
     return text
 
 
+@lru_cache(maxsize=1)
+def _inprocess_backend() -> dict:
+    """Load the backend service layer without going through FastAPI/HTTP."""
+    backend_dir = APP_DIR.parent / "backend"
+    if not backend_dir.exists():
+        configured = os.getenv("BACKEND_SOURCE_DIR", "").strip()
+        backend_dir = Path(configured) if configured else backend_dir
+    backend_path = str(backend_dir.resolve())
+    if backend_path not in sys.path:
+        sys.path.insert(0, backend_path)
+
+    from helpers.request_models import ChatMessage, TTSRequest
+    from services.qa_service import answer_question, stream_answer_events
+    from services.stt_service import transcribe_audio
+    from services.tts_service import synthesize_speech
+
+    return {
+        "ChatMessage": ChatMessage,
+        "TTSRequest": TTSRequest,
+        "answer_question": answer_question,
+        "stream_answer_events": stream_answer_events,
+        "transcribe_audio": transcribe_audio,
+        "synthesize_speech": synthesize_speech,
+    }
+
+
+def _qa_events(url: str, payload: dict):
+    if BACKEND_CALL_MODE == "inprocess":
+        services = _inprocess_backend()
+        history = [services["ChatMessage"](**item) for item in payload["chat_history"]]
+        yield from services["stream_answer_events"](
+            question=payload["question"],
+            top_k=payload["top_k"],
+            temperature=payload["temperature"],
+            chat_history=history,
+        )
+        return
+
+    with requests.post(url, json=payload, timeout=180, stream=True) as response:
+        if not response.ok:
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            raise RuntimeError(f"API returned {response.status_code}: {detail}")
+        for line in response.iter_lines(decode_unicode=True, chunk_size=1):
+            if not line or not line.startswith("data:"):
+                continue
+            try:
+                yield json.loads(line.removeprefix("data:").strip())
+            except json.JSONDecodeError:
+                continue
+
+
 def ask_stt(audio_b64: str, audio_mime: str) -> tuple[str, str | None]:
     url = st.session_state.api_url.rstrip("/") + "/stt/transcribe"
     try:
@@ -2070,6 +2128,14 @@ def ask_stt(audio_b64: str, audio_mime: str) -> tuple[str, str | None]:
     }
     base_mime = audio_mime.split(";", 1)[0].lower()
     extension = extension_by_mime.get(base_mime, ".webm")
+    if BACKEND_CALL_MODE == "inprocess":
+        try:
+            services = _inprocess_backend()
+            result = services["transcribe_audio"](audio, suffix=extension, language=None)
+            return str(result.get("text", "")).strip(), None
+        except Exception as exc:
+            return "", f"Offline speech recognition failed: {exc}"
+
     try:
         response = requests.post(
             url,
@@ -2135,6 +2201,21 @@ def ask_api(question: str) -> tuple[str, list[dict], str | None]:
         "temperature": st.session_state.temperature,
         "chat_history": _chat_history_payload(exclude_latest_user=True),
     }
+
+    if BACKEND_CALL_MODE == "inprocess":
+        try:
+            services = _inprocess_backend()
+            history = [services["ChatMessage"](**item) for item in payload["chat_history"]]
+            result = services["answer_question"](
+                question=question,
+                top_k=payload["top_k"],
+                temperature=payload["temperature"],
+                chat_history=history,
+            )
+            data = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+            return data.get("answer", ""), data.get("sources", []), None
+        except Exception as exc:
+            return "", [], f"In-process QA failed: {exc}"
 
     try:
         response = requests.post(url, json=payload, timeout=120)
@@ -2352,93 +2433,40 @@ def ask_api_stream(
             )
 
     try:
-        with requests.post(url, json=payload, timeout=180, stream=True) as response:
-            if response.status_code == 404:
-                fallback_answer, fallback_sources, fallback_error = ask_api(question)
-                if fallback_answer:
-                    render_streaming_message(container, fallback_answer)
-                fallback_audio = None
-                fallback_audio_mime = DEFAULT_AUDIO_MIME
-                fallback_audio_error = None
-                if fallback_answer and not fallback_error and st.session_state.tts_enabled:
-                    fallback_audio, fallback_audio_mime, fallback_audio_error = ask_tts(fallback_answer)
-                    if fallback_audio:
-                        if queue_id and queue_sender is not None:
-                            _send_avatar_queue_event(
-                                queue_sender,
-                                queue_id,
-                                queue_sequence,
-                                fallback_audio,
-                                fallback_answer,
-                                fallback_audio_mime,
-                            )
-                            queue_sequence += 1
-                        else:
-                            _render_streaming_avatar_audio(
-                                avatar_container,
-                                fallback_audio,
-                                fallback_answer,
-                                fallback_audio_mime,
-                            )
-                if queue_id and queue_sender is not None:
-                    _send_avatar_queue_event(
-                        queue_sender,
-                        queue_id,
-                        queue_sequence,
-                        final=True,
-                    )
-                return fallback_answer, fallback_sources, fallback_error, fallback_audio, fallback_audio_mime, fallback_audio_error
-
-            if not response.ok:
-                try:
-                    detail = response.json().get("detail", response.text)
-                except ValueError:
-                    detail = response.text
+        render_streaming_message(container, "", status)
+        for event in _qa_events(url, payload):
+            event_type = event.get("type")
+            if event_type == "status":
+                status = event.get("message") or status
+                if not answer:
+                    render_streaming_message(container, "", status)
+            elif event_type == "token":
+                token = event.get("text", "")
+                answer += token
+                speech_buffer += token
+                render_streaming_message(container, answer, status)
+                if queue_id and tts_config["enabled"] and not audio_error:
+                    segments, speech_buffer = _split_speakable_prefix(speech_buffer)
+                    for segment in segments:
+                        submit_tts(segment)
+                    flush_tts()
+            elif event_type == "done":
+                answer = event.get("answer") or answer
+                sources = event.get("sources", [])
+                render_streaming_message(container, answer, status)
+            elif event_type == "error":
+                if tts_executor is not None:
+                    tts_executor.shutdown(wait=False, cancel_futures=True)
                 if queue_id and queue_sender is not None:
                     _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-                return "", [], f"API returned {response.status_code}: {detail}", None, DEFAULT_AUDIO_MIME, None
-
-            render_streaming_message(container, "", status)
-            for line in response.iter_lines(decode_unicode=True, chunk_size=1):
-                if not line or not line.startswith("data:"):
-                    continue
-
-                try:
-                    event = json.loads(line.removeprefix("data:").strip())
-                except json.JSONDecodeError:
-                    continue
-
-                event_type = event.get("type")
-                if event_type == "status":
-                    status = event.get("message") or status
-                    if not answer:
-                        render_streaming_message(container, "", status)
-                elif event_type == "token":
-                    token = event.get("text", "")
-                    answer += token
-                    speech_buffer += token
-                    render_streaming_message(container, answer, status)
-                    if queue_id and tts_config["enabled"] and not audio_error:
-                        segments, speech_buffer = _split_speakable_prefix(speech_buffer)
-                        for segment in segments:
-                            submit_tts(segment)
-                        flush_tts()
-                elif event_type == "done":
-                    answer = event.get("answer") or answer
-                    sources = event.get("sources", [])
-                    render_streaming_message(container, answer, status)
-                elif event_type == "error":
-                    if tts_executor is not None:
-                        tts_executor.shutdown(wait=False, cancel_futures=True)
-                    if queue_id and queue_sender is not None:
-                        _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-                    return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
-    except requests.RequestException as exc:
+                return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
+    except Exception as exc:
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         if queue_id and queue_sender is not None:
             _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-        return "", [], f"Could not reach the FastAPI server at {url}. {exc}", None, audio_mime, audio_error
+        transport = "in-process backend" if BACKEND_CALL_MODE == "inprocess" else url
+        return "", [], f"Could not use {transport}. {exc}", None, audio_mime, audio_error
 
     if queue_id and queue_sender is not None:
         remaining_speech = speech_buffer.strip()
@@ -2504,6 +2532,15 @@ def _request_tts(text: str, config: dict) -> tuple[bytes | None, str, str | None
         "max_words": config["max_words"],
     }
 
+    if BACKEND_CALL_MODE == "inprocess":
+        try:
+            services = _inprocess_backend()
+            request = services["TTSRequest"](**payload)
+            audio, audio_mime = services["synthesize_speech"](request)
+            return audio, audio_mime, None
+        except Exception as exc:
+            return None, DEFAULT_AUDIO_MIME, f"Voice is unavailable: {exc}"
+
     try:
         response = requests.post(url, json=payload, timeout=180)
     except requests.RequestException as exc:
@@ -2540,7 +2577,10 @@ voice_query_param = get_voice_query_param()
 
 with st.sidebar:
     st.markdown("### Settings")
-    st.session_state.api_url = st.text_input("API URL", value=st.session_state.api_url)
+    if BACKEND_CALL_MODE == "http":
+        st.session_state.api_url = st.text_input("API URL", value=st.session_state.api_url)
+    else:
+        st.caption("Backend: in-process (offline)")
     st.session_state.top_k = st.slider("Context chunks", 1, 10, st.session_state.top_k)
     st.session_state.temperature = st.slider(
         "Response warmth", 0.0, 1.0, st.session_state.temperature, 0.05

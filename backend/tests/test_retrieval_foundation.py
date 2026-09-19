@@ -4,6 +4,7 @@ import io
 import wave
 import numpy as np
 from pathlib import Path
+from unittest.mock import patch
 
 from langchain_core.documents import Document
 
@@ -12,6 +13,7 @@ from services.lexical_service import add_lexical_chunks, lexical_search
 from services.qa_service import (
     _clean_model_answer,
     _direct_answer_content,
+    _detect_language_style,
     _general_response,
     _history_aware_query,
     _is_general_query,
@@ -74,6 +76,14 @@ class RetrievalQueryTests(unittest.TestCase):
 
 
 class ConversationStyleTests(unittest.TestCase):
+    def test_response_language_can_force_hinglish_for_voice_queries(self):
+        with patch.dict("os.environ", {"RESPONSE_LANGUAGE": "hinglish"}):
+            self.assertEqual(_detect_language_style("What are the rules?"), "hinglish")
+
+    def test_auto_response_language_still_detects_english(self):
+        with patch.dict("os.environ", {"RESPONSE_LANGUAGE": "auto"}):
+            self.assertEqual(_detect_language_style("What are the rules?"), "english")
+
     def test_wellbeing_gets_a_specific_conversational_reply(self):
         answer = _general_response("How are you?").answer
         self.assertIn("doing well", answer)

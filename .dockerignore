@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+.venv
+**/__pycache__
+**/*.pyc
+**/*.log
+backend/.env
+backend/raw_data_files
+backend/vector_db

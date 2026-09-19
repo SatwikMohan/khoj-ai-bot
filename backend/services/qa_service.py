@@ -207,6 +207,10 @@ def _normalized_query(question: str) -> str:
 
 
 def _detect_language_style(question: str) -> str:
+    configured_style = os.getenv("RESPONSE_LANGUAGE", "auto").strip().lower()
+    if configured_style in {"english", "hindi", "hinglish"}:
+        return configured_style
+
     normalized = _normalized_query(question)
     if DEVANAGARI_RE.search(question):
         return "hindi"
@@ -226,6 +230,12 @@ def _language_instruction(language_style: str) -> str:
             "with clear Markdown formatting where it helps."
         )
     if language_style == "hinglish":
+        if os.getenv("HINGLISH_SCRIPT", "mixed").strip().lower() == "mixed":
+            return (
+                "Respond in natural spoken Hinglish. Write Hindi words in Devanagari and "
+                "keep English words in Latin script so the offline Indic voice pronounces "
+                "both clearly. Keep it warm and use light Markdown only where it helps."
+            )
         return (
             "Respond in natural Hinglish using simple Roman Hindi-English phrasing. Keep it "
             "warm and spoken, with clear Markdown formatting where it helps."
@@ -572,7 +582,7 @@ def _llm(temperature: float, reasoning: bool | None = None) -> ChatOllama:
     if reasoning is None:
         reasoning = _env_bool("QA_REASONING_ENABLED", True)
     return _chat_llm(
-        os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b"),
+        os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b"),
         _ollama_base_url(),
         round(float(temperature), 2),
         reasoning,
@@ -586,7 +596,7 @@ def warm_up_qa_engine() -> None:
 
     installed_models = ollama_model_names(_ollama_base_url())
     profile = embedding_profile()
-    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b")
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b")
     missing = [
         model
         for model in (profile.model, chat_model)
@@ -607,7 +617,7 @@ def warm_up_qa_engine() -> None:
 def runtime_status() -> dict:
     _load_environment()
     profile = embedding_profile()
-    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3:30b")
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b")
     status = {
         "status": "ok",
         "ollama": "unavailable",

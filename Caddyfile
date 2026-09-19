@@ -1,5 +1,5 @@
 {$TEXMIN_HOST:localhost} {
     tls internal
     encode zstd gzip
-    reverse_proxy frontend:8501
+    reverse_proxy app:8501
 }

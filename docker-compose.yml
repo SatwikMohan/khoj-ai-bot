@@ -12,7 +12,7 @@ services:
       OLLAMA_FLASH_ATTENTION: "1"
       OLLAMA_KV_CACHE_TYPE: q8_0
       OLLAMA_MAX_LOADED_MODELS: "2"
-      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_NUM_PARALLEL: "1"
     deploy:
       resources:
         reservations:
@@ -37,7 +37,9 @@ services:
       OLLAMA_HOST: http://ollama:11434
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - ollama pull "$${OLLAMA_CHAT_MODEL}" && ollama pull "$${OLLAMA_EMBED_MODEL}"
+      - >-
+        ollama show "$${OLLAMA_CHAT_MODEL}" >/dev/null 2>&1 || ollama pull "$${OLLAMA_CHAT_MODEL}";
+        ollama show "$${OLLAMA_EMBED_MODEL}" >/dev/null 2>&1 || ollama pull "$${OLLAMA_EMBED_MODEL}"
 
   backend-model-init:
     build:
@@ -72,10 +74,10 @@ services:
       - ./backend/vector_db:/app/vector_db
     command: ["python", "train_engine.py"]
 
-  backend:
+  app:
     build:
-      context: ./backend
-    container_name: texmin-backend
+      context: .
+    container_name: texmin-app
     restart: unless-stopped
     ipc: host
     ulimits:
@@ -94,9 +96,13 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       WHISPER_MODEL_DIR: /models/whisper
+      BACKEND_CALL_MODE: inprocess
+      BACKEND_SOURCE_DIR: /app/backend
+      AVATAR_MODEL_FILE: assets/scene.gltf
     volumes:
       - ./backend/raw_data_files:/app/raw_data_files:ro
       - ./backend/vector_db:/app/vector_db
+      - ./backend/voice_samples:/voices:ro
       - ai_models:/models
     deploy:
       resources:
@@ -105,40 +111,22 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    ports:
+      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready').read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read(); urllib.request.urlopen('http://127.0.0.1:8000/ready').read()"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 180s
-
-  frontend:
-    build:
-      context: ./frontend
-    container_name: texmin-frontend
-    restart: unless-stopped
-    depends_on:
-      - backend
-    env_file:
-      - ./backend/.env
-    environment:
-      QA_API_URL: http://backend:8000
-      AVATAR_MODEL_FILE: assets/scene.gltf
-    ports:
-      - "127.0.0.1:8501:8501"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
 
   gateway:
     image: caddy:2.10.2-alpine
     container_name: texmin-gateway
     restart: unless-stopped
     depends_on:
-      frontend:
+      app:
         condition: service_healthy
     env_file:
       - ./backend/.env
