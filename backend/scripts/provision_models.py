@@ -64,20 +64,29 @@ def provision_kokoro(voices: list[str]) -> None:
         print(f"Provisioned Kokoro voice: {voice}")
 
 
-def provision_indicf5() -> None:
+def provision_indicf5() -> bool:
     if not env_flag("PROVISION_INDICF5", False):
         print("IndicF5 provisioning skipped. Set PROVISION_INDICF5=true after accepting its terms.")
-        return
-    from transformers import AutoModel
-
+        return False
     location = os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5")
     print(f"Provisioning IndicF5 model: {location}")
-    AutoModel.from_pretrained(
-        location,
-        trust_remote_code=True,
-        local_files_only=False,
-        low_cpu_mem_usage=False,
-    )
+    from services.indicf5_runtime import load_indicf5_runtime
+
+    runtime = load_indicf5_runtime(location, local_files_only=False)
+    reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
+    reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
+    if not reference_audio or not Path(reference_audio).is_file():
+        raise RuntimeError(
+            "INDICF5_REFERENCE_AUDIO must point to a mounted reference WAV during provisioning."
+        )
+    if not reference_text or reference_text == "reference audio ka exact transcript":
+        raise RuntimeError("INDICF5_REFERENCE_TEXT must be the exact spoken transcript, not the placeholder.")
+
+    audio, sample_rate = runtime.synthesize("नमस्ते।", reference_audio, reference_text)
+    if audio is None or len(audio) < sample_rate // 4:
+        raise RuntimeError("IndicF5 smoke test returned empty or abnormally short audio.")
+    print(f"IndicF5 synthesis smoke test passed at {sample_rate} Hz.")
+    return True
 
 
 def provision_reranker() -> None:
@@ -109,7 +118,10 @@ if __name__ == "__main__":
     }
     if marker.exists():
         try:
-            if json.loads(marker.read_text(encoding="utf-8")) == desired:
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+            settings_match = all(existing.get(key) == value for key, value in desired.items())
+            indic_ready = not desired["indicf5"] or existing.get("indicf5_ready", False)
+            if settings_match and indic_ready:
                 print("Neural speech and reranker models are already provisioned.")
                 raise SystemExit(0)
         except json.JSONDecodeError:
@@ -118,6 +130,13 @@ if __name__ == "__main__":
     provision_whisper()
     provision_kokoro(configured_kokoro_voices)
     provision_reranker()
-    provision_indicf5()
+    indicf5_ready = False
+    try:
+        indicf5_ready = provision_indicf5()
+    except Exception as exc:
+        if env_flag("INDICF5_REQUIRED", False):
+            raise
+        print(f"WARNING: IndicF5 provisioning failed; continuing without Hinglish TTS: {exc}")
     model_root.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps(desired, indent=2, sort_keys=True), encoding="utf-8")
+    marker_payload = {**desired, "indicf5_ready": indicf5_ready}
+    marker.write_text(json.dumps(marker_payload, indent=2, sort_keys=True), encoding="utf-8")

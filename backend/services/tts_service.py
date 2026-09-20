@@ -490,25 +490,13 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
 @lru_cache(maxsize=1)
 def _indicf5_model():
-    try:
-        import torch
-        from transformers import AutoModel
-    except ImportError as exc:
-        raise TTSEngineError("IndicF5 requires torch and transformers.") from exc
+    from services.indicf5_runtime import IndicF5RuntimeError, load_indicf5_runtime
 
     model_location = os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5")
     offline = os.getenv("OFFLINE_MODE", "true").lower() in {"1", "true", "yes", "on"}
     try:
-        model = AutoModel.from_pretrained(
-            model_location,
-            trust_remote_code=True,
-            local_files_only=offline,
-            low_cpu_mem_usage=False,
-        )
-        if os.getenv("INDICF5_DEVICE", "cuda") == "cuda" and torch.cuda.is_available():
-            model = model.cuda()
-        return model.eval()
-    except Exception as exc:
+        return load_indicf5_runtime(model_location, local_files_only=offline)
+    except IndicF5RuntimeError as exc:
         raise TTSEngineError(f"IndicF5 could not load from '{model_location}': {exc}") from exc
 
 
@@ -526,14 +514,14 @@ def _synthesize_indicf5_speech(payload: TTSRequest) -> tuple[bytes, str]:
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     try:
         with NEURAL_TTS_LOCK:
-            audio = _indicf5_model()(
+            audio, sample_rate = _indicf5_model().synthesize(
                 spoken_text,
-                ref_audio_path=reference_audio,
-                ref_text=reference_text,
+                reference_audio,
+                reference_text,
             )
         if hasattr(audio, "detach"):
             audio = audio.detach().float().cpu().numpy()
-        return _audio_array_to_wav(audio), "audio/wav"
+        return _audio_array_to_wav(audio, sample_rate=sample_rate), "audio/wav"
     except TTSEngineError:
         raise
     except Exception as exc:

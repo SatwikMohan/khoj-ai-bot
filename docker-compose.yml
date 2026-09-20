@@ -55,6 +55,7 @@ services:
       WHISPER_MODEL_DIR: /models/whisper
     volumes:
       - ai_models:/models
+      - ./backend/voice_samples:/voices:ro
     command: ["python", "scripts/provision_models.py"]
 
   index-init:
