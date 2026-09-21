@@ -2369,7 +2369,6 @@ def ask_api_stream(
     answer = ""
     sources = []
     status = ""
-    speech_buffer = ""
     audio_chunks = []
     audio_mime = DEFAULT_AUDIO_MIME
     audio_error = None
@@ -2443,13 +2442,7 @@ def ask_api_stream(
             elif event_type == "token":
                 token = event.get("text", "")
                 answer += token
-                speech_buffer += token
                 render_streaming_message(container, answer, status)
-                if queue_id and tts_config["enabled"] and not audio_error:
-                    segments, speech_buffer = _split_speakable_prefix(speech_buffer)
-                    for segment in segments:
-                        submit_tts(segment)
-                    flush_tts()
             elif event_type == "done":
                 answer = event.get("answer") or answer
                 sources = event.get("sources", [])
@@ -2483,11 +2476,9 @@ def ask_api_stream(
         )
 
     if queue_id and queue_sender is not None:
-        remaining_speech = speech_buffer.strip()
-        if not remaining_speech and not audio_chunks:
-            remaining_speech = answer.strip()
-        if remaining_speech and tts_config["enabled"] and not audio_error:
-            submit_tts(remaining_speech)
+        final_speech = answer.strip()
+        if final_speech and tts_config["enabled"] and not audio_error:
+            submit_tts(final_speech)
         flush_tts(block=True)
         if tts_executor is not None:
             tts_executor.shutdown(wait=True, cancel_futures=False)

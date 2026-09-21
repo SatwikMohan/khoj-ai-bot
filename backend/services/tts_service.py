@@ -272,6 +272,7 @@ def _validate_audio(audio: bytes, media_type: str) -> None:
 
 
 def tts_runtime_status() -> dict:
+    _load_environment()
     with VOICE_HEALTH_LOCK:
         failures = {name: count for name, (count, _failed_at) in VOICE_FAILURES.items()}
     status = {
@@ -281,11 +282,32 @@ def tts_runtime_status() -> dict:
         "failures": failures,
     }
     engine = status["engine"].strip().lower()
-    if engine in {"auto", "kokoro"}:
+    if engine == "auto":
+        response_language = os.getenv("RESPONSE_LANGUAGE", "auto").strip().lower()
+        engine = "indicf5" if response_language in {"hindi", "hinglish"} else "kokoro"
+        status["selected_engine"] = engine
+    if engine == "kokoro":
         try:
             voice = os.getenv("KOKORO_VOICE", "af_heart")
             _warm_kokoro_voice(os.getenv("KOKORO_LANGUAGE", "a"), voice)
             status["voice"] = voice
+        except TTSEngineError as exc:
+            status["status"] = "unavailable"
+            status["error"] = str(exc)
+    elif engine in {"indicf5", "indic-f5"}:
+        try:
+            reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
+            reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
+            if not reference_audio or not reference_text:
+                raise TTSEngineError(
+                    "INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required."
+                )
+            if not Path(reference_audio).is_file():
+                raise TTSEngineError(
+                    f"IndicF5 reference audio does not exist: {reference_audio}."
+                )
+            _indicf5_model()
+            status["reference_audio"] = reference_audio
         except TTSEngineError as exc:
             status["status"] = "unavailable"
             status["error"] = str(exc)

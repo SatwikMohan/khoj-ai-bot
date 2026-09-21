@@ -7,10 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from langchain_core.documents import Document
+from langchain_core.messages import HumanMessage
 
 from services.embedding_service import embedding_profile
 from services.lexical_service import add_lexical_chunks, lexical_search
 from services.qa_service import (
+    _chat_llm,
     _clean_model_answer,
     _direct_answer_content,
     _detect_language_style,
@@ -23,7 +25,7 @@ from services.qa_service import (
     _topic_opener_response,
 )
 from services.stt_service import STTEngineError, _validate_speech_signal, transcribe_audio
-from services.tts_service import TTSEngineError, _validate_audio
+from services.tts_service import TTSEngineError, _validate_audio, tts_runtime_status
 
 
 class EmbeddingProfileTests(unittest.TestCase):
@@ -36,6 +38,13 @@ class EmbeddingProfileTests(unittest.TestCase):
         profile = embedding_profile("nomic-embed-text")
         self.assertEqual(profile.query_prefix, "search_query: ")
         self.assertEqual(profile.document_prefix, "search_document: ")
+
+
+class ChatModelConfigurationTests(unittest.TestCase):
+    def test_reasoning_disabled_is_sent_to_ollama_as_think_false(self):
+        model = _chat_llm("qwen3.5:35b", "http://ollama:11434", 0.2, False)
+        params = model._chat_params([HumanMessage(content="Answer directly.")])
+        self.assertIs(params["think"], False)
 
 
 class RetrievalQueryTests(unittest.TestCase):
@@ -202,6 +211,26 @@ class SpeechReliabilityTests(unittest.TestCase):
         audio = self.wav_bytes(b"\x00\x00" * 2000)
         with self.assertRaises(TTSEngineError):
             _validate_audio(audio, "audio/wav")
+
+    def test_hinglish_auto_tts_checks_indicf5_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.wav"
+            reference.write_bytes(self.wav_bytes(b"\x01\x00" * 2000))
+            environment = {
+                "TTS_ENGINE": "auto",
+                "RESPONSE_LANGUAGE": "hinglish",
+                "INDICF5_REFERENCE_AUDIO": str(reference),
+                "INDICF5_REFERENCE_TEXT": "Exact reference transcript.",
+            }
+            with (
+                patch.dict("os.environ", environment),
+                patch("services.tts_service._indicf5_model", return_value=object()) as loader,
+            ):
+                status = tts_runtime_status()
+
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(status["selected_engine"], "indicf5")
+        loader.assert_called_once_with()
 
     def test_empty_microphone_recording_is_rejected_before_model_load(self):
         with self.assertRaises(STTEngineError):

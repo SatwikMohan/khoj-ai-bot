@@ -243,6 +243,10 @@ def _language_instruction(language_style: str) -> str:
     return "Respond in natural English with clear Markdown formatting where it helps."
 
 
+def _thinking_instruction() -> str:
+    return "/think" if _env_bool("QA_REASONING_ENABLED", False) else "/no_think"
+
+
 def _is_general_query(question: str) -> bool:
     normalized = _normalized_query(question)
     if not normalized:
@@ -353,7 +357,7 @@ def _repair_generated_answer(
             (
                 "human",
                 "Private reference material:\n{context}\n\nQuestion:\n{question}\n\n"
-                "Write the direct reply now. Start immediately with the useful information:",
+                "/no_think\n\nWrite the direct reply now. Start immediately with the useful information:",
             ),
         ]
     )
@@ -1091,7 +1095,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
                 "human",
                 "Private conversation memory:\n{chat_history}\n\n"
                 "Private reference material:\n{context}\n\nMessage to answer:\n{question}\n\n"
-                "Reply directly now:",
+                "{thinking_instruction}\n\nReply directly now:",
             ),
         ]
     )
@@ -1142,6 +1146,7 @@ def answer_question(
             "chat_history": _format_chat_history(chat_history),
             "question": question,
             "language_instruction": _language_instruction(language_style),
+            "thinking_instruction": _thinking_instruction(),
         }
     )
     answer = _direct_answer_content(raw_answer)
@@ -1226,6 +1231,7 @@ def stream_answer_events(
         "chat_history": _format_chat_history(chat_history),
         "question": question,
         "language_instruction": _language_instruction(language_style),
+        "thinking_instruction": _thinking_instruction(),
     }
 
     raw_answer_parts = []
