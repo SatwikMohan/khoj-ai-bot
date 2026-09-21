@@ -510,15 +510,6 @@ def _synthesize_indicf5_speech(payload: TTSRequest) -> tuple[bytes, str]:
     reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
     if not reference_audio or not reference_text:
         raise TTSEngineError("INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required.")
-    normalized_reference = reference_text.strip().lower()
-    if normalized_reference in {
-        "reference audio ka exact transcript",
-        "reference audio ka exact transcript hai yeh",
-    }:
-        raise TTSEngineError(
-            "INDICF5_REFERENCE_TEXT is still a placeholder. Replace it with the exact "
-            "words spoken in reference.wav."
-        )
     if not Path(reference_audio).exists():
         raise TTSEngineError(
             f"IndicF5 reference audio does not exist: {reference_audio}. "

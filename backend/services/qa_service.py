@@ -1063,8 +1063,8 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "document material. Match every number to the exact noun and unit in the question; never "
         "substitute a related figure. For example, mineral blocks are not mines. If the material "
         "supports only a related metric, state that distinction instead of guessing. If information "
-        "is missing, say exactly what is missing and ask one short question. Think privately and "
-        "briefly, then return only the direct reply and nothing else."
+        "is missing, say exactly what is missing and ask one short question. Do not output analysis, "
+        "planning, or thinking. Return the final reply immediately."
     )
 
     if query_type == "summary":
@@ -1238,8 +1238,6 @@ def stream_answer_events(
         if first_token_ms is None:
             first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
         raw_answer_parts.append(token)
-        if rejected_internal_analysis:
-            continue
         pending_visible_text += token
         has_sentence_boundary = bool(
             re.search(r"[.!?।](?:\s|$)|\n", pending_visible_text)

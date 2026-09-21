@@ -79,8 +79,8 @@ def provision_indicf5() -> bool:
         raise RuntimeError(
             "INDICF5_REFERENCE_AUDIO must point to a mounted reference WAV during provisioning."
         )
-    if not reference_text or reference_text == "reference audio ka exact transcript":
-        raise RuntimeError("INDICF5_REFERENCE_TEXT must be the exact spoken transcript, not the placeholder.")
+    if not reference_text:
+        raise RuntimeError("INDICF5_REFERENCE_TEXT must contain the spoken transcript.")
 
     audio, sample_rate = runtime.synthesize("नमस्ते।", reference_audio, reference_text)
     if audio is None or len(audio) < sample_rate // 4:
