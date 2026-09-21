@@ -576,6 +576,9 @@ def _chat_llm(
         keep_alive=_ollama_keep_alive(),
         num_predict=_env_int("OLLAMA_NUM_PREDICT", 384),
         num_ctx=_env_int("OLLAMA_NUM_CTX", 8192),
+        sync_client_kwargs={
+            "timeout": _env_int("OLLAMA_REQUEST_TIMEOUT_SECONDS", 180)
+        },
     )
 
 
@@ -1272,7 +1275,8 @@ def stream_answer_events(
             answer = _repair_generated_answer(
                 raw_answer, question, formatted_context, language_style
             )
-            yield {"type": "token", "text": answer}
+            if answer:
+                yield {"type": "token", "text": answer}
     else:
         cleaned_remainder = re.sub(
             r"</?(?:answer|think)>", "", pending_visible_text, flags=re.IGNORECASE
@@ -1290,6 +1294,12 @@ def stream_answer_events(
                     "The answer model returned no usable text after one recovery attempt."
                 )
             yield {"type": "token", "text": answer}
+
+    if not answer.strip():
+        raise QAEngineError(
+            "The chat model completed without returning an answer. Retry once; if this "
+            "continues, inspect the app and Ollama logs."
+        )
 
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),

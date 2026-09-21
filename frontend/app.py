@@ -2468,6 +2468,20 @@ def ask_api_stream(
         transport = "in-process backend" if BACKEND_CALL_MODE == "inprocess" else url
         return "", [], f"Could not use {transport}. {exc}", None, audio_mime, audio_error
 
+    if not answer.strip():
+        if tts_executor is not None:
+            tts_executor.shutdown(wait=False, cancel_futures=True)
+        if queue_id and queue_sender is not None:
+            _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
+        return (
+            "",
+            [],
+            "The chat model returned an empty response. Check the app and Ollama logs.",
+            None,
+            audio_mime,
+            audio_error,
+        )
+
     if queue_id and queue_sender is not None:
         remaining_speech = speech_buffer.strip()
         if not remaining_speech and not audio_chunks:
