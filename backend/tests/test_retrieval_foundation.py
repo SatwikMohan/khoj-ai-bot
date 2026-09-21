@@ -19,6 +19,7 @@ from services.qa_service import (
     _is_general_query,
     _is_summary_query,
     _looks_like_internal_analysis,
+    _retrieve_context,
     _topic_opener_response,
 )
 from services.stt_service import STTEngineError, _validate_speech_signal, transcribe_audio
@@ -38,6 +39,31 @@ class EmbeddingProfileTests(unittest.TestCase):
 
 
 class RetrievalQueryTests(unittest.TestCase):
+    def test_hybrid_retrieval_keeps_best_dense_candidate_below_threshold(self):
+        document = Document(
+            page_content="The permitted explosive storage limit is 100 kilograms.",
+            metadata={"source": "rule.pdf", "chunk_index": 1},
+        )
+
+        class VectorStore:
+            @staticmethod
+            def similarity_search_with_relevance_scores(_question, k):
+                return [(document, 0.11)]
+
+        environment = {
+            "HYBRID_SEARCH_ENABLED": "true",
+            "RELEVANCE_SCORE_THRESHOLD": "0.15",
+            "RERANK_ENABLED": "false",
+        }
+        with (
+            patch.dict("os.environ", environment),
+            patch("services.qa_service._active_index", return_value=("test", "fingerprint")),
+            patch("services.qa_service.lexical_search", return_value=[]),
+        ):
+            results = _retrieve_context(VectorStore(), "storage limit", 1)
+
+        self.assertEqual(results, [document])
+
     def test_standalone_question_is_not_polluted_by_history(self):
         history = [{"role": "user", "content": "unrelated annual report"}]
         question = "What is the permitted explosive storage limit?"

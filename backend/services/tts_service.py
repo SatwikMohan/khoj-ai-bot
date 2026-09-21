@@ -198,7 +198,12 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
         if name.strip()
     ]
     if engine_name == "auto":
-        primary_engine = "indicf5" if _contains_devanagari(payload.text) else "kokoro"
+        response_language = os.getenv("RESPONSE_LANGUAGE", "auto").strip().lower()
+        use_indic_voice = (
+            _contains_devanagari(payload.text)
+            or response_language in {"hindi", "hinglish"}
+        )
+        primary_engine = "indicf5" if use_indic_voice else "kokoro"
         engines = [primary_engine, *fallback_names]
     else:
         engines = [engine_name, *fallback_names]
@@ -501,15 +506,24 @@ def _indicf5_model():
 
 
 def _synthesize_indicf5_speech(payload: TTSRequest) -> tuple[bytes, str]:
-    if not _contains_devanagari(payload.text):
-        raise TTSEngineError("IndicF5 is reserved for Indic-script speech in automatic mode.")
-
     reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
     reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
     if not reference_audio or not reference_text:
         raise TTSEngineError("INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required.")
+    normalized_reference = reference_text.strip().lower()
+    if normalized_reference in {
+        "reference audio ka exact transcript",
+        "reference audio ka exact transcript hai yeh",
+    }:
+        raise TTSEngineError(
+            "INDICF5_REFERENCE_TEXT is still a placeholder. Replace it with the exact "
+            "words spoken in reference.wav."
+        )
     if not Path(reference_audio).exists():
-        raise TTSEngineError(f"IndicF5 reference audio does not exist: {reference_audio}")
+        raise TTSEngineError(
+            f"IndicF5 reference audio does not exist: {reference_audio}. "
+            "Add backend/voice_samples/reference.wav and rebuild/restart the app."
+        )
 
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     try:

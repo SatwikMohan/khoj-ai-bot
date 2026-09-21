@@ -26,9 +26,9 @@ from services.reranker_service import rerank_documents
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
 DEFAULT_VECTOR_DB_DIR = REPO_ROOT / "vector_db"
-DEFAULT_RELEVANCE_THRESHOLD = 0.25
-DEFAULT_CONTEXT_MAX_CHARS = 8000
-DEFAULT_RETRIEVAL_FETCH_K = 16
+DEFAULT_RELEVANCE_THRESHOLD = 0.15
+DEFAULT_CONTEXT_MAX_CHARS = 16000
+DEFAULT_RETRIEVAL_FETCH_K = 40
 DEFAULT_CHAT_HISTORY_MAX_TURNS = 4
 DEFAULT_CHAT_HISTORY_MAX_CHARS = 1200
 DEFAULT_CHAT_HISTORY_MESSAGE_CHARS = 320
@@ -357,7 +357,9 @@ def _repair_generated_answer(
             ),
         ]
     )
-    chain = repair_prompt | _llm(0.1, reasoning=True) | StrOutputParser()
+    # This is already a recovery pass. Reasoning here is slower and can
+    # reproduce the empty-content failure that caused the recovery.
+    chain = repair_prompt | _llm(0.1, reasoning=False) | StrOutputParser()
     repaired = chain.invoke(
         {
             "context": context,
@@ -572,7 +574,7 @@ def _chat_llm(
         reasoning=reasoning,
         temperature=temperature,
         keep_alive=_ollama_keep_alive(),
-        num_predict=_env_int("OLLAMA_NUM_PREDICT", 180),
+        num_predict=_env_int("OLLAMA_NUM_PREDICT", 384),
         num_ctx=_env_int("OLLAMA_NUM_CTX", 8192),
     )
 
@@ -580,9 +582,9 @@ def _chat_llm(
 def _llm(temperature: float, reasoning: bool | None = None) -> ChatOllama:
     _load_environment()
     if reasoning is None:
-        reasoning = _env_bool("QA_REASONING_ENABLED", True)
+        reasoning = _env_bool("QA_REASONING_ENABLED", False)
     return _chat_llm(
-        os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b"),
+        os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:35b"),
         _ollama_base_url(),
         round(float(temperature), 2),
         reasoning,
@@ -596,7 +598,7 @@ def warm_up_qa_engine() -> None:
 
     installed_models = ollama_model_names(_ollama_base_url())
     profile = embedding_profile()
-    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b")
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:35b")
     missing = [
         model
         for model in (profile.model, chat_model)
@@ -617,7 +619,7 @@ def warm_up_qa_engine() -> None:
 def runtime_status() -> dict:
     _load_environment()
     profile = embedding_profile()
-    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:122b")
+    chat_model = os.getenv("OLLAMA_CHAT_MODEL", "qwen3.5:35b")
     status = {
         "status": "ok",
         "ollama": "unavailable",
@@ -910,14 +912,15 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
 
     scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
     relevant_by_key = {}
+    dense_docs = []
     for doc, score in scored_docs:
         if not _has_meaningful_content(doc):
             continue
         doc.metadata["relevance_score"] = round(float(score), 4)
+        dense_docs.append(doc)
         if score >= threshold:
             relevant_by_key[_doc_key(doc)] = doc
 
-    dense_docs = list(relevant_by_key.values())
     if _env_bool("HYBRID_SEARCH_ENABLED", True):
         collection_name, _ = _active_index()
         lexical_docs = lexical_search(
@@ -928,17 +931,36 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
         )
         lexical_docs = [doc for doc in lexical_docs if _has_meaningful_content(doc)]
         if dense_docs or lexical_docs:
-            candidate_count = max(top_k, _env_int("RERANK_CANDIDATES", 12))
+            candidate_count = max(top_k, _env_int("RERANK_CANDIDATES", 24))
             candidates = _hybrid_rank(dense_docs, lexical_docs, candidate_count)
-            return _diversify_docs(rerank_documents(question, candidates, top_k), top_k)
+            selected = _diversify_docs(
+                rerank_documents(question, candidates, top_k), top_k
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "retrieval_completed",
+                        "dense_candidates": len(dense_docs),
+                        "above_threshold": len(relevant_by_key),
+                        "lexical_candidates": len(lexical_docs),
+                        "selected": len(selected),
+                        "best_dense_score": (
+                            dense_docs[0].metadata.get("relevance_score")
+                            if dense_docs
+                            else None
+                        ),
+                    }
+                )
+            )
+            return selected
 
     if not relevant_by_key:
-        if _env_bool("ALLOW_LOW_RELEVANCE_FALLBACK", False):
-            fallback_docs = [doc for doc, _score in scored_docs if _has_meaningful_content(doc)]
+        if _env_bool("ALLOW_LOW_RELEVANCE_FALLBACK", True):
+            fallback_docs = dense_docs
             return _diversify_docs(fallback_docs, top_k)
         return []
 
-    if not _env_bool("RETRIEVAL_MMR_ENABLED", False):
+    if not _env_bool("RETRIEVAL_MMR_ENABLED", True):
         return _diversify_docs(list(relevant_by_key.values()), top_k)
 
     lambda_mult = float(os.getenv("MMR_LAMBDA_MULT", "0.25"))
@@ -1074,7 +1096,7 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
 
 def answer_question(
     question: str,
-    top_k: int = 3,
+    top_k: int = 5,
     temperature: float = 0.5,
     chat_history: list[ChatMessage] | None = None,
 ) -> QAResponse:
@@ -1141,7 +1163,7 @@ def answer_question(
 
 def stream_answer_events(
     question: str,
-    top_k: int = 3,
+    top_k: int = 5,
     temperature: float = 0.5,
     chat_history: list[ChatMessage] | None = None,
 ) -> Iterator[dict]:
@@ -1244,7 +1266,10 @@ def stream_answer_events(
 
     raw_answer = "".join(raw_answer_parts)
     if rejected_internal_analysis:
-        answer = "".join(visible_answer_parts).strip()
+        # The model can begin with private reasoning and still append a valid
+        # final answer. Inspect the complete response instead of discarding
+        # everything after the first rejected segment.
+        answer = "".join(visible_answer_parts).strip() or _direct_answer_content(raw_answer)
         if not answer:
             answer = _repair_generated_answer(
                 raw_answer, question, formatted_context, language_style
@@ -1259,7 +1284,13 @@ def stream_answer_events(
             yield {"type": "token", "text": cleaned_remainder}
         answer = "".join(visible_answer_parts).strip()
         if not answer:
-            answer = _safe_generated_answer(raw_answer, question)
+            answer = _repair_generated_answer(
+                raw_answer, question, formatted_context, language_style
+            )
+            if not answer:
+                raise QAEngineError(
+                    "The answer model returned no usable text after one recovery attempt."
+                )
             yield {"type": "token", "text": answer}
 
     timings = {
