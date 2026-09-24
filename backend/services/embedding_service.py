@@ -1,3 +1,4 @@
+import config
 import hashlib
 import json
 import os
@@ -43,7 +44,7 @@ class EmbeddingProfile:
 
 
 def embedding_profile(model: str | None = None) -> EmbeddingProfile:
-    model = (model or os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:8b-q8_0")).strip()
+    model = (model or config.OLLAMA_EMBED_MODEL).strip()
     normalized = model.lower().split(":", 1)[0]
 
     if "embeddinggemma" in normalized:
@@ -64,8 +65,8 @@ def embedding_profile(model: str | None = None) -> EmbeddingProfile:
 
     return EmbeddingProfile(
         model=model,
-        query_prefix=os.getenv("EMBED_QUERY_PREFIX", query_prefix),
-        document_prefix=os.getenv("EMBED_DOCUMENT_PREFIX", document_prefix),
+        query_prefix=query_prefix if config.EMBED_QUERY_PREFIX is None else config.EMBED_QUERY_PREFIX,
+        document_prefix=document_prefix if config.EMBED_DOCUMENT_PREFIX is None else config.EMBED_DOCUMENT_PREFIX,
     )
 
 
@@ -78,6 +79,7 @@ class PromptedOllamaEmbeddings(Embeddings):
             model=profile.model,
             base_url=base_url,
             keep_alive=keep_alive,
+            client_kwargs={"timeout": float(config.OLLAMA_REQUEST_TIMEOUT_SECONDS)},
         )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:

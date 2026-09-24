@@ -212,25 +212,23 @@ class SpeechReliabilityTests(unittest.TestCase):
         with self.assertRaises(TTSEngineError):
             _validate_audio(audio, "audio/wav")
 
-    def test_hinglish_auto_tts_checks_indicf5_runtime(self):
+    def test_hinglish_auto_tts_uses_piper_without_reference_audio(self):
         with tempfile.TemporaryDirectory() as directory:
-            reference = Path(directory) / "reference.wav"
-            reference.write_bytes(self.wav_bytes(b"\x01\x00" * 2000))
+            for voice in ("hi_IN-pratham-medium", "en_US-lessac-medium"):
+                (Path(directory) / f"{voice}.onnx").write_bytes(b"test")
+                (Path(directory) / f"{voice}.onnx.json").write_text("{}")
             environment = {
                 "TTS_ENGINE": "auto",
                 "RESPONSE_LANGUAGE": "hinglish",
-                "INDICF5_REFERENCE_AUDIO": str(reference),
-                "INDICF5_REFERENCE_TEXT": "Exact reference transcript.",
+                "PIPER_MODEL_DIR": directory,
+                "INDICF5_REFERENCE_AUDIO": "",
+                "INDICF5_REFERENCE_TEXT": "",
             }
-            with (
-                patch.dict("os.environ", environment),
-                patch("services.tts_service._indicf5_model", return_value=object()) as loader,
-            ):
+            with patch.dict("os.environ", environment):
                 status = tts_runtime_status()
 
         self.assertEqual(status["status"], "ready")
-        self.assertEqual(status["selected_engine"], "indicf5")
-        loader.assert_called_once_with()
+        self.assertEqual(status["selected_engine"], "piper")
 
     def test_empty_microphone_recording_is_rejected_before_model_load(self):
         with self.assertRaises(STTEngineError):

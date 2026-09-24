@@ -1,3 +1,4 @@
+import config
 import os
 import threading
 from functools import lru_cache
@@ -6,20 +7,13 @@ from functools import lru_cache
 RERANK_LOCK = threading.Lock()
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 @lru_cache(maxsize=1)
 def _components():
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    model_name = os.getenv("RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B")
-    offline = _env_bool("OFFLINE_MODE", True)
+    model_name = config.RERANK_MODEL
+    offline = config.OFFLINE_MODE
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         padding_side="left",
@@ -42,7 +36,7 @@ def _format_pair(question: str, document: str) -> str:
 
 
 def rerank_documents(question: str, documents: list, top_k: int):
-    if not _env_bool("RERANK_ENABLED", True) or len(documents) <= 1:
+    if not config.RERANK_ENABLED or len(documents) <= 1:
         return documents[:top_k]
 
     try:
@@ -56,7 +50,7 @@ def rerank_documents(question: str, documents: list, top_k: int):
         suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
         suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
-        max_length = int(os.getenv("RERANK_MAX_LENGTH", "2048"))
+        max_length = int(config.RERANK_MAX_LENGTH)
         pairs = [
             _format_pair(question, document.page_content[:6000])
             for document in documents
@@ -76,7 +70,9 @@ def rerank_documents(question: str, documents: list, top_k: int):
         yes_id = tokenizer.encode("yes", add_special_tokens=False)[0]
         no_id = tokenizer.encode("no", add_special_tokens=False)[0]
         with RERANK_LOCK, torch.inference_mode():
-            logits = model(**batch).logits[:, -1, :]
+            # Qwen3 only needs yes/no logits at the last position. Computing a
+            # full vocabulary tensor for every passage token wastes GBs of RAM.
+            logits = model(**batch, logits_to_keep=1).logits[:, -1, :]
             binary_logits = torch.stack((logits[:, no_id], logits[:, yes_id]), dim=1)
             scores = torch.softmax(binary_logits, dim=1)[:, 1].float().cpu().tolist()
 
@@ -92,13 +88,13 @@ def rerank_documents(question: str, documents: list, top_k: int):
 
 
 def reranker_runtime_status() -> dict:
-    if not _env_bool("RERANK_ENABLED", True):
+    if not config.RERANK_ENABLED:
         return {"status": "disabled"}
     try:
         _components()
         return {
             "status": "ready",
-            "model": os.getenv("RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
+            "model": config.RERANK_MODEL,
         }
     except Exception as exc:
         return {"status": "unavailable", "error": str(exc)}

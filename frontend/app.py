@@ -15,18 +15,20 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Import the same configuration used by the backend, also in local Streamlit runs.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+import config
+config.configure_runtime_environment()
 
-DEFAULT_API_URL = os.getenv("QA_API_URL", "http://127.0.0.1:8000")
-BACKEND_CALL_MODE = os.getenv("BACKEND_CALL_MODE", "inprocess").strip().lower()
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Khoj").strip() or "Khoj"
-DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(os.getenv("QA_TEMPERATURE", "0.5"))))
-DEFAULT_TTS_ENGINE = os.getenv("TTS_ENGINE", "auto").strip().lower()
-DEFAULT_TTS_VOICE = os.getenv(
-    "TTS_VOICE",
-    os.getenv("KOKORO_VOICE", "af_heart")
-    if DEFAULT_TTS_ENGINE in {"auto", "kokoro"}
-    else os.getenv("EDGE_TTS_VOICE", "en-IN-NeerjaNeural"),
-)
+
+DEFAULT_API_URL = config.QA_API_URL
+BACKEND_CALL_MODE = config.BACKEND_CALL_MODE.strip().lower()
+ASSISTANT_NAME = config.ASSISTANT_NAME.strip() or "Khoj"
+DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(config.QA_TEMPERATURE)))
+DEFAULT_TTS_ENGINE = config.TTS_ENGINE.strip().lower()
+DEFAULT_TTS_VOICE = config.TTS_VOICE
+if DEFAULT_TTS_ENGINE in {"auto", "piper", "espeak"}:
+    DEFAULT_TTS_VOICE = "configured"
 DEFAULT_AUDIO_MIME = "audio/mpeg" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "audio/wav"
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_AVATAR_MODEL_PATH = APP_DIR / "assets" / "avatar.glb"
@@ -71,7 +73,7 @@ ONLINE_VOICE_OPTIONS = {
     "Japanese Japan - Nanami": "ja-JP-NanamiNeural",
 }
 OFFLINE_VOICE_OPTIONS = {
-    "Hinglish / Hindi - IndicF5 reference voice": "indicf5",
+    "Configured offline Hindi / English voice": "configured",
     "Natural English - Heart": "af_heart",
     "Natural English - Bella": "af_bella",
     "Natural English - Nicole": "af_nicole",
@@ -81,10 +83,12 @@ OFFLINE_VOICE_OPTIONS = {
 }
 VOICE_OPTIONS = (
     OFFLINE_VOICE_OPTIONS
-    if DEFAULT_TTS_ENGINE in {"auto", "kokoro", "indicf5", "indic-f5"}
+    if DEFAULT_TTS_ENGINE in {"auto", "piper", "espeak", "kokoro"}
     else ONLINE_VOICE_OPTIONS
 )
 CUSTOM_VOICE_LABEL = "Custom voice name"
+if DEFAULT_TTS_ENGINE in {"auto", "piper", "espeak"}:
+    VOICE_OPTIONS = {"Configured offline Hindi / English voice": "configured"}
 TONE_OPTIONS = ["neutral", "warm", "cheerful", "calm", "serious", "energetic", "custom"]
 
 
@@ -464,11 +468,11 @@ def init_state() -> None:
         )
         st.session_state.tts_voice_choice = matching_voice
     if "tts_tone" not in st.session_state:
-        st.session_state.tts_tone = os.getenv("TTS_TONE", os.getenv("EDGE_TTS_TONE", "neutral")).strip().lower()
+        st.session_state.tts_tone = config.TTS_TONE.strip().lower()
     if "tts_rate" not in st.session_state:
-        st.session_state.tts_rate = os.getenv("TTS_RATE", os.getenv("EDGE_TTS_RATE", "+0%"))
+        st.session_state.tts_rate = config.TTS_RATE
     if "tts_pitch" not in st.session_state:
-        st.session_state.tts_pitch = os.getenv("TTS_PITCH", os.getenv("EDGE_TTS_PITCH", "+0Hz"))
+        st.session_state.tts_pitch = config.TTS_PITCH
     if "tts_max_words" not in st.session_state:
         st.session_state.tts_max_words = 140
     if "avatar_enabled" not in st.session_state:
@@ -499,7 +503,7 @@ def latest_assistant_audio() -> tuple[str | None, str, bool, str]:
 
 
 def _resolved_avatar_model_path() -> Path:
-    configured_path = os.getenv("AVATAR_MODEL_FILE", "").strip()
+    configured_path = config.AVATAR_MODEL_FILE.strip()
     if not configured_path:
         configured_path = str(DEFAULT_AVATAR_MODEL_PATH)
 
@@ -2064,7 +2068,7 @@ def _inprocess_backend() -> dict:
     """Load the backend service layer without going through FastAPI/HTTP."""
     backend_dir = APP_DIR.parent / "backend"
     if not backend_dir.exists():
-        configured = os.getenv("BACKEND_SOURCE_DIR", "").strip()
+        configured = config.BACKEND_SOURCE_DIR.strip()
         backend_dir = Path(configured) if configured else backend_dir
     backend_path = str(backend_dir.resolve())
     if backend_path not in sys.path:
@@ -2260,7 +2264,7 @@ def _split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
     segments = []
     pending_sentences = []
     emitted_cursor = 0
-    minimum_segment_chars = int(os.getenv("TTS_STREAM_MIN_CHARS", "240"))
+    minimum_segment_chars = int(config.TTS_STREAM_MIN_CHARS)
     for match in re.finditer(r"(.+?[.!?\u0964])(\s+|$)", normalized, flags=re.DOTALL):
         segment = match.group(1).strip()
         if segment:
@@ -2372,6 +2376,7 @@ def ask_api_stream(
     audio_chunks = []
     audio_mime = DEFAULT_AUDIO_MIME
     audio_error = None
+    done_received = False
     queue_sequence = 0
     queue_id = (
         uuid.uuid4().hex
@@ -2403,7 +2408,17 @@ def ask_api_stream(
             future, segment = tts_futures[next_audio_sequence]
             if not block and not future.done():
                 break
-            segment_audio, segment_mime, segment_error = future.result()
+            try:
+                segment_audio, segment_mime, segment_error = future.result(
+                    timeout=float(config.TTS_RESPONSE_TIMEOUT_SECONDS)
+                )
+            except TimeoutError:
+                audio_error = "Speech generation timed out. Your text answer is available above."
+                future.cancel()
+                tts_futures.clear()
+                break
+            except Exception as exc:
+                segment_audio, segment_mime, segment_error = None, DEFAULT_AUDIO_MIME, str(exc)
             del tts_futures[next_audio_sequence]
             if segment_error:
                 audio_error = segment_error
@@ -2444,8 +2459,10 @@ def ask_api_stream(
                 answer += token
                 render_streaming_message(container, answer, status)
             elif event_type == "done":
+                done_received = True
                 answer = event.get("answer") or answer
                 sources = event.get("sources", [])
+                status = ""
                 render_streaming_message(container, answer, status)
             elif event_type == "error":
                 if tts_executor is not None:
@@ -2461,7 +2478,7 @@ def ask_api_stream(
         transport = "in-process backend" if BACKEND_CALL_MODE == "inprocess" else url
         return "", [], f"Could not use {transport}. {exc}", None, audio_mime, audio_error
 
-    if not answer.strip():
+    if not done_received or not answer.strip():
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         if queue_id and queue_sender is not None:
@@ -2469,7 +2486,7 @@ def ask_api_stream(
         return (
             "",
             [],
-            "The chat model returned an empty response. Check the app and Ollama logs.",
+            "The answer stream ended without a complete response. Check the app and Ollama logs.",
             None,
             audio_mime,
             audio_error,
@@ -2481,7 +2498,7 @@ def ask_api_stream(
             submit_tts(final_speech)
         flush_tts(block=True)
         if tts_executor is not None:
-            tts_executor.shutdown(wait=True, cancel_futures=False)
+            tts_executor.shutdown(wait=False, cancel_futures=True)
         _send_avatar_queue_event(
             queue_sender,
             queue_id,
@@ -2712,6 +2729,7 @@ if question:
         )
 
     if error:
+        stream_container.error(error)
         st.session_state.messages.append(
             {
                 "role": "assistant",
@@ -2721,6 +2739,8 @@ if question:
             }
         )
     else:
+        if audio_error:
+            st.warning(audio_error)
         audio_b64 = base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else None
         st.session_state.messages.append(
             {

@@ -1,3 +1,4 @@
+import config
 import argparse
 import csv
 import hashlib
@@ -10,7 +11,6 @@ from pathlib import Path
 
 import chromadb
 import docx2txt
-from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.documents import Document
@@ -58,7 +58,7 @@ IMAGE_EXTENSIONS = {
 
 
 def load_environment() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
+    config.configure_runtime_environment()
 
 
 def resolve_path(value: str | None, default: Path) -> Path:
@@ -84,13 +84,13 @@ def chunk_settings() -> dict:
         "embedding_provider": "ollama",
         "embedding_model": profile.model,
         "embedding_profile": profile.as_dict(),
-        "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        "chunk_size": int(os.getenv("CHUNK_SIZE", "850")),
-        "chunk_overlap": int(os.getenv("CHUNK_OVERLAP", "150")),
-        "collection_name": os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa"),
+        "ollama_base_url": config.OLLAMA_BASE_URL,
+        "chunk_size": int(config.CHUNK_SIZE),
+        "chunk_overlap": int(config.CHUNK_OVERLAP),
+        "collection_name": config.CHROMA_COLLECTION_NAME,
         "ocr_enabled": ocr_enabled(),
-        "ocr_lang": os.getenv("OCR_LANG", "eng+hin"),
-        "ocr_pdf_dpi": int(os.getenv("OCR_PDF_DPI", "200")),
+        "ocr_lang": config.OCR_LANG,
+        "ocr_pdf_dpi": int(config.OCR_PDF_DPI),
     }
 
 
@@ -131,15 +131,8 @@ def read_text(path: Path) -> str:
     return path.read_text(errors="ignore")
 
 
-def env_flag(name: str, default: bool = True) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in {"0", "false", "no", "off"}
-
-
 def ocr_enabled() -> bool:
-    return env_flag("OCR_ENABLED", True)
+    return config.OCR_ENABLED
 
 
 def warn_once(key: str, message: str) -> None:
@@ -168,12 +161,12 @@ def ocr_image(image, source_label: str = "image") -> str:
         return ""
 
     prepared_image = ImageOps.grayscale(image)
-    configured_lang = os.getenv("OCR_LANG", "eng+hin").strip() or "eng"
+    configured_lang = config.OCR_LANG.strip() or "eng"
     languages = [configured_lang]
     if configured_lang != "eng":
         languages.append("eng")
 
-    config = os.getenv("OCR_TESSERACT_CONFIG", "--psm 6")
+    config = config.OCR_TESSERACT_CONFIG
     for index, language in enumerate(languages):
         try:
             return pytesseract.image_to_string(prepared_image, lang=language, config=config).strip()
@@ -237,7 +230,7 @@ def load_pdf_ocr_pages(path: Path, raw_data_dir: Path, page_numbers: list[int] |
         return []
 
     documents = []
-    dpi = int(os.getenv("OCR_PDF_DPI", "200"))
+    dpi = int(config.OCR_PDF_DPI)
     try:
         with fitz.open(str(path)) as pdf:
             if page_numbers is None:
@@ -321,7 +314,7 @@ def load_pptx(path: Path) -> str:
 
 def load_pdf(path: Path, raw_data_dir: Path) -> list[Document]:
     documents = []
-    min_text_chars = int(os.getenv("MIN_EXTRACTED_TEXT_CHARS", "80"))
+    min_text_chars = int(config.MIN_EXTRACTED_TEXT_CHARS)
     try:
         loaded_documents = PyPDFLoader(str(path)).load()
     except Exception as exc:
@@ -460,8 +453,8 @@ def create_vector_store(
     collection_name: str | None = None,
     reset_collection: bool = False,
 ) -> tuple[Chroma, Path, str]:
-    collection_name = collection_name or os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
-    vector_db_dir = resolve_path(os.getenv("VECTOR_DB_DIR"), VECTOR_DB_DIR)
+    collection_name = collection_name or config.CHROMA_COLLECTION_NAME
+    vector_db_dir = resolve_path(config.VECTOR_DB_DIR, VECTOR_DB_DIR)
 
     vector_db_dir.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(vector_db_dir))
@@ -474,8 +467,8 @@ def create_vector_store(
     profile = embedding_profile()
     embeddings = PromptedOllamaEmbeddings(
         profile=profile,
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        keep_alive=int(os.getenv("OLLAMA_KEEP_ALIVE", "1800")),
+        base_url=config.OLLAMA_BASE_URL,
+        keep_alive=int(config.OLLAMA_KEEP_ALIVE),
     )
     vector_store = Chroma(
         client=client,
@@ -502,7 +495,7 @@ def add_chunks(
     collection_name: str,
     chunks: list[Document],
 ) -> list[str]:
-    batch_size = int(os.getenv("EMBEDDING_BATCH_SIZE", "256"))
+    batch_size = int(config.EMBEDDING_BATCH_SIZE)
     ids = [chunk_id(chunk) for chunk in chunks]
 
     for start in range(0, len(chunks), batch_size):
@@ -535,7 +528,7 @@ def prepare_file(
 
 
 def iter_prepared_files(work_items: list[tuple], raw_data_dir: Path):
-    workers = max(1, min(8, int(os.getenv("INGESTION_WORKERS", "8"))))
+    workers = max(1, min(8, int(config.INGESTION_WORKERS)))
     if workers == 1:
         for item in work_items:
             yield item, prepare_file(item[1], raw_data_dir)
@@ -572,11 +565,11 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
         raise RuntimeError(f"No supported documents found in {raw_data_dir}")
 
     current_settings = chunk_settings()
-    vector_db_dir = resolve_path(os.getenv("VECTOR_DB_DIR"), VECTOR_DB_DIR)
+    vector_db_dir = resolve_path(config.VECTOR_DB_DIR, VECTOR_DB_DIR)
     vector_db_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(vector_db_dir)
     settings_changed = manifest.get("settings") != current_settings
-    base_collection_name = os.getenv("CHROMA_COLLECTION_NAME", "texmin_qa")
+    base_collection_name = config.CHROMA_COLLECTION_NAME
     building_new_collection = force_rebuild or settings_changed
 
     if building_new_collection:
@@ -631,7 +624,7 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
         stat = path.stat()
         if (
             previous_entry
-            and env_flag("FAST_FILE_CHECK", True)
+            and config.FAST_FILE_CHECK
             and previous_entry.get("size") == stat.st_size
             and previous_entry.get("mtime_ns") == stat.st_mtime_ns
         ):
@@ -649,7 +642,7 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
 
     print(
         f"Preparing {len(work_items)} changed files with "
-        f"{max(1, min(8, int(os.getenv('INGESTION_WORKERS', '8'))))} extraction workers."
+        f"{max(1, min(8, int(config.INGESTION_WORKERS)))} extraction workers."
     )
     for item, prepared in iter_prepared_files(work_items, raw_data_dir):
         source, path, current_hash, file_size, mtime_ns = item
@@ -724,7 +717,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--raw-data-dir",
         type=Path,
-        default=resolve_path(os.getenv("RAW_DATA_DIR"), RAW_DATA_DIR),
+        default=resolve_path(config.RAW_DATA_DIR, RAW_DATA_DIR),
         help="Folder containing source files to embed.",
     )
     parser.add_argument(

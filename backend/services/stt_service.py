@@ -1,3 +1,4 @@
+import config
 import os
 import tempfile
 import threading
@@ -5,12 +6,11 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRANSCRIBE_SEMAPHORE = threading.BoundedSemaphore(
-    max(1, int(os.getenv("STT_MAX_CONCURRENT", "2")))
+    max(1, int(config.STT_MAX_CONCURRENT))
 )
 
 
@@ -19,13 +19,13 @@ class STTEngineError(RuntimeError):
 
 
 def _load_environment() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
+    config.configure_runtime_environment()
 
 
 @lru_cache(maxsize=1)
 def _model():
     _load_environment()
-    engine = os.getenv("STT_ENGINE", "faster-whisper").strip().lower()
+    engine = config.STT_ENGINE.strip().lower()
     if engine in {"transformers", "pytorch", "torch"}:
         try:
             import torch
@@ -35,16 +35,16 @@ def _model():
                 "PyTorch Whisper requires torch and transformers."
             ) from exc
 
-        model_name = os.getenv(
-            "WHISPER_TRANSFORMERS_MODEL", "openai/whisper-large-v3-turbo"
-        )
-        device = os.getenv("WHISPER_DEVICE", "cuda").strip().lower()
+        model_name = config.WHISPER_TRANSFORMERS_MODEL
+        device = config.WHISPER_DEVICE.strip().lower()
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda" and not torch.cuda.is_available():
             raise STTEngineError("CUDA was requested for ASR but is unavailable to the backend container.")
         dtype = torch.float16 if device == "cuda" else torch.float32
-        if device == "cuda" and os.getenv("WHISPER_COMPUTE_TYPE", "float16") == "bfloat16":
+        if device == "cuda" and config.WHISPER_COMPUTE_TYPE == "bfloat16":
             dtype = torch.bfloat16
-        offline = os.getenv("OFFLINE_MODE", "true").lower() in {"1", "true", "yes", "on"}
+        offline = config.OFFLINE_MODE
         try:
             processor = AutoProcessor.from_pretrained(model_name, local_files_only=offline)
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
@@ -75,18 +75,18 @@ def _model():
             "Offline speech recognition is not installed. Install faster-whisper."
         ) from exc
 
-    model_name = os.getenv("WHISPER_MODEL", "large-v3-turbo")
-    device = os.getenv("WHISPER_DEVICE", "cuda")
-    compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+    model_name = config.WHISPER_MODEL
+    device = config.WHISPER_DEVICE
+    compute_type = config.WHISPER_COMPUTE_TYPE
     try:
         model = WhisperModel(
             model_name,
             device=device,
             compute_type=compute_type,
-            cpu_threads=int(os.getenv("WHISPER_CPU_THREADS", "4")),
-            num_workers=int(os.getenv("WHISPER_WORKERS", "1")),
-            download_root=os.getenv("WHISPER_MODEL_DIR") or None,
-            local_files_only=os.getenv("OFFLINE_MODE", "true").lower() in {"1", "true", "yes", "on"},
+            cpu_threads=int(config.WHISPER_CPU_THREADS),
+            num_workers=int(config.WHISPER_WORKERS),
+            download_root=config.WHISPER_MODEL_DIR or None,
+            local_files_only=config.OFFLINE_MODE,
         )
         return {
             "engine": "faster-whisper",
@@ -100,7 +100,7 @@ def _model():
 
 def warm_up_stt() -> None:
     _load_environment()
-    if os.getenv("STT_WARMUP_ON_STARTUP", "true").lower() not in {"1", "true", "yes", "on"}:
+    if not config.STT_WARMUP_ON_STARTUP:
         return
     _model()
 
@@ -124,7 +124,7 @@ def transcribe_audio(
     language: str | None = None,
 ) -> dict:
     _load_environment()
-    max_bytes = int(os.getenv("STT_MAX_AUDIO_BYTES", str(25 * 1024 * 1024)))
+    max_bytes = int(config.STT_MAX_AUDIO_BYTES)
     if not audio:
         raise STTEngineError("No audio was received.")
     if len(audio) > max_bytes:
@@ -148,12 +148,12 @@ def transcribe_audio(
                 segments, info = model_state["model"].transcribe(
                     path,
                     language=language or None,
-                    beam_size=int(os.getenv("WHISPER_BEAM_SIZE", "1")),
-                    best_of=int(os.getenv("WHISPER_BEST_OF", "1")),
+                    beam_size=int(config.WHISPER_BEAM_SIZE),
+                    best_of=int(config.WHISPER_BEST_OF),
                     vad_filter=True,
                     vad_parameters={
-                        "min_silence_duration_ms": int(os.getenv("WHISPER_VAD_SILENCE_MS", "350")),
-                        "speech_pad_ms": int(os.getenv("WHISPER_VAD_SPEECH_PAD_MS", "180")),
+                        "min_silence_duration_ms": int(config.WHISPER_VAD_SILENCE_MS),
+                        "speech_pad_ms": int(config.WHISPER_VAD_SPEECH_PAD_MS),
                     },
                     condition_on_previous_text=False,
                     word_timestamps=False,
@@ -209,7 +209,7 @@ def _decode_audio(path: str):
     if not samples:
         raise STTEngineError("Speech was not detected in the recording.")
     audio = np.concatenate(samples).astype(np.float32) / 32768.0
-    max_seconds = float(os.getenv("WHISPER_MAX_AUDIO_SECONDS", "30"))
+    max_seconds = float(config.WHISPER_MAX_AUDIO_SECONDS)
     if len(audio) > int(16000 * max_seconds):
         audio = audio[: int(16000 * max_seconds)]
     _validate_speech_signal(audio, np)
@@ -223,14 +223,14 @@ def _validate_speech_signal(audio, np_module=None) -> None:
         except ImportError as exc:
             raise STTEngineError("Offline speech validation requires NumPy.") from exc
 
-    minimum_duration = float(os.getenv("STT_MIN_SPEECH_SECONDS", "0.35"))
+    minimum_duration = float(config.STT_MIN_SPEECH_SECONDS)
     if len(audio) < int(16000 * minimum_duration):
         raise STTEngineError("Speech was not detected in the recording.")
 
     peak = float(np_module.max(np_module.abs(audio)))
     rms = float(np_module.sqrt(np_module.mean(np_module.square(audio))))
-    if peak < float(os.getenv("STT_MIN_AUDIO_PEAK", "0.012")) or rms < float(
-        os.getenv("STT_MIN_AUDIO_RMS", "0.0025")
+    if peak < float(config.STT_MIN_AUDIO_PEAK) or rms < float(
+        config.STT_MIN_AUDIO_RMS
     ):
         raise STTEngineError("Speech was not detected in the recording.")
 
@@ -242,12 +242,12 @@ def _validate_speech_signal(audio, np_module=None) -> None:
     frame_rms = np_module.sqrt(np_module.mean(np_module.square(frames), axis=1))
     noise_floor = float(np_module.percentile(frame_rms, 20))
     speech_level = float(np_module.percentile(frame_rms, 90))
-    minimum_snr_db = float(os.getenv("STT_MIN_SNR_DB", "4.0"))
+    minimum_snr_db = float(config.STT_MIN_SNR_DB)
     snr_db = 20.0 * float(np_module.log10((speech_level + 1e-6) / (noise_floor + 1e-6)))
-    active_threshold = max(noise_floor * 2.0, float(os.getenv("STT_MIN_FRAME_RMS", "0.004")))
+    active_threshold = max(noise_floor * 2.0, float(config.STT_MIN_FRAME_RMS))
     active_ratio = float(np_module.mean(frame_rms >= active_threshold))
     if snr_db < minimum_snr_db or active_ratio < float(
-        os.getenv("STT_MIN_ACTIVE_FRAME_RATIO", "0.02")
+        config.STT_MIN_ACTIVE_FRAME_RATIO
     ):
         raise STTEngineError("Only background noise was detected. Please speak closer to the microphone.")
 
@@ -268,7 +268,7 @@ def _transcribe_transformers(model_state: dict, path: str, language: str | None)
         device=model_state["device"], dtype=model_state["dtype"]
     )
     generate_kwargs = {
-        "max_new_tokens": int(os.getenv("WHISPER_MAX_NEW_TOKENS", "160")),
+        "max_new_tokens": int(config.WHISPER_MAX_NEW_TOKENS),
         "task": "transcribe",
     }
     if language:

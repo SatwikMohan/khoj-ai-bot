@@ -17,13 +17,7 @@ ENV PATH="/opt/texmin-venv/bin:${PATH}"
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r requirements.txt \
-    && python -m pip install --no-cache-dir --no-deps --force-reinstall "git+https://github.com/AI4Bharat/IndicF5.git@main" \
-    && python -m pip uninstall -y torchaudio \
-    && CMAKE_BUILD_PARALLEL_LEVEL=8 USE_CUDA=1 BUILD_SOX=0 BUILD_KALDI=0 BUILD_RNNT=0 python -m pip install --no-cache-dir --no-build-isolation --no-deps "git+https://github.com/pytorch/audio.git@v2.11.0"
-
-COPY scripts/patch_f5_tts.py /tmp/patch_f5_tts.py
-RUN python /tmp/patch_f5_tts.py \
-    && python -c "import inspect, torch, torchaudio; from f5_tts.infer.utils_infer import load_model; assert 'ckpt_path' not in inspect.signature(load_model).parameters; print('Verified IndicF5/Torch/TorchAudio:', torch.__version__, torchaudio.__version__)"
+    && python -c "from piper import PiperVoice, SynthesisConfig; print('Piper CPU runtime ready')"
 
 COPY . .
 

@@ -4,8 +4,8 @@ Install Ollama and pull the local models first:
 
 ```powershell
 irm https://ollama.com/install.ps1 | iex
-ollama pull qwen3.5:122b
-ollama pull qwen3-embedding:8b-q8_0
+ollama pull qwen3:4b
+ollama pull qwen3-embedding:0.6b
 ollama list
 ```
 
@@ -31,7 +31,7 @@ Latency tuning defaults are set for conversational use:
 
 ```powershell
 OLLAMA_KEEP_ALIVE=1800
-QA_WARMUP_ON_STARTUP=true
+QA_WARMUP_ON_STARTUP=false
 RETRIEVAL_FETCH_K=60
 RETRIEVAL_MMR_ENABLED=true
 MMR_LAMBDA_MULT=0.25
@@ -45,5 +45,9 @@ The broader retrieval defaults help the bot compare repeated topics across diffe
 facts, years, rules, figures, and sources instead of answering from the first matching chunk only.
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
-Text-to-speech uses local Kokoro for English and provisioned IndicF5 for Hindi/mixed-script
-Hinglish when `TTS_ENGINE=auto`. Edge TTS is online-only.
+Text-to-speech uses Piper CPU voices for Hindi/mixed-script Hinglish and English.
+Set `TTS_ENGINE=piper` and run `python scripts/provision_models.py --only-tts` from
+`backend` once to download and verify the voices. No reference WAV is required.
+See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,
+offline setup and switching models. The pull commands above are examples; use
+the names selected in `backend/.env`.

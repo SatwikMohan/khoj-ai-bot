@@ -1,7 +1,12 @@
+import config
 import asyncio
 import io
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -9,7 +14,6 @@ import wave
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
 
 from helpers.request_models import TTSRequest
 
@@ -61,14 +65,7 @@ def _run_tts_coroutine(coroutine):
 
 
 def _load_environment() -> None:
-    load_dotenv(PROJECT_ROOT / ".env")
-
-
-def _required_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise TTSEngineError(f"{name} is missing. Add it to .env before using text to speech.")
-    return value
+    config.configure_runtime_environment()
 
 
 def _strip_markdown_table(text: str) -> str:
@@ -191,20 +188,14 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
             f"Unsupported audio format '{payload.response_format}'. Use 'wav' for local TTS or 'mp3' for Edge TTS."
         )
 
-    engine_name = os.getenv("TTS_ENGINE", "auto").strip().lower()
+    engine_name = config.TTS_ENGINE.strip().lower()
     fallback_names = [
         name.strip().lower()
-        for name in os.getenv("TTS_FALLBACK_ENGINES", "").split(",")
+        for name in config.TTS_FALLBACK_ENGINES.split(",")
         if name.strip()
     ]
     if engine_name == "auto":
-        response_language = os.getenv("RESPONSE_LANGUAGE", "auto").strip().lower()
-        use_indic_voice = (
-            _contains_devanagari(payload.text)
-            or response_language in {"hindi", "hinglish"}
-        )
-        primary_engine = "indicf5" if use_indic_voice else "kokoro"
-        engines = [primary_engine, *fallback_names]
+        engines = ["piper", *fallback_names]
     else:
         engines = [engine_name, *fallback_names]
 
@@ -214,9 +205,12 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
             errors.append(f"{candidate}: temporarily disabled after repeated failures")
             continue
         try:
+            if candidate in {"edge", "edge-tts"} and config.OFFLINE_MODE:
+                raise TTSEngineError("Edge TTS requires internet; use piper or espeak offline.")
             audio, media_type = _synthesize_with_engine(candidate, payload)
             _validate_audio(audio, media_type)
             _record_voice_success(candidate)
+            print(json.dumps({"event": "tts_completed", "engine": candidate}), flush=True)
             return audio, media_type
         except Exception as exc:
             _record_voice_failure(candidate)
@@ -226,6 +220,10 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
 
 def _synthesize_with_engine(engine_name: str, payload: TTSRequest) -> tuple[bytes, str]:
+    if engine_name == "piper":
+        return _synthesize_piper_speech(payload)
+    if engine_name == "espeak":
+        return _synthesize_espeak_speech(payload)
     if engine_name in {"local", "offline", "pyttsx3"}:
         return _synthesize_local_speech(payload)
     if engine_name in {"edge", "edge-tts"}:
@@ -233,13 +231,13 @@ def _synthesize_with_engine(engine_name: str, payload: TTSRequest) -> tuple[byte
     if engine_name == "kokoro":
         return _synthesize_kokoro_speech(payload)
     if engine_name in {"indicf5", "indic-f5"}:
-        return _synthesize_indicf5_speech(payload)
+        raise TTSEngineError("IndicF5 has been retired. Set TTS_ENGINE=piper and provision the Piper voices.")
     raise TTSEngineError(f"Unknown TTS engine '{engine_name}'.")
 
 
 def _voice_circuit_open(engine_name: str) -> bool:
-    threshold = int(os.getenv("TTS_FAILURE_THRESHOLD", "2"))
-    cooldown = int(os.getenv("TTS_FAILURE_COOLDOWN_SECONDS", "60"))
+    threshold = int(config.TTS_FAILURE_THRESHOLD)
+    cooldown = int(config.TTS_FAILURE_COOLDOWN_SECONDS)
     with VOICE_HEALTH_LOCK:
         failures, failed_at = VOICE_FAILURES.get(engine_name, (0, 0.0))
     return failures >= threshold and time.monotonic() - failed_at < cooldown
@@ -257,7 +255,7 @@ def _record_voice_success(engine_name: str) -> None:
 
 
 def _validate_audio(audio: bytes, media_type: str) -> None:
-    if len(audio) < int(os.getenv("TTS_MIN_AUDIO_BYTES", "1024")):
+    if len(audio) < int(config.TTS_MIN_AUDIO_BYTES):
         raise TTSEngineError("voice returned an empty or truncated audio segment")
     if media_type != "audio/wav":
         return
@@ -277,40 +275,33 @@ def tts_runtime_status() -> dict:
         failures = {name: count for name, (count, _failed_at) in VOICE_FAILURES.items()}
     status = {
         "status": "ready",
-        "engine": os.getenv("TTS_ENGINE", "auto"),
-        "fallback_engines": os.getenv("TTS_FALLBACK_ENGINES", ""),
+        "engine": config.TTS_ENGINE,
+        "fallback_engines": config.TTS_FALLBACK_ENGINES,
         "failures": failures,
     }
     engine = status["engine"].strip().lower()
     if engine == "auto":
-        response_language = os.getenv("RESPONSE_LANGUAGE", "auto").strip().lower()
-        engine = "indicf5" if response_language in {"hindi", "hinglish"} else "kokoro"
+        engine = "piper"
         status["selected_engine"] = engine
-    if engine == "kokoro":
+    if engine == "piper":
+        paths = [_piper_path("hindi"), _piper_path("english")]
+        missing = [str(path) for path in paths if not path.is_file() or not Path(str(path) + ".json").is_file()]
+        if missing:
+            status.update(status="unavailable", error="Missing Piper voice files: " + ", ".join(missing))
+        status["voices"] = [str(path) for path in paths]
+    elif engine == "espeak":
+        if not shutil.which("espeak-ng"):
+            status.update(status="unavailable", error="Install espeak-ng for the offline fallback.")
+    elif engine == "kokoro":
         try:
-            voice = os.getenv("KOKORO_VOICE", "af_heart")
-            _warm_kokoro_voice(os.getenv("KOKORO_LANGUAGE", "a"), voice)
+            voice = config.KOKORO_VOICE
+            _warm_kokoro_voice(config.KOKORO_LANGUAGE, voice)
             status["voice"] = voice
         except TTSEngineError as exc:
             status["status"] = "unavailable"
             status["error"] = str(exc)
     elif engine in {"indicf5", "indic-f5"}:
-        try:
-            reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
-            reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
-            if not reference_audio or not reference_text:
-                raise TTSEngineError(
-                    "INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required."
-                )
-            if not Path(reference_audio).is_file():
-                raise TTSEngineError(
-                    f"IndicF5 reference audio does not exist: {reference_audio}."
-                )
-            _indicf5_model()
-            status["reference_audio"] = reference_audio
-        except TTSEngineError as exc:
-            status["status"] = "unavailable"
-            status["error"] = str(exc)
+        status.update(status="unavailable", error="IndicF5 is retired; set TTS_ENGINE=piper.")
     return status
 
 
@@ -321,8 +312,8 @@ def warm_up_tts() -> None:
 
 
 def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
-    voice = payload.voice_id or os.getenv("EDGE_TTS_VOICE", DEFAULT_ENGLISH_VOICE)
-    hindi_voice = os.getenv("EDGE_TTS_HINDI_VOICE", DEFAULT_HINDI_VOICE)
+    voice = payload.voice_id or config.EDGE_TTS_VOICE
+    hindi_voice = config.EDGE_TTS_HINDI_VOICE
     rate, pitch, volume = _prosody_settings(payload)
 
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
@@ -469,7 +460,7 @@ def _warm_kokoro_voice(language_code: str, voice: str) -> None:
 
 
 def _kokoro_voice_candidates(requested_voice: str) -> list[str]:
-    default_voice = os.getenv("KOKORO_VOICE", "af_heart").strip() or "af_heart"
+    default_voice = config.KOKORO_VOICE.strip() or "af_heart"
     primary_voice = (
         requested_voice
         if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", requested_voice)
@@ -477,7 +468,7 @@ def _kokoro_voice_candidates(requested_voice: str) -> list[str]:
     )
     fallback_voices = [
         voice.strip()
-        for voice in os.getenv("KOKORO_FALLBACK_VOICES", "af_bella,bf_emma").split(",")
+        for voice in config.KOKORO_FALLBACK_VOICES.split(",")
         if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice.strip())
     ]
     return list(dict.fromkeys([primary_voice, default_voice, *fallback_voices]))
@@ -493,7 +484,7 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
     requested_voice = (payload.voice_id or "").strip()
     voices = _kokoro_voice_candidates(requested_voice)
-    language_code = os.getenv("KOKORO_LANGUAGE", "a")
+    language_code = config.KOKORO_LANGUAGE
     rate, _pitch, _volume = _prosody_settings(payload)
     speed = max(0.65, min(1.35, 1 + (_parse_percent(rate) / 100)))
 
@@ -515,44 +506,63 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
     raise TTSEngineError("Kokoro voices failed. " + " | ".join(errors))
 
 
-@lru_cache(maxsize=1)
-def _indicf5_model():
-    from services.indicf5_runtime import IndicF5RuntimeError, load_indicf5_runtime
-
-    model_location = os.getenv("INDICF5_MODEL_DIR", "ai4bharat/IndicF5")
-    offline = os.getenv("OFFLINE_MODE", "true").lower() in {"1", "true", "yes", "on"}
-    try:
-        return load_indicf5_runtime(model_location, local_files_only=offline)
-    except IndicF5RuntimeError as exc:
-        raise TTSEngineError(f"IndicF5 could not load from '{model_location}': {exc}") from exc
+def _piper_path(language: str) -> Path:
+    directory = Path(config.PIPER_MODEL_DIR)
+    name = (config.PIPER_HINDI_VOICE if language == "hindi" else config.PIPER_ENGLISH_VOICE).strip()
+    path = Path(name if name.endswith(".onnx") else name + ".onnx")
+    return path if path.is_absolute() else directory / path
 
 
-def _synthesize_indicf5_speech(payload: TTSRequest) -> tuple[bytes, str]:
-    reference_audio = os.getenv("INDICF5_REFERENCE_AUDIO", "").strip()
-    reference_text = os.getenv("INDICF5_REFERENCE_TEXT", "").strip()
-    if not reference_audio or not reference_text:
-        raise TTSEngineError("INDICF5_REFERENCE_AUDIO and INDICF5_REFERENCE_TEXT are required.")
-    if not Path(reference_audio).exists():
+def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    language = "hindi" if (
+        _contains_devanagari(payload.text)
+        or config.RESPONSE_LANGUAGE in {"hindi", "hinglish"}
+    ) else "english"
+    path = _piper_path(language)
+    if not path.is_file() or not Path(str(path) + ".json").is_file():
         raise TTSEngineError(
-            f"IndicF5 reference audio does not exist: {reference_audio}. "
-            "Add backend/voice_samples/reference.wav and rebuild/restart the app."
+            f"Piper needs {path} and its .onnx.json config. "
+            "Run python scripts/provision_models.py --only-tts first."
         )
-
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    if not spoken_text:
+        raise TTSEngineError("There is no speakable text.")
+    rate, _, _ = _prosody_settings(payload)
+    speed = max(0.65, min(1.5, 1 + _parse_percent(rate) / 100))
+    job = {"model": str(path.resolve()), "text": spoken_text, "length_scale": 1 / speed}
     try:
-        with NEURAL_TTS_LOCK:
-            audio, sample_rate = _indicf5_model().synthesize(
-                spoken_text,
-                reference_audio,
-                reference_text,
-            )
-        if hasattr(audio, "detach"):
-            audio = audio.detach().float().cpu().numpy()
-        return _audio_array_to_wav(audio, sample_rate=sample_rate), "audio/wav"
-    except TTSEngineError:
-        raise
-    except Exception as exc:
-        raise TTSEngineError(f"IndicF5 synthesis failed: {exc}") from exc
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py")],
+            input=json.dumps(job).encode("utf-8"), capture_output=True,
+            timeout=float(config.TTS_TIMEOUT_SECONDS),
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
+    if result.returncode:
+        raise TTSEngineError(result.stderr.decode("utf-8", errors="replace")[-1500:])
+    return result.stdout, "audio/wav"
+
+
+def _synthesize_espeak_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    executable = shutil.which("espeak-ng")
+    if not executable:
+        raise TTSEngineError("Install espeak-ng to use the offline fallback voice.")
+    language = "hi" if (
+        _contains_devanagari(payload.text)
+        or config.RESPONSE_LANGUAGE in {"hindi", "hinglish"}
+    ) else "en"
+    # A real file gives WAV a complete header (unlike espeak's --stdout stream).
+    with tempfile.TemporaryDirectory(prefix="khoj-voice-") as directory:
+        path = Path(directory) / "speech.wav"
+        subprocess.run(
+            [executable, "-v", language, "-s", str(config.ESPEAK_RATE), "-w", str(path), "--stdin"],
+            input=_markdown_to_spoken_text(payload.text, payload.max_words).encode("utf-8"),
+            capture_output=True, check=True,
+            timeout=float(config.TTS_TIMEOUT_SECONDS),
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return path.read_bytes(), "audio/wav"
 
 
 def _synthesize_local_speech(payload: TTSRequest) -> tuple[bytes, str]:

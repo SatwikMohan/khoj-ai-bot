@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+import threading
 from fastapi.responses import JSONResponse
 
 from routes.qa_routes import router as qa_router
@@ -32,6 +33,10 @@ def system_status() -> dict:
 
 @app.on_event("startup")
 def warm_up_local_models() -> None:
+    threading.Thread(target=_warm_up_local_models, daemon=True, name="model-warmup").start()
+
+
+def _warm_up_local_models() -> None:
     try:
         warm_up_qa_engine()
     except Exception as exc:
@@ -56,7 +61,9 @@ def health_check() -> dict:
 
 @app.get("/ready")
 def readiness_check():
-    status = system_status()
+    # Optional speech/reranking must not make document chat unreachable.
+    # Deep component diagnostics remain available through /health.
+    status = runtime_status()
     if status["status"] != "ok":
         return JSONResponse(status_code=503, content=status)
     return status

@@ -13,6 +13,8 @@ BACKEND_DIR = APP_ROOT / "backend"
 FRONTEND_APP = APP_ROOT / "frontend" / "app.py"
 
 sys.path.insert(0, str(BACKEND_DIR))
+import config
+config.configure_runtime_environment()
 
 from main import app as fastapi_app  # noqa: E402
 
@@ -21,9 +23,9 @@ def main() -> None:
     api_server = uvicorn.Server(
         uvicorn.Config(
             fastapi_app,
-            host=os.getenv("API_HOST", "0.0.0.0"),
-            port=int(os.getenv("API_PORT", "8000")),
-            log_level=os.getenv("API_LOG_LEVEL", "info"),
+            host=config.API_HOST,
+            port=int(config.API_PORT),
+            log_level=config.API_LOG_LEVEL,
         )
     )
     api_thread = threading.Thread(

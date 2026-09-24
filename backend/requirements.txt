@@ -22,10 +22,7 @@ edge-tts
 pyttsx3
 faster-whisper>=1.1,<2
 python-multipart>=0.0.9
-kokoro>=0.9.4,<1
+piper-tts==1.8.0
 transformers>=4.51,<5
 accelerate>=1,<2
-f5-tts==1.1.22
-jieba>=0.42,<1
-pydub>=0.25,<1
 soundfile>=0.12,<1

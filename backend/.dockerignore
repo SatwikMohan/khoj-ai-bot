@@ -7,3 +7,4 @@ __pycache__/
 .ruff_cache/
 raw_data_files/
 vector_db/
+models/

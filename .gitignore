@@ -1,5 +1,7 @@
 .env
 .venv
+.venv-*/
+backend/models/
 venv
 vector_db/
 __pycache__/
