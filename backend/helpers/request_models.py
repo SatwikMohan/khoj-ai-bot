@@ -1,3 +1,4 @@
+import config
 from pydantic import BaseModel, Field
 
 
@@ -8,8 +9,8 @@ class ChatMessage(BaseModel):
 
 class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="User question for the QA bot.")
-    top_k: int = Field(3, ge=1, le=10, description="Number of context chunks to retrieve.")
-    temperature: float = Field(0.5, ge=0, le=1, description="Controls response warmth/variation.")
+    top_k: int = Field(config.QA_TOP_K, ge=1, le=10, description="Number of context chunks to retrieve.")
+    temperature: float = Field(config.QA_TEMPERATURE, ge=0, le=1, description="Controls response warmth/variation.")
     chat_history: list[ChatMessage] = Field(
         default_factory=list,
         description="Recent conversation turns used only to interpret follow-up questions.",
@@ -37,9 +38,9 @@ class TTSRequest(BaseModel):
     voice_id: str | None = Field(None, description="Optional local voice id/name, or Edge voice name when TTS_ENGINE=edge.")
     ref_audio: str | None = Field(None, description="Reserved for API compatibility; local TTS does not use reference audio.")
     model: str | None = Field(None, description="Reserved for API compatibility; TTS selects the configured local or Edge engine.")
-    tone: str = Field("neutral", description="Tone preset: neutral, warm, cheerful, calm, serious, energetic, or custom.")
-    rate: str = Field("+0%", description="Speech rate adjustment, for example +10% or -10%.")
-    pitch: str = Field("+0Hz", description="Speech pitch adjustment, for example +2Hz or -2Hz.")
+    tone: str = Field(config.TTS_TONE, description="Tone preset: neutral, warm, cheerful, calm, serious, energetic, or custom.")
+    rate: str = Field(config.TTS_RATE, description="Speech rate adjustment, for example +10% or -10%.")
+    pitch: str = Field(config.TTS_PITCH, description="Speech pitch adjustment, for example +2Hz or -2Hz.")
     volume: str = Field("+0%", description="Speech volume adjustment, for example +10% or -10%.")
     response_format: str = Field("mp3", description="Requested audio format. Local TTS returns WAV; Edge TTS returns MP3.")
     max_words: int = Field(260, ge=40, le=900, description="Maximum words to send to TTS.")

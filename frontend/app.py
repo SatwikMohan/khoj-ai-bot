@@ -454,7 +454,7 @@ def init_state() -> None:
     if "api_url" not in st.session_state:
         st.session_state.api_url = DEFAULT_API_URL
     if "top_k" not in st.session_state:
-        st.session_state.top_k = 5
+        st.session_state.top_k = config.QA_TOP_K
     if "temperature" not in st.session_state:
         st.session_state.temperature = DEFAULT_QA_TEMPERATURE
     if "tts_enabled" not in st.session_state:

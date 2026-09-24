@@ -1,3 +1,7 @@
+import config
+
+config.configure_runtime_environment()
+
 from fastapi import FastAPI
 import threading
 from fastapi.responses import JSONResponse
@@ -70,4 +74,4 @@ def readiness_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=config.API_HOST, port=config.API_PORT, log_level=config.API_LOG_LEVEL)

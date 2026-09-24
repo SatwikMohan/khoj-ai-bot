@@ -4,9 +4,7 @@ FROM ${BASE_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app/backend \
-    BACKEND_SOURCE_DIR=/app/backend \
-    BACKEND_CALL_MODE=inprocess
+    PYTHONPATH=/app/backend
 
 WORKDIR /app
 

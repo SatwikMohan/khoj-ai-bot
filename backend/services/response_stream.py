@@ -77,7 +77,7 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
         while True:
             remaining = timeout_seconds - (time.monotonic() - started)
             if remaining <= 0:
-                yield {"type": "error", "message": f"Answer timed out after {timeout_seconds:g}s during: {stage}. Check Ollama or choose a smaller chat model in .env."}
+                yield {"type": "error", "message": f"Answer timed out after {timeout_seconds:g}s during: {stage}. Check Ollama or choose a smaller chat model in backend/config.py."}
                 return
             try:
                 event = events.get(timeout=min(heartbeat_seconds, remaining))

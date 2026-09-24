@@ -27,20 +27,25 @@ services:
       retries: 20
 
   ollama-model-init:
-    image: ollama/ollama:0.34.0
+    image: python:3.12-alpine
     depends_on:
       ollama:
         condition: service_healthy
-    env_file:
-      - ./backend/.env
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - >-
-        set -e;
-        ollama show "$${OLLAMA_CHAT_MODEL}" >/dev/null 2>&1 || ollama pull "$${OLLAMA_CHAT_MODEL}";
-        ollama show "$${OLLAMA_EMBED_MODEL}" >/dev/null 2>&1 || ollama pull "$${OLLAMA_EMBED_MODEL}"
+    working_dir: /app
+    volumes:
+      - ./backend/config.py:/app/config.py:ro
+      - ./backend/scripts/provision_ollama.py:/app/scripts/provision_ollama.py:ro
+    command: ["python", "scripts/provision_ollama.py"]
+
+  config-init:
+    image: python:3.12-alpine
+    working_dir: /app
+    volumes:
+      - ./backend/config.py:/app/config.py:ro
+      - ./backend/scripts/configure_gateway.py:/app/scripts/configure_gateway.py:ro
+      - ./Caddyfile:/app/Caddyfile.template:ro
+      - gateway_config:/generated
+    command: ["python", "scripts/configure_gateway.py", "/app/Caddyfile.template", "/generated/Caddyfile"]
 
   backend-model-init:
     build:
@@ -48,14 +53,8 @@ services:
     depends_on:
       ollama-model-init:
         condition: service_completed_successfully
-    env_file:
-      - ./backend/.env
-    environment:
-      OFFLINE_MODE: "false"
-      HF_HOME: /models/huggingface
-      WHISPER_MODEL_DIR: /models/whisper
-      PIPER_MODEL_DIR: /models/piper
     volumes:
+      - ./backend/config.py:/app/config.py:ro
       - ai_models:/models
     command: ["python", "scripts/provision_models.py"]
 
@@ -65,13 +64,8 @@ services:
     depends_on:
       backend-model-init:
         condition: service_completed_successfully
-    env_file:
-      - ./backend/.env
-    environment:
-      OLLAMA_BASE_URL: http://ollama:11434
-      RAW_DATA_DIR: /app/raw_data_files
-      VECTOR_DB_DIR: /app/vector_db
     volumes:
+      - ./backend/config.py:/app/config.py:ro
       - ./backend/raw_data_files:/app/raw_data_files:ro
       - ./backend/vector_db:/app/vector_db
     command: ["python", "train_engine.py"]
@@ -88,21 +82,8 @@ services:
     depends_on:
       index-init:
         condition: service_completed_successfully
-    env_file:
-      - ./backend/.env
-    environment:
-      OLLAMA_BASE_URL: http://ollama:11434
-      RAW_DATA_DIR: /app/raw_data_files
-      VECTOR_DB_DIR: /app/vector_db
-      HF_HOME: /models/huggingface
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
-      WHISPER_MODEL_DIR: /models/whisper
-      PIPER_MODEL_DIR: /models/piper
-      BACKEND_CALL_MODE: inprocess
-      BACKEND_SOURCE_DIR: /app/backend
-      AVATAR_MODEL_FILE: assets/scene.gltf
     volumes:
+      - ./backend/config.py:/app/backend/config.py:ro
       - ./backend/raw_data_files:/app/raw_data_files:ro
       - ./backend/vector_db:/app/vector_db
       - ai_models:/models
@@ -130,13 +111,13 @@ services:
     depends_on:
       app:
         condition: service_healthy
-    env_file:
-      - ./backend/.env
+      config-init:
+        condition: service_completed_successfully
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - gateway_config:/etc/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
 
@@ -145,3 +126,4 @@ volumes:
   ai_models:
   caddy_data:
   caddy_config:
+  gateway_config:

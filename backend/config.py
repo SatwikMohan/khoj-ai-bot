@@ -26,6 +26,7 @@ QA_REASONING_ENABLED = False
 QA_RESPONSE_TIMEOUT_SECONDS = 180
 QA_WARMUP_ON_STARTUP = False
 QA_TEMPERATURE = 0.3
+QA_TOP_K = 5
 # None selects model-specific embedding prefixes automatically; "" disables them.
 EMBED_QUERY_PREFIX = None
 EMBED_DOCUMENT_PREFIX = None

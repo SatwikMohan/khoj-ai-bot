@@ -25,20 +25,20 @@ python frontend/run_combined.py
 ```
 
 The UI imports backend service functions by default, while the FastAPI endpoints remain live on
-port 8000. Set `BACKEND_CALL_MODE=http` to test the HTTP transport instead.
+port 8000. Set `BACKEND_CALL_MODE = "http"` in `backend/config.py` to test the HTTP transport instead.
 
-Latency tuning defaults are set for conversational use:
+All application settings live in `backend/config.py`. For example:
 
-```powershell
-OLLAMA_KEEP_ALIVE=1800
-QA_WARMUP_ON_STARTUP=false
-RETRIEVAL_FETCH_K=60
-RETRIEVAL_MMR_ENABLED=true
-MMR_LAMBDA_MULT=0.25
-CONTEXT_MAX_CHARS=24000
-CHAT_HISTORY_MAX_TURNS=8
-CHAT_HISTORY_MAX_CHARS=2400
-CHAT_HISTORY_MESSAGE_CHARS=520
+```python
+OLLAMA_KEEP_ALIVE = 1800
+QA_WARMUP_ON_STARTUP = False
+RETRIEVAL_FETCH_K = 40
+RETRIEVAL_MMR_ENABLED = True
+MMR_LAMBDA_MULT = 0.35
+CONTEXT_MAX_CHARS = 16000
+CHAT_HISTORY_MAX_TURNS = 4
+CHAT_HISTORY_MAX_CHARS = 1200
+CHAT_HISTORY_MESSAGE_CHARS = 320
 ```
 
 The broader retrieval defaults help the bot compare repeated topics across different
@@ -46,8 +46,12 @@ facts, years, rules, figures, and sources instead of answering from the first ma
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
 Text-to-speech uses Piper CPU voices for Hindi/mixed-script Hinglish and English.
-Set `TTS_ENGINE=piper` and run `python scripts/provision_models.py --only-tts` from
+Set `TTS_ENGINE = "piper"` and run `python scripts/provision_models.py --only-tts` from
 `backend` once to download and verify the voices. No reference WAV is required.
 See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,
 offline setup and switching models. The pull commands above are examples; use
-the names selected in `backend/.env`.
+the names selected in `backend/config.py`. Restart the process after edits; no
+`.env` is loaded. The combined image is the default deployment. To build the
+optional HTTP-only frontend image, use the repository root as build context:
+`docker build -f frontend/Dockerfile .`, and configure HTTP mode and QA_API_URL
+in the shared config before building it.

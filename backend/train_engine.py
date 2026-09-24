@@ -166,10 +166,10 @@ def ocr_image(image, source_label: str = "image") -> str:
     if configured_lang != "eng":
         languages.append("eng")
 
-    config = config.OCR_TESSERACT_CONFIG
+    tesseract_config = config.OCR_TESSERACT_CONFIG
     for index, language in enumerate(languages):
         try:
-            return pytesseract.image_to_string(prepared_image, lang=language, config=config).strip()
+            return pytesseract.image_to_string(prepared_image, lang=language, config=tesseract_config).strip()
         except pytesseract.pytesseract.TesseractNotFoundError as exc:
             warn_once(
                 "ocr-tesseract-missing",

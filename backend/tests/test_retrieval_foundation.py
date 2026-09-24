@@ -60,12 +60,12 @@ class RetrievalQueryTests(unittest.TestCase):
                 return [(document, 0.11)]
 
         environment = {
-            "HYBRID_SEARCH_ENABLED": "true",
-            "RELEVANCE_SCORE_THRESHOLD": "0.15",
-            "RERANK_ENABLED": "false",
+            "HYBRID_SEARCH_ENABLED": True,
+            "RELEVANCE_SCORE_THRESHOLD": 0.15,
+            "RERANK_ENABLED": False,
         }
         with (
-            patch.dict("os.environ", environment),
+            patch.multiple("config", **environment),
             patch("services.qa_service._active_index", return_value=("test", "fingerprint")),
             patch("services.qa_service.lexical_search", return_value=[]),
         ):
@@ -111,12 +111,17 @@ class RetrievalQueryTests(unittest.TestCase):
 
 
 class ConversationStyleTests(unittest.TestCase):
+    def setUp(self):
+        language = patch("config.RESPONSE_LANGUAGE", "auto")
+        language.start()
+        self.addCleanup(language.stop)
+
     def test_response_language_can_force_hinglish_for_voice_queries(self):
-        with patch.dict("os.environ", {"RESPONSE_LANGUAGE": "hinglish"}):
+        with patch("config.RESPONSE_LANGUAGE", "hinglish"):
             self.assertEqual(_detect_language_style("What are the rules?"), "hinglish")
 
     def test_auto_response_language_still_detects_english(self):
-        with patch.dict("os.environ", {"RESPONSE_LANGUAGE": "auto"}):
+        with patch("config.RESPONSE_LANGUAGE", "auto"):
             self.assertEqual(_detect_language_style("What are the rules?"), "english")
 
     def test_wellbeing_gets_a_specific_conversational_reply(self):
@@ -221,10 +226,8 @@ class SpeechReliabilityTests(unittest.TestCase):
                 "TTS_ENGINE": "auto",
                 "RESPONSE_LANGUAGE": "hinglish",
                 "PIPER_MODEL_DIR": directory,
-                "INDICF5_REFERENCE_AUDIO": "",
-                "INDICF5_REFERENCE_TEXT": "",
             }
-            with patch.dict("os.environ", environment):
+            with patch.multiple("config", **environment):
                 status = tts_runtime_status()
 
         self.assertEqual(status["status"], "ready")

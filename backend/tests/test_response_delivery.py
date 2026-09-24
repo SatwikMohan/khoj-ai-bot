@@ -43,7 +43,7 @@ class ResponseDeliveryTests(unittest.TestCase):
                 page_content='The storage limit is 100 kg.', metadata={'source': 'rules.pdf'},
             )]),
             patch('services.response_stream.RESPONSE_SLOT', threading.BoundedSemaphore(1)),
-            patch.dict('os.environ', {'RESPONSE_LANGUAGE': 'english', 'QA_RESPONSE_TIMEOUT_SECONDS': '3'}),
+            patch.multiple('config', RESPONSE_LANGUAGE='english', QA_RESPONSE_TIMEOUT_SECONDS=3),
         ]
         for item in patches:
             item.start()
@@ -128,7 +128,7 @@ class BoundedStreamTests(unittest.TestCase):
 
 class ModelSelectionTests(unittest.TestCase):
     def test_mandatory_reasoning_model_uses_advertised_low_effort(self):
-        with patch.dict('os.environ', {'OLLAMA_THINK': 'auto', 'QA_REASONING_ENABLED': 'false'}), patch(
+        with patch.multiple('config', OLLAMA_THINK='auto', QA_REASONING_ENABLED=False), patch(
             'services.model_config.model_metadata', return_value={
                 'capabilities': ['completion', 'thinking'],
                 'thinking': {'values': ['low', 'medium', 'high'], 'default': 'medium'},
@@ -137,19 +137,19 @@ class ModelSelectionTests(unittest.TestCase):
             self.assertEqual(thinking_setting('http://localhost', 'effort-model'), 'low')
 
     def test_non_reasoning_model_omits_thinking_option(self):
-        with patch.dict('os.environ', {'OLLAMA_THINK': 'auto'}), patch(
+        with patch('config.OLLAMA_THINK', 'auto'), patch(
             'services.model_config.model_metadata', return_value={'capabilities': ['completion']}
         ):
             self.assertIsNone(thinking_setting('http://localhost', 'arbitrary-chat-model'))
 
     def test_reasoning_model_can_disable_thinking(self):
-        with patch.dict('os.environ', {'OLLAMA_THINK': 'auto', 'QA_REASONING_ENABLED': 'false'}), patch(
+        with patch.multiple('config', OLLAMA_THINK='auto', QA_REASONING_ENABLED=False), patch(
             'services.model_config.model_metadata', return_value={'capabilities': ['completion', 'thinking']}
         ):
             self.assertIs(thinking_setting('http://localhost', 'arbitrary-reasoning-model'), False)
 
     def test_embedding_model_in_chat_slot_is_rejected(self):
-        with patch.dict('os.environ', {'OLLAMA_THINK': 'auto'}), patch(
+        with patch('config.OLLAMA_THINK', 'auto'), patch(
             'services.model_config.model_metadata', return_value={'capabilities': ['embedding']}
         ):
             with self.assertRaisesRegex(ValueError, 'not a chat'):

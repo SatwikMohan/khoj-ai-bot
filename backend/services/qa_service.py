@@ -1013,8 +1013,8 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
 
 def answer_question(
     question: str,
-    top_k: int = 5,
-    temperature: float = 0.5,
+    top_k: int = config.QA_TOP_K,
+    temperature: float = config.QA_TEMPERATURE,
     chat_history: list[ChatMessage] | None = None,
 ) -> QAResponse:
     # HTTP and in-process calls use exactly the same bounded response path.
@@ -1028,8 +1028,8 @@ def answer_question(
 
 def stream_answer_events(
     question: str,
-    top_k: int = 5,
-    temperature: float = 0.5,
+    top_k: int = config.QA_TOP_K,
+    temperature: float = config.QA_TEMPERATURE,
     chat_history: list[ChatMessage] | None = None,
 ) -> Iterator[dict]:
     _load_environment()
