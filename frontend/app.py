@@ -73,7 +73,7 @@ ONLINE_VOICE_OPTIONS = {
     "Japanese Japan - Nanami": "ja-JP-NanamiNeural",
 }
 OFFLINE_VOICE_OPTIONS = {
-    "Configured offline Hindi / English voice": "configured",
+    "Automatic offline voice": "configured",
     "Natural English - Heart": "af_heart",
     "Natural English - Bella": "af_bella",
     "Natural English - Nicole": "af_nicole",
@@ -88,7 +88,7 @@ VOICE_OPTIONS = (
 )
 CUSTOM_VOICE_LABEL = "Custom voice name"
 if DEFAULT_TTS_ENGINE in {"auto", "piper", "espeak"}:
-    VOICE_OPTIONS = {"Configured offline Hindi / English voice": "configured"}
+    VOICE_OPTIONS = {"Automatic offline voice": "configured"}
 TONE_OPTIONS = ["neutral", "warm", "cheerful", "calm", "serious", "energetic", "custom"]
 
 
@@ -2388,7 +2388,7 @@ def ask_api_stream(
     tts_executor: ThreadPoolExecutor | None = None
     tts_futures: dict[int, tuple[Future, str]] = {}
     next_audio_sequence = 0
-    tts_config = _current_tts_config()
+    tts_config = _current_tts_config(question)
 
     def submit_tts(segment: str) -> None:
         nonlocal queue_sequence, tts_executor
@@ -2522,7 +2522,10 @@ def ask_api_stream(
     return answer.strip(), sources, None, audio_bytes, audio_mime, audio_error
 
 
-def _current_tts_config() -> dict:
+def _current_tts_config(question: str = "") -> dict:
+    from services.language_service import response_language
+    if not question:
+        question = next((str(item.get("content", "")) for item in reversed(st.session_state.messages) if item.get("role") == "user"), "")
     return {
         "enabled": bool(st.session_state.tts_enabled),
         "voice_id": st.session_state.tts_voice_id.strip(),
@@ -2531,6 +2534,7 @@ def _current_tts_config() -> dict:
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
         "max_words": st.session_state.tts_max_words,
         "api_url": st.session_state.api_url.rstrip("/"),
+        "language": response_language(question),
     }
 
 
@@ -2546,6 +2550,7 @@ def _request_tts(text: str, config: dict) -> tuple[bytes | None, str, str | None
     payload = {
         "text": text,
         "voice_id": voice_id,
+        "language": config["language"],
         "tone": config["tone"],
         "rate": config["rate"],
         "pitch": config["pitch"],

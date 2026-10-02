@@ -51,24 +51,19 @@ def provision_tts(offline: bool = False) -> None:
     if engine == "piper":
         from piper.download_voices import download_voice
 
-        for language in ("hindi", "english"):
+        for language in ("hindi", "english", *config.PIPER_ADDITIONAL_VOICES):
             path = _piper_path(language)
             if not path.is_file() or not Path(str(path) + ".json").is_file():
                 if offline:
                     raise RuntimeError(f"Missing offline voice: {path}")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 download_voice(path.stem, path.parent)
-        # Exercise each model even if RESPONSE_LANGUAGE forces Hinglish.
+        # Check all configured files and synthesize the default voices.
         from services import tts_service
-        previous = config.RESPONSE_LANGUAGE
-        try:
-            for language, text in (("hindi", "नमस्ते। आपका स्वागत है।"), ("english", "Hello. Your voice is ready.")):
-                config.RESPONSE_LANGUAGE = language
-                audio, media = tts_service._synthesize_piper_speech(TTSRequest(text=text, response_format="wav"))
-                _validate_audio(audio, media)
-                print(f"Piper {language} offline synthesis passed.", flush=True)
-        finally:
-            config.RESPONSE_LANGUAGE = previous
+        for language, text in (("hi", "नमस्ते। आपका स्वागत है।"), ("en", "Hello. Your voice is ready.")):
+            audio, media = tts_service._synthesize_piper_speech(TTSRequest(text=text, language=language, response_format="wav"))
+            _validate_audio(audio, media)
+            print(f"Piper {language} offline synthesis passed.", flush=True)
     elif engine == "espeak":
         audio, media = _synthesize_with_engine(engine, TTSRequest(text="नमस्ते। आपका स्वागत है।"))
         _validate_audio(audio, media)
@@ -81,12 +76,12 @@ def provision_tts(offline: bool = False) -> None:
 def provision_reranker() -> None:
     if not config.RERANK_ENABLED:
         return
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     model = config.RERANK_MODEL
     print(f"Provisioning reranker: {model}")
     AutoTokenizer.from_pretrained(model)
-    AutoModelForCausalLM.from_pretrained(model)
+    AutoModelForSequenceClassification.from_pretrained(model)
 
 
 if __name__ == "__main__":

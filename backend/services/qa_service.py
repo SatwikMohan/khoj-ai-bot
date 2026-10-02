@@ -1,8 +1,8 @@
 import config
 import json
-import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -19,50 +19,16 @@ from services.embedding_service import (
     ollama_model_names,
 )
 from services.lexical_service import lexical_search
+from services.language_service import response_language, language_instruction
 from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
 from services.response_stream import AnswerTextFilter, bounded_events
+from services.versioning import document_identity, select_documents, version_metadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROJECT_ROOT
-DEFAULT_VECTOR_DB_DIR = REPO_ROOT / "vector_db"
-DEFAULT_RELEVANCE_THRESHOLD = 0.15
-DEFAULT_CONTEXT_MAX_CHARS = 16000
-DEFAULT_RETRIEVAL_FETCH_K = 40
-DEFAULT_CHAT_HISTORY_MAX_TURNS = 4
-DEFAULT_CHAT_HISTORY_MAX_CHARS = 1200
-DEFAULT_CHAT_HISTORY_MESSAGE_CHARS = 320
-DEFAULT_MIN_RETRIEVED_TEXT_CHARS = 40
-DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
-YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
-
-HINGLISH_MARKERS = {
-    "aap",
-    "ap",
-    "hai",
-    "hain",
-    "kya",
-    "kaise",
-    "kaisa",
-    "kaisi",
-    "mujhe",
-    "muje",
-    "batao",
-    "bataye",
-    "bataiye",
-    "kripya",
-    "dhanyavad",
-    "shukriya",
-    "namaste",
-    "haan",
-    "nahi",
-    "ka",
-    "ki",
-    "ke",
-    "mein",
-    "me",
-}
+DEFAULT_VECTOR_DB_DIR = Path(config.VECTOR_DB_DIR)
 
 GENERAL_EXACT_MESSAGES = {
     "hi",
@@ -71,6 +37,11 @@ GENERAL_EXACT_MESSAGES = {
     "hey",
     "heyy",
     "hola",
+    "bonjour",
+    "ciao",
+    "hallo",
+    "gracias",
+    "merci",
     "namaste",
     "namaskar",
     "नमस्ते",
@@ -208,40 +179,12 @@ def _normalized_query(question: str) -> str:
 
 
 def _detect_language_style(question: str) -> str:
-    configured_style = config.RESPONSE_LANGUAGE.strip().lower()
-    if configured_style in {"english", "hindi", "hinglish"}:
-        return configured_style
-
-    normalized = _normalized_query(question)
-    if DEVANAGARI_RE.search(question):
-        return "hindi"
-
-    words = set(re.findall(r"[a-zA-Z]+", normalized))
-    marker_count = len(words & HINGLISH_MARKERS)
-    if marker_count >= 2 or normalized in {"namaste", "dhanyavad", "shukriya"}:
-        return "hinglish"
-
-    return "english"
+    code = response_language(question)
+    return {"en": "english", "hi": "hindi"}.get(code, code)
 
 
 def _language_instruction(language_style: str) -> str:
-    if language_style == "hindi":
-        return (
-            "Respond in natural Hindi using Devanagari script. Keep it warm and spoken, "
-            "with clear Markdown formatting where it helps."
-        )
-    if language_style == "hinglish":
-        if config.HINGLISH_SCRIPT.strip().lower() == "mixed":
-            return (
-                "Respond in natural spoken Hinglish. Write Hindi words in Devanagari and "
-                "keep English words in Latin script so the offline Indic voice pronounces "
-                "both clearly. Keep it warm and use light Markdown only where it helps."
-            )
-        return (
-            "Respond in natural Hinglish using simple Roman Hindi-English phrasing. Keep it "
-            "warm and spoken, with clear Markdown formatting where it helps."
-        )
-    return "Respond in natural English with clear Markdown formatting where it helps."
+    return language_instruction({"english": "en", "hindi": "hi"}.get(language_style, language_style))
 
 
 def _thinking_instruction() -> str:
@@ -324,12 +267,17 @@ def _direct_answer_content(raw_answer: str) -> str:
 
 
 
-def _target_filter(question: str) -> dict | None:
-    return None
-
-
 def _general_response(question: str) -> QAResponse:
     language_style = _detect_language_style(question)
+    if language_style not in {"english", "hindi", "hinglish"}:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a friendly document assistant. Reply directly and briefly to the greeting or social message. {language_instruction} Do not invent document facts."),
+            ("human", "{question}"),
+        ])
+        answer = (prompt | _llm(config.QA_TEMPERATURE)).invoke({
+            "question": question, "language_instruction": _language_instruction(language_style),
+        })
+        return QAResponse(answer=_clean_model_answer(str(answer.content)), sources=[], query_type="general")
     normalized = _normalized_query(question)
     assistant_name = config.ASSISTANT_NAME.strip() or "Khoj"
     is_wellbeing = normalized in {
@@ -594,12 +542,7 @@ def runtime_status() -> dict:
 
 
 def _doc_key(doc) -> tuple:
-    return (
-        doc.metadata.get("source"),
-        doc.metadata.get("page"),
-        doc.metadata.get("start_index"),
-        doc.metadata.get("chunk_index"),
-    )
+    return document_identity(doc)
 
 
 def _clean_content(content: str) -> str:
@@ -610,18 +553,6 @@ def _clean_content(content: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines).strip()
-
-
-def _doc_years(doc) -> tuple[str, ...]:
-    text = " ".join(
-        [
-            str(doc.metadata.get("source", "")),
-            str(doc.metadata.get("folder_path", "")),
-            str(doc.metadata.get("file_name", "")),
-            _clean_content(doc.page_content)[:2500],
-        ]
-    )
-    return tuple(sorted(set(YEAR_RE.findall(text))))
 
 
 def _has_meaningful_content(doc) -> bool:
@@ -639,17 +570,19 @@ def _format_context(docs) -> str:
         folder_label = f", folder {folder_path}" if folder_path else ""
         page = doc.metadata.get("page")
         page_label = f", page {page + 1}" if isinstance(page, int) else ""
-        years = _doc_years(doc)
-        year_label = f", years {', '.join(years)}" if years else ""
+        version = version_metadata(doc)
+        labels = [f"{key} {version[key]}" for key in ("year", "version", "effective_date", "revision", "catalog", "schema", "table", "dataset", "entity") if key in version]
+        year_label = f", {', '.join(labels)}" if labels else ""
         content = _clean_content(doc.page_content)
-        remaining_chars = max_chars - used_chars
+        header = f"[Reference {index}: {source}{folder_label}{page_label}{year_label}]\n"
+        remaining_chars = min(max_chars - used_chars - len(header), max(0, max_chars // max(1, len(docs)) - len(header)))
         if remaining_chars <= 0:
             break
         if len(content) > remaining_chars:
             content = content[:remaining_chars].rsplit(" ", 1)[0].strip()
-        block = f"[Reference {index}: {source}{folder_label}{page_label}{year_label}]\n{content}"
+        block = header + content
         context_blocks.append(block)
-        used_chars += len(block)
+        used_chars += len(block) + 2
     return "\n\n".join(context_blocks)
 
 
@@ -664,6 +597,9 @@ def _source_chunks(docs) -> list[SourceChunk]:
                 page=doc.metadata.get("page"),
                 chunk_index=doc.metadata.get("chunk_index"),
                 relevance_score=doc.metadata.get("relevance_score"),
+                year=version_metadata(doc).get("year"),
+                version=version_metadata(doc).get("version"),
+                effective_date=version_metadata(doc).get("effective_date"),
                 preview=preview,
             )
         )
@@ -765,6 +701,8 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
     is_follow_up = len(words) <= 12 and (
         bool(words & follow_up_markers)
         or normalized.startswith(explicit_follow_up_phrases)
+        or normalized in {"latest", "latest version", "the latest version", "previous version", "old version", "historical version"}
+        or bool(re.fullmatch(r"(?:in |for |year )?(?:19|20)\d{2}", normalized))
     )
     if not is_follow_up:
         return question
@@ -814,44 +752,29 @@ def _hybrid_rank(dense_docs: list, lexical_docs: list, limit: int):
     return ranked[:limit]
 
 
-def _diversity_key(doc) -> tuple[str, str]:
-    years = _doc_years(doc)
-    source = str(doc.metadata.get("source") or doc.metadata.get("file_name") or "")
-    return source, ",".join(years)
-
-
 def _diversify_docs(docs, top_k: int):
-    selected = []
-    selected_keys = set()
-    selected_doc_keys = set()
-
-    for doc in docs:
-        key = _diversity_key(doc)
-        if key in selected_keys:
-            continue
-        selected.append(doc)
-        selected_keys.add(key)
-        selected_doc_keys.add(_doc_key(doc))
-        if len(selected) >= top_k:
-            return selected
-
-    for doc in docs:
-        key = _doc_key(doc)
-        if key in selected_doc_keys:
-            continue
-        selected.append(doc)
-        selected_doc_keys.add(key)
-        if len(selected) >= top_k:
-            break
-
-    return selected
+    return select_documents(docs, "", top_k)
 
 
-def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
+def _retrieve_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None):
+    intent_question = scope_question or question
     fetch_k = max(top_k, config.RETRIEVAL_FETCH_K)
     threshold = float(config.RELEVANCE_SCORE_THRESHOLD)
 
-    scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
+    if config.HYBRID_SEARCH_ENABLED:
+        collection_name, _ = _active_index()
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval") as pool:
+            dense_future = pool.submit(vector_store.similarity_search_with_relevance_scores, question, k=fetch_k)
+            lexical_future = pool.submit(lexical_search, _vector_db_dir(), collection_name, question, fetch_k * 3)
+            scored_docs = dense_future.result()
+            try:
+                lexical_docs = lexical_future.result()
+            except Exception as exc:
+                print(f"Lexical retrieval unavailable: {exc}", flush=True)
+                lexical_docs = []
+    else:
+        scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
+        lexical_docs = []
     relevant_by_key = {}
     dense_docs = []
     for doc, score in scored_docs:
@@ -863,20 +786,13 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
             relevant_by_key[_doc_key(doc)] = doc
 
     if config.HYBRID_SEARCH_ENABLED:
-        collection_name, _ = _active_index()
-        lexical_docs = lexical_search(
-            _vector_db_dir(),
-            collection_name,
-            question,
-            fetch_k,
-        )
         lexical_docs = [doc for doc in lexical_docs if _has_meaningful_content(doc)]
         if dense_docs or lexical_docs:
-            candidate_count = max(top_k, config.RERANK_CANDIDATES)
-            candidates = _hybrid_rank(dense_docs, lexical_docs, candidate_count)
-            selected = _diversify_docs(
-                rerank_documents(question, candidates, top_k), top_k
-            )
+            candidate_count = max(top_k, config.RERANK_CANDIDATES, config.VERSION_CANDIDATES)
+            fused = _hybrid_rank(dense_docs, lexical_docs, fetch_k * 4)
+            candidates = select_documents(fused, intent_question, candidate_count, candidate_pool=True)
+            ranked = rerank_documents(question, candidates, len(candidates))
+            selected = select_documents(ranked, intent_question, top_k)
             print(
                 json.dumps(
                     {
@@ -898,16 +814,16 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
     if not relevant_by_key:
         if config.ALLOW_LOW_RELEVANCE_FALLBACK:
             fallback_docs = dense_docs
-            return _diversify_docs(fallback_docs, top_k)
+            return select_documents(fallback_docs, intent_question, top_k)
         return []
 
     if not config.RETRIEVAL_MMR_ENABLED:
-        return _diversify_docs(list(relevant_by_key.values()), top_k)
+        return select_documents(list(relevant_by_key.values()), intent_question, top_k)
 
     lambda_mult = float(config.MMR_LAMBDA_MULT)
     mmr_docs = vector_store.max_marginal_relevance_search(
         question,
-        k=top_k,
+        k=fetch_k,
         fetch_k=fetch_k,
         lambda_mult=lambda_mult,
     )
@@ -927,18 +843,27 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int):
                 if len(selected_docs) >= top_k:
                     break
 
-    return _diversify_docs(selected_docs, top_k)
+    return select_documents(selected_docs, intent_question, top_k)
 
 
-def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int):
+def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None):
     # A broad explanation still needs evidence about the actual subject. Adding
     # unrelated annual-report/financial terms previously displaced safety rules.
     summary_k = max(top_k, int(config.SUMMARY_CONTEXT_CHUNKS))
-    return _retrieve_context(vector_store, question, summary_k)
+    return _retrieve_context(vector_store, question, summary_k, scope_question=scope_question)
 
 
 def _not_enough_context_response(question: str) -> QAResponse:
     language_style = _detect_language_style(question)
+    if language_style not in {"english", "hindi", "hinglish"}:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Tell the person briefly that indexed documents do not contain enough reliable information to answer. Ask for a relevant document or one clarifying detail. {language_instruction} Do not invent facts."),
+            ("human", "{question}"),
+        ])
+        answer = (prompt | _llm(config.QA_TEMPERATURE)).invoke({
+            "question": question, "language_instruction": _language_instruction(language_style),
+        })
+        return QAResponse(answer=_clean_model_answer(str(answer.content)), sources=[], query_type="document")
     if language_style == "hindi":
         answer = (
             "मैंने दस्तावेजों में देखा, लेकिन इस सवाल का भरोसे से जवाब देने लायक पर्याप्त "
@@ -981,7 +906,9 @@ def _prompt_for_query(query_type: str) -> ChatPromptTemplate:
         "the same wording. If they request detail, explain why and how. If satisfied, avoid "
         "unnecessary follow-up questions. Be warm, curious, and specific, never patronizing. "
         "A useful explanation matters more than being extremely short. Cite supplied reference "
-        "numbers as [1], [2] beside document facts."
+        "numbers as [1], [2] beside document facts. Treat each reference's year and version as its scope. "
+        "For comparisons, describe each requested version separately and state supported changes. "
+        "For a latest-version request, do not present older figures as current. Never invent missing versions."
     )
 
     if query_type == "summary":
@@ -1054,10 +981,11 @@ def _feedback_retrieval_query(question: str, history) -> str:
 
 def _stream_answer_events(question, top_k, temperature, chat_history):
     started_at = time.perf_counter()
+    language = response_language(question)
     if _is_general_query(question):
         response = _general_response(question)
         yield {
-            "type": "done", "answer": response.answer,
+            "type": "done", "answer": response.answer, "language": language,
             "sources": _source_dicts(response.sources), "query_type": response.query_type,
             "timings_ms": {"total": round((time.perf_counter() - started_at) * 1000, 1)},
         }
@@ -1069,14 +997,14 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _feedback_retrieval_query(question, chat_history)
     docs = (
-        _retrieve_summary_context(vector_store, retrieval_query, top_k)
+        _retrieve_summary_context(vector_store, retrieval_query, top_k, scope_question=question)
         if query_type == "summary"
-        else _retrieve_context(vector_store, retrieval_query, top_k)
+        else _retrieve_context(vector_store, retrieval_query, top_k, scope_question=question)
     )
     if not docs:
         response = _not_enough_context_response(question)
         yield {
-            "type": "done", "answer": response.answer, "sources": [],
+            "type": "done", "answer": response.answer, "sources": [], "language": language,
             "query_type": query_type,
             "timings_ms": {"total": round((time.perf_counter() - started_at) * 1000, 1)},
         }
@@ -1088,7 +1016,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
         "context": _format_context(docs),
         "chat_history": _format_chat_history(chat_history),
         "question": question,
-        "language_instruction": _language_instruction(_detect_language_style(question)),
+        "language_instruction": language_instruction(language),
         "thinking_instruction": _thinking_instruction(),
     }
     filter_text = AnswerTextFilter()
@@ -1140,6 +1068,6 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
         "done_reason": metadata.get("done_reason"), **timings,
     }), flush=True)
     yield {
-        "type": "done", "answer": answer, "sources": _source_dicts(_source_chunks(docs)),
+        "type": "done", "answer": answer, "sources": _source_dicts(_source_chunks(docs)), "language": language,
         "query_type": query_type, "timings_ms": timings,
     }

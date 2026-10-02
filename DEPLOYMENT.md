@@ -16,12 +16,12 @@ process settings) remains in Compose. Keep its ports in sync if changing API_POR
 The supported chat/embedding provider is Ollama. Select any **Ollama chat model**
 for `OLLAMA_CHAT_MODEL` and an **Ollama embedding model** for `OLLAMA_EMBED_MODEL`.
 These roles are different; arbitrary Hugging Face repository names are not Ollama
-model names. The optional reranker uses Qwen3's yes/no scoring protocol and is
+model names. The optional reranker is a non-reasoning sequence classifier and is
 configured separately. Set `RERANK_ENABLED = False` for a lightweight local setup.
 
 | Setting | Local example | DGX example |
 | --- | --- | --- |
-| `OLLAMA_CHAT_MODEL` | `qwen3:4b` | `qwen3.5:35b` |
+| `OLLAMA_CHAT_MODEL` | `llama3.2:latest` | a locally installed non-reasoning chat model |
 | `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | `qwen3-embedding:8b-q8_0` |
 | `OLLAMA_NUM_CTX` | `4096` | `8192` |
 | `CONTEXT_MAX_CHARS` | `6000` | `16000` |
@@ -38,10 +38,9 @@ does not require indexing. An embedding-model or embedding-prefix change does:
 run `python train_engine.py` from `backend`. This builds and promotes a compatible
 collection while retaining the previous collection. Do not delete the vector DB.
 
-`OLLAMA_THINK = "auto"` discovers model capabilities and disables optional reasoning
-unless `QA_REASONING_ENABLED = True`. Models with mandatory reasoning may require
-an explicit supported effort level in `OLLAMA_THINK` and a larger
-`OLLAMA_NUM_PREDICT`. `OLLAMA_THINK = "default"` leaves the option to the model.
+`OLLAMA_THINK = "false"` and `QA_REASONING_ENABLED = False` are required. Inference
+rejects Ollama models that advertise a thinking capability. Use a standard chat
+model; reasoning-capable models are not accepted even when thinking can be disabled.
 `OLLAMA_REQUEST_TIMEOUT_SECONDS` bounds network inactivity;
 `QA_RESPONSE_TIMEOUT_SECONDS` bounds the whole answer, including retrieval.
 A timed-out native model operation may still be finishing in the background;
@@ -58,7 +57,7 @@ PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
 PIPER_ENGLISH_VOICE = "en_US-lessac-medium"
 TTS_FALLBACK_ENGINES = "espeak"
 TTS_TIMEOUT_SECONDS = 45
-RESPONSE_LANGUAGE = "hinglish"
+RESPONSE_LANGUAGE = "auto"
 HINGLISH_SCRIPT = "mixed"
 ```
 
@@ -74,7 +73,13 @@ Locally, voices default to `backend/models/piper`. In Docker, `config.py` select
 `PIPER_MODEL_DIR = "/models/piper"` in the persistent `ai_models` volume.
 Set `PIPER_MODEL_DIR` explicitly only if you use a different local directory.
 Voice values may also be absolute paths to compatible Piper ONNX models.
-Both Hindi and English models are provisioned and checked.
+Both Hindi and English models are provisioned and checked. The query text selects
+the answer language automatically. `langid` handles longer Latin-script queries
+offline; script and Hinglish rules handle shorter ones. Ambiguous short queries
+fall back to English. `PIPER_ADDITIONAL_VOICES` maps other ISO language codes to
+locally installed Piper voices. Other languages use installed `espeak-ng` voices
+when available; `espeak-ng --voices` lists them. If no voice supports the language,
+the text answer remains visible and speech returns a clear error.
 
 Provision once with internet access, or copy the model files from a connected
 machine. Runtime synthesis never downloads anything:
@@ -153,6 +158,13 @@ The provisioning script reads both model names from `config.py`. The combined
 runner starts both Streamlit and the retained FastAPI endpoints. Streamlit calls
 backend functions directly by default; Ollama is a local service and does not
 require internet for inference.
+
+Ingestion version 7 records years and versions found in source paths and includes
+them in chunk IDs. Run `python train_engine.py` after updating to build and promote
+the new collection. Retrieval combines parallel dense and lexical search,
+diversifies before reranking, and keeps separate source/version headers within the
+context budget. Dates in an unversioned document are treated as content evidence,
+not asserted as its version.
 
 If an answer fails, the page shows the error immediately. Logs include the active
 model, completion reason, retrieval time and generation time. `/ready` checks

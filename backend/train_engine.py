@@ -20,14 +20,15 @@ from pptx import Presentation
 
 from services.embedding_service import PromptedOllamaEmbeddings, embedding_profile
 from services.lexical_service import add_lexical_chunks, delete_lexical_ids, reset_lexical_collection
+from services.versioning import version_metadata
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_ROOT
-RAW_DATA_DIR = REPO_ROOT / "raw_data_files"
-VECTOR_DB_DIR = REPO_ROOT / "vector_db"
+RAW_DATA_DIR = Path(config.RAW_DATA_DIR)
+VECTOR_DB_DIR = Path(config.VECTOR_DB_DIR)
 MANIFEST_FILE_NAME = "ingestion_manifest.json"
-INGESTION_VERSION = 6
+INGESTION_VERSION = config.INGESTION_VERSION
 OCR_WARNING_KEYS: set[str] = set()
 TEXT_EXTENSIONS = {
     ".txt",
@@ -111,7 +112,7 @@ def base_metadata(path: Path, raw_data_dir: Path = RAW_DATA_DIR) -> dict:
     if folder_path == ".":
         folder_path = ""
 
-    return {
+    metadata = {
         "source": relative_source(path),
         "raw_source": raw_relative_path,
         "folder_path": folder_path,
@@ -120,6 +121,8 @@ def base_metadata(path: Path, raw_data_dir: Path = RAW_DATA_DIR) -> dict:
         "file_path": str(path),
         "extension": path.suffix.lower(),
     }
+    metadata.update({key: value for key, value in version_metadata(Document(page_content="", metadata=metadata)).items() if key in {"year", "version"}})
+    return metadata
 
 
 def read_text(path: Path) -> str:
@@ -420,6 +423,15 @@ def split_documents(documents: list[Document]) -> list[Document]:
 def chunk_id(chunk: Document) -> str:
     identity = {
         "source": chunk.metadata.get("source"),
+        "year": chunk.metadata.get("year"),
+        "version": chunk.metadata.get("version"),
+        "effective_date": chunk.metadata.get("effective_date"),
+        "revision": chunk.metadata.get("revision"),
+        "catalog": chunk.metadata.get("catalog"),
+        "schema": chunk.metadata.get("schema"),
+        "table": chunk.metadata.get("table"),
+        "dataset": chunk.metadata.get("dataset"),
+        "entity": chunk.metadata.get("entity"),
         "page": chunk.metadata.get("page"),
         "start_index": chunk.metadata.get("start_index"),
         "content": chunk.page_content,

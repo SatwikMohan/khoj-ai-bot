@@ -4,8 +4,8 @@ Install Ollama and pull the local models first:
 
 ```powershell
 irm https://ollama.com/install.ps1 | iex
-ollama pull qwen3:4b
-ollama pull qwen3-embedding:0.6b
+ollama pull llama3.2:latest
+ollama pull nomic-embed-text
 ollama list
 ```
 
@@ -45,7 +45,9 @@ The broader retrieval defaults help the bot compare repeated topics across diffe
 facts, years, rules, figures, and sources instead of answering from the first matching chunk only.
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
-Text-to-speech uses Piper CPU voices for Hindi/mixed-script Hinglish and English.
+Text-to-speech selects Hindi or English Piper voices from the query language.
+Other languages use a configured local Piper voice or an installed `espeak-ng`
+voice. The response language is detected from the query without a language menu.
 Set `TTS_ENGINE = "piper"` and run `python scripts/provision_models.py --only-tts` from
 `backend` once to download and verify the voices. No reference WAV is required.
 See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,

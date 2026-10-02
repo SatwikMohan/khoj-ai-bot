@@ -83,6 +83,11 @@ class RetrievalQueryTests(unittest.TestCase):
         result = _history_aware_query("When did it apply?", history)
         self.assertIn("Recent conversation", result)
 
+    def test_latest_version_followup_keeps_previous_entity(self):
+        history = [{"role": "user", "content": "What is the structure of CMR?"}]
+        result = _history_aware_query("latest version", history)
+        self.assertIn("CMR", result)
+
     def test_short_about_followup_keeps_previous_user_topic(self):
         history = [
             {"role": "user", "content": "Let's discuss the DGMS rules"},

@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 # Model selection. Examples for a smaller local setup:
-# OLLAMA_CHAT_MODEL = "qwen3:4b"
+# OLLAMA_CHAT_MODEL = "llama3.2:latest"
 # OLLAMA_EMBED_MODEL = "qwen3-embedding:0.6b"
 # STT_ENGINE = "faster-whisper"; WHISPER_MODEL = "small"
 # WHISPER_DEVICE = "cpu"; WHISPER_COMPUTE_TYPE = "int8"
@@ -21,7 +21,7 @@ OLLAMA_KEEP_ALIVE = 1800
 OLLAMA_NUM_CTX = 8192
 OLLAMA_NUM_PREDICT = 768
 OLLAMA_REQUEST_TIMEOUT_SECONDS = 120
-OLLAMA_THINK = "auto"
+OLLAMA_THINK = "false"
 QA_REASONING_ENABLED = False
 QA_RESPONSE_TIMEOUT_SECONDS = 180
 QA_WARMUP_ON_STARTUP = False
@@ -47,7 +47,7 @@ OFFLINE_MODE = True
 # Assistant and UI. Service ports below must match Docker's port mappings.
 ASSISTANT_NAME = "Khoj"
 ASSISTANT_PERSONA = "a calm, perceptive colleague who explains difficult material in plain language"
-RESPONSE_LANGUAGE = "hinglish"
+RESPONSE_LANGUAGE = "auto"
 HINGLISH_SCRIPT = "mixed"
 BACKEND_CALL_MODE = "inprocess"
 BACKEND_SOURCE_DIR = str(BACKEND_ROOT)
@@ -60,6 +60,7 @@ AVATAR_MODEL_FILE = "assets/scene.gltf"
 
 # Indexing and retrieval. Changing embedding models requires running ingestion.
 CHROMA_COLLECTION_NAME = "texmin_qa"
+INGESTION_VERSION = 7
 CHUNK_SIZE = 850
 CHUNK_OVERLAP = 150
 EMBEDDING_BATCH_SIZE = 256
@@ -84,9 +85,10 @@ CHAT_HISTORY_MAX_TURNS = 4
 CHAT_HISTORY_MAX_CHARS = 1200
 CHAT_HISTORY_MESSAGE_CHARS = 320
 RERANK_ENABLED = True
-RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B"
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 RERANK_CANDIDATES = 12
 RERANK_MAX_LENGTH = 1024
+VERSION_CANDIDATES = 16
 
 # Speech recognition. "auto" uses CUDA when available for Transformers.
 STT_ENGINE = "transformers"
@@ -116,6 +118,8 @@ STT_MIN_ACTIVE_FRAME_RATIO = 0.02
 TTS_ENGINE = "piper"
 PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
 PIPER_ENGLISH_VOICE = "en_US-lessac-medium"
+# Optional ISO 639-1 code to installed Piper voice name or absolute ONNX path.
+PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
 TTS_FALLBACK_ENGINES = "espeak"
 TTS_TIMEOUT_SECONDS = 45
 TTS_RESPONSE_TIMEOUT_SECONDS = 120
@@ -128,6 +132,20 @@ TTS_RATE = "+0%"
 TTS_PITCH = "+0Hz"
 TTS_VOICE = "configured"
 ESPEAK_RATE = 155
+
+
+def validate_config() -> None:
+    """Reject incompatible application settings before work begins."""
+    if not OLLAMA_CHAT_MODEL.strip() or not OLLAMA_EMBED_MODEL.strip():
+        raise ValueError("Both Ollama model names must be configured.")
+    if QA_REASONING_ENABLED or OLLAMA_THINK.strip().lower() not in {"false", "auto"}:
+        raise ValueError("This application requires a non-reasoning chat model and disabled thinking.")
+    if CHUNK_SIZE <= 0 or not 0 <= CHUNK_OVERLAP < CHUNK_SIZE:
+        raise ValueError("CHUNK_OVERLAP must be smaller than positive CHUNK_SIZE.")
+    if min(QA_TOP_K, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
+        raise ValueError("Retrieval limits must be positive.")
+    if OFFLINE_MODE and TTS_ENGINE.strip().lower() in {"edge", "edge-tts"}:
+        raise ValueError("Edge TTS requires internet and cannot be the offline speech engine.")
 
 # Optional legacy/online engines. Edge is rejected while OFFLINE_MODE is True.
 KOKORO_VOICE = "af_heart"
@@ -146,6 +164,7 @@ def configure_runtime_environment(*, offline: bool | None = None) -> None:
     Application settings are read directly from this module. Provisioning opts
     into online downloads explicitly; credentials are never read or copied here.
     """
+    validate_config()
     offline = OFFLINE_MODE if offline is None else offline
     os.environ["HF_HOME"] = HF_HOME
     os.environ["HF_HUB_OFFLINE"] = "1" if offline else "0"

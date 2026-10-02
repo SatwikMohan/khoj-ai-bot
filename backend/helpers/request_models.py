@@ -23,6 +23,9 @@ class SourceChunk(BaseModel):
     page: int | None = None
     chunk_index: int | None = None
     relevance_score: float | None = None
+    year: str | None = None
+    version: str | None = None
+    effective_date: str | None = None
     preview: str
 
 
@@ -30,12 +33,14 @@ class QAResponse(BaseModel):
     answer: str
     sources: list[SourceChunk]
     query_type: str = "document"
+    language: str | None = None
     timings_ms: dict[str, float] = Field(default_factory=dict)
 
 
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Text or Markdown to synthesize.")
     voice_id: str | None = Field(None, description="Optional local voice id/name, or Edge voice name when TTS_ENGINE=edge.")
+    language: str | None = Field(None, description="Detected ISO language code for this response; inferred from text when omitted.")
     ref_audio: str | None = Field(None, description="Reserved for API compatibility; local TTS does not use reference audio.")
     model: str | None = Field(None, description="Reserved for API compatibility; TTS selects the configured local or Edge engine.")
     tone: str = Field(config.TTS_TONE, description="Tone preset: neutral, warm, cheerful, calm, serious, energetic, or custom.")

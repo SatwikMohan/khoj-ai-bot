@@ -22,6 +22,7 @@ pyttsx3
 faster-whisper>=1.1,<2
 python-multipart>=0.0.9
 piper-tts==1.8.0
+langid==1.1.6
 transformers>=4.51,<5
 accelerate>=1,<2
 soundfile>=0.12,<1

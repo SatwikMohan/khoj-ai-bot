@@ -16,12 +16,11 @@ from pathlib import Path
 
 
 from helpers.request_models import TTSRequest
+from services.language_service import detect_language
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_FORMATS = {"mp3", "wav"}
-DEFAULT_ENGLISH_VOICE = "en-IN-NeerjaNeural"
-DEFAULT_HINDI_VOICE = "hi-IN-SwaraNeural"
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 SENTENCE_RE = re.compile(r"[^.!?।]+[.!?।]*")
 TONE_PRESETS = {
@@ -508,16 +507,17 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
 def _piper_path(language: str) -> Path:
     directory = Path(config.PIPER_MODEL_DIR)
-    name = (config.PIPER_HINDI_VOICE if language == "hindi" else config.PIPER_ENGLISH_VOICE).strip()
+    code = {"hindi": "hi", "hinglish": "hi", "english": "en"}.get(language, language)
+    name = {"hi": config.PIPER_HINDI_VOICE, "en": config.PIPER_ENGLISH_VOICE, **config.PIPER_ADDITIONAL_VOICES}.get(code)
+    if not name:
+        raise TTSEngineError(f"No Piper voice is configured for language '{code}'.")
+    name = name.strip()
     path = Path(name if name.endswith(".onnx") else name + ".onnx")
     return path if path.is_absolute() else directory / path
 
 
 def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
-    language = "hindi" if (
-        _contains_devanagari(payload.text)
-        or config.RESPONSE_LANGUAGE in {"hindi", "hinglish"}
-    ) else "english"
+    language = payload.language or detect_language(payload.text)
     path = _piper_path(language)
     if not path.is_file() or not Path(str(path) + ".json").is_file():
         raise TTSEngineError(
@@ -548,10 +548,10 @@ def _synthesize_espeak_speech(payload: TTSRequest) -> tuple[bytes, str]:
     executable = shutil.which("espeak-ng")
     if not executable:
         raise TTSEngineError("Install espeak-ng to use the offline fallback voice.")
-    language = "hi" if (
-        _contains_devanagari(payload.text)
-        or config.RESPONSE_LANGUAGE in {"hindi", "hinglish"}
-    ) else "en"
+    language = payload.language or detect_language(payload.text)
+    language = {"hinglish": "hi", "hindi": "hi", "english": "en"}.get(language, language)
+    if not _espeak_supports(language):
+        raise TTSEngineError(f"espeak-ng has no installed voice for language '{language}'.")
     # A real file gives WAV a complete header (unlike espeak's --stdout stream).
     with tempfile.TemporaryDirectory(prefix="khoj-voice-") as directory:
         path = Path(directory) / "speech.wav"
@@ -563,6 +563,15 @@ def _synthesize_espeak_speech(payload: TTSRequest) -> tuple[bytes, str]:
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         return path.read_bytes(), "audio/wav"
+
+
+@lru_cache(maxsize=128)
+def _espeak_supports(language: str) -> bool:
+    executable = shutil.which("espeak-ng")
+    if not executable:
+        return False
+    result = subprocess.run([executable, f"--voices={language}"], capture_output=True, text=True, timeout=5)
+    return result.returncode == 0 and len(result.stdout.splitlines()) > 1
 
 
 def _synthesize_local_speech(payload: TTSRequest) -> tuple[bytes, str]:
