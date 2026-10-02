@@ -846,7 +846,7 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
                           "files_updated": changed_count, "files_unchanged": skipped_count,
                           "chunks": chunk_count, "embeddings_generated": embeddings_generated,
                           "duplicate_chunks_skipped": duplicates_skipped,
-                          **{key: round(value, 1) for key, value in stage_totals_ms.items()}}, flush=True))
+                          **{key: round(value, 1) for key, value in stage_totals_ms.items()}}), flush=True)
         if not active_manifest.get("active_collection"):
             manifest.pop("candidate", None)
             save_manifest(vector_db_dir, manifest)
@@ -872,7 +872,7 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
                       "files_updated": changed_count, "files_unchanged": skipped_count,
                       "chunks": chunk_count, "embeddings_generated": embeddings_generated,
                       "duplicate_chunks_skipped": duplicates_skipped,
-                      **{key: round(value, 1) for key, value in stage_totals_ms.items()}}, flush=True))
+                      **{key: round(value, 1) for key, value in stage_totals_ms.items()}}), flush=True)
 
 
 def _retrieval_recall(vector_store: Chroma, collection_name: str, cases: list[dict], top_k: int = 5) -> float:
