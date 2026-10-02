@@ -21,6 +21,7 @@ ROMAN_HINDI = {
     "namaste", "nahi", "mera", "meri", "hoga", "karo", "samjhao",
     "chahiye", "mein", "se", "ka", "ki", "ke",
 }
+ENGLISH_CLUES = {"the", "and", "is", "are", "what", "which", "with", "from", "this", "that", "their", "into", "before", "after"}
 SHORT_LANGUAGE_WORDS = {
     "hola": "es", "gracias": "es", "bonjour": "fr", "merci": "fr",
     "ciao": "it", "hallo": "de", "namaste": "hinglish",
@@ -64,6 +65,8 @@ def detect_language(text: str, fallback: str = "en") -> str:
     # language guess based on one product name or schema identifier.
     if len(words) < 4:
         return fallback
+    if len(set(words) & ENGLISH_CLUES) >= 3:
+        return "en"
     clue_scores = {code: len(set(words) & clues) for code, clues in LATIN_CLUES.items()}
     best = max(clue_scores, key=clue_scores.get)
     if clue_scores[best] >= 2 and sum(score == clue_scores[best] for score in clue_scores.values()) == 1:

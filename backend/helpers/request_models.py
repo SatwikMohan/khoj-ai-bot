@@ -9,6 +9,8 @@ class ChatMessage(BaseModel):
 
 class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="User question for the QA bot.")
+    session_id: str | None = Field(None, max_length=128, description="Conversation session for latest-query-wins cancellation.")
+    request_id: str | None = Field(None, max_length=128, description="Unique identifier for this query.")
     top_k: int = Field(config.QA_TOP_K, ge=1, le=10, description="Number of context chunks to retrieve.")
     temperature: float = Field(config.QA_TEMPERATURE, ge=0, le=1, description="Controls response warmth/variation.")
     chat_history: list[ChatMessage] = Field(
@@ -39,6 +41,8 @@ class QAResponse(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, description="Text or Markdown to synthesize.")
+    session_id: str | None = Field(None, max_length=128)
+    request_id: str | None = Field(None, max_length=128)
     voice_id: str | None = Field(None, description="Optional local voice id/name, or Edge voice name when TTS_ENGINE=edge.")
     language: str | None = Field(None, description="Detected ISO language code for this response; inferred from text when omitted.")
     ref_audio: str | None = Field(None, description="Reserved for API compatibility; local TTS does not use reference audio.")

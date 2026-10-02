@@ -1,6 +1,7 @@
 import config
 import threading
 from functools import lru_cache
+from pathlib import Path
 
 
 RERANK_LOCK = threading.Lock()
@@ -8,6 +9,11 @@ RERANK_LOCK = threading.Lock()
 
 @lru_cache(maxsize=1)
 def _components():
+    if config.OFFLINE_MODE:
+        model_name = config.RERANK_MODEL
+        cached = Path(config.HF_HOME) / "hub" / ("models--" + model_name.replace("/", "--")) / "snapshots"
+        if not Path(model_name).is_dir() and not cached.is_dir():
+            raise FileNotFoundError(f"Reranker {model_name} is not cached locally. Provision it during setup or disable RERANK_ENABLED.")
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 

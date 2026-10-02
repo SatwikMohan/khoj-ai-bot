@@ -10,6 +10,13 @@ The legacy `.env` is ignored and is not copied into images or migrated into conf
 Do not put credentials in the tracked Python file.
 
 Paths and the Ollama URL are selected for local versus Docker use in `config.py`.
+The application identifies Ollama models by **name** through `OLLAMA_BASE_URL`;
+it never needs a filesystem path to their weights. In Compose, the `ollama`
+service owns its persistent `ollama_models` volume at `/root/.ollama`.
+`ollama-model-init` pulls configured names into that volume once. Rebuilding the
+app image does not erase the models. For a first offline boot, populate that
+volume on a connected machine before transferring it to the DGX; building the
+app image alone does not include model weights.
 Docker infrastructure (GPU reservations, published ports, DNS, and Ollama server
 process settings) remains in Compose. Keep its ports in sync if changing API_PORT.
 
@@ -21,8 +28,10 @@ configured separately. Set `RERANK_ENABLED = False` for a lightweight local setu
 
 | Setting | Local example | DGX example |
 | --- | --- | --- |
-| `OLLAMA_CHAT_MODEL` | `llama3.2:latest` | a locally installed non-reasoning chat model |
-| `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | `qwen3-embedding:8b-q8_0` |
+| `OLLAMA_CHAT_MODEL` | `llama3.2:latest` | `llama3.1:8b-instruct-q4_K_M` (configured) |
+| `OLLAMA_CHAT_QUANTIZATION` | `Q4_K_M` | `Q4_K_M` (the model tag selects actual weights) |
+| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | `bge-m3` (configured candidate) |
+| `OLLAMA_EMBED_DIMENSIONS` | `768` | `1024` for BGE-M3 |
 | `OLLAMA_NUM_CTX` | `4096` | `8192` |
 | `CONTEXT_MAX_CHARS` | `6000` | `16000` |
 | `EMBEDDING_BATCH_SIZE` | `32` | `256` |
@@ -32,11 +41,15 @@ configured separately. Set `RERANK_ENABLED = False` for a lightweight local setu
 | `WHISPER_DEVICE` | `cpu` | `auto` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | `float16` |
 
-These are example profiles, not performance guarantees. Actual speed and language
-quality depend on the model and available RAM/GPU memory. A chat-model change
-does not require indexing. An embedding-model or embedding-prefix change does:
-run `python train_engine.py` from `backend`. This builds and promotes a compatible
-collection while retaining the previous collection. Do not delete the vector DB.
+The DGX entries are now active in `backend/config.py`; their performance and
+retrieval quality still need validation on Spark. A chat-model change does not require indexing. An
+embedding-model or embedding-prefix change does: run `python train_engine.py`
+to build a candidate, evaluate it, then run
+`python train_engine.py --promote-candidate`. The active collection stays in use
+until promotion. Plan an embedding change in a maintenance window: the app may
+reload the bind-mounted config before promotion and become unready. Restart it
+after promotion. Do not delete the vector DB. See
+`DGX_SPARK_REEVALUATION.md` for measurements and validation gates.
 
 `OLLAMA_THINK = "false"` and `QA_REASONING_ENABLED = False` are required. Inference
 rejects Ollama models that advertise a thinking capability. Use a standard chat
@@ -44,8 +57,7 @@ model; reasoning-capable models are not accepted even when thinking can be disab
 `OLLAMA_REQUEST_TIMEOUT_SECONDS` bounds network inactivity;
 `QA_RESPONSE_TIMEOUT_SECONDS` bounds the whole answer, including retrieval.
 A timed-out native model operation may still be finishing in the background;
-new requests receive a busy error until it releases its slot, preventing a buildup
-of abandoned inference workers.
+request cancellation discards its result and closes its stream where supported.
 
 ## Offline speech
 
@@ -105,29 +117,74 @@ The DGX image uses `nvcr.io/nvidia/pytorch:26.08-py3`. If registry authenticatio
 required, run `docker login nvcr.io` using the literal username `$oauthtoken` and
 your NGC API key as the password. Place source documents in `backend/raw_data_files`.
 
-After transferring the updated files and editing `backend/config.py` on the DGX:
+After transferring the updated files, build images on the ARM64 DGX and
+provision the selected models. `backend/config.py` now names the DGX trial
+models. Prepare their index before starting the app:
 
 ```bash
 docker compose build app backend-model-init index-init
+docker compose up -d ollama
+docker compose run --rm --no-deps ollama-model-init
+docker compose run --rm --no-deps backend-model-init
+docker compose run --rm --no-deps index-init python train_engine.py
+```
+
+Wait until Ollama is healthy before running model init. On a fresh vector store,
+the indexer activates its initial complete collection. If an older index was
+transferred, the indexer stages a candidate instead. In that case run:
+
+```bash
+docker compose run --rm --no-deps index-init python evaluate_retrieval.py evals/golden_local.jsonl --top-k 5 --candidate
+docker compose run --rm --no-deps index-init python train_engine.py --promote-candidate
+```
+
+Inspect the evaluation and expand its labels before promotion. Then start the
+application and gateway:
+
+```bash
 docker compose up -d --force-recreate
 docker compose logs --tail=100 -f backend-model-init index-init app ollama
 ```
 
 Initial provisioning needs internet for uncached dependencies and model assets.
 Existing documents, vectors, and model volumes are retained. Compose's index init
-handles embedding-model changes; unchanged indexed files are skipped.
+stages an embedding-model change; it does **not** activate the candidate.
+Changing the embedding name in config and recreating the app before promotion
+will make `/ready` fail because the active index still uses the old model.
 After successful provisioning, offline restarts can skip the init jobs:
 
 ```bash
 docker compose up -d --no-deps ollama app gateway
 ```
 
-For a chat-model-only change, first ensure that the new model is downloaded:
+For a chat-model-only change, edit `backend/config.py`, then ensure the new model
+is downloaded before restarting the app:
 
 ```bash
 docker compose run --rm --no-deps ollama-model-init
 docker compose restart app
 ```
+
+For an embedding-model change, record baseline retrieval first and schedule a
+maintenance window. Edit the embedding name and dimension in `backend/config.py`,
+then stage and inspect the candidate before restarting the app:
+
+```bash
+docker compose run --rm --no-deps ollama-model-init
+docker compose run --rm --no-deps index-init python train_engine.py --force-rebuild
+docker compose run --rm --no-deps index-init python evaluate_retrieval.py evals/golden_local.jsonl --top-k 5 --candidate
+docker compose run --rm --no-deps index-init python train_engine.py --promote-candidate
+docker compose restart app
+docker compose exec ollama ollama list
+docker compose exec ollama ollama ps
+```
+
+Promotion checks OCR readiness, vector count, embedding dimension, and labelled
+recall. If it rejects the candidate, restore the old embedding settings before
+restarting the app. For a changed embedding model, save the old evaluation
+output before editing config and compare it with the candidate result; the
+automatic gate has an absolute minimum but only compares to the active index
+when both use the same embedding profile.
 
 For a voice change, provision the new voice before recreating the app:
 
@@ -159,9 +216,9 @@ runner starts both Streamlit and the retained FastAPI endpoints. Streamlit calls
 backend functions directly by default; Ollama is a local service and does not
 require internet for inference.
 
-Ingestion version 7 records years and versions found in source paths and includes
-them in chunk IDs. Run `python train_engine.py` after updating to build and promote
-the new collection. Retrieval combines parallel dense and lexical search,
+Ingestion version 8 records years and versions found in source paths and includes
+them in chunk IDs. Run `python train_engine.py` to build a candidate, then
+promote it after validation. Retrieval combines parallel dense and lexical search,
 diversifies before reranking, and keeps separate source/version headers within the
 context budget. Dates in an unversioned document are treated as content evidence,
 not asserted as its version.
@@ -193,10 +250,11 @@ and corpus-specific retrieval evaluation:
 
 ```bash
 docker compose run --rm --no-deps index-init python train_engine.py --force-rebuild
-docker compose run --rm --no-deps app python backend/evaluate_retrieval.py backend/evals/golden.jsonl --top-k 5
+docker compose run --rm --no-deps app python backend/evaluate_retrieval.py backend/evals/golden_local.jsonl --top-k 5
 ```
 
-Populate `backend/evals/golden.jsonl` with questions and expected sources first.
+Expand `backend/evals/golden_local.jsonl` with Hindi documents, scans, tables,
+code, and versioned sources before selecting an embedding model.
 Local scanned-document ingestion requires Tesseract on PATH; Docker includes
 English and Hindi OCR language data. The browser records speech locally and sends
 audio to the configured Whisper backend, rather than using a browser vendor's

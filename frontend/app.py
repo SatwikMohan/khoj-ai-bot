@@ -5,6 +5,7 @@ import mimetypes
 import re
 import sys
 import uuid
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -18,6 +19,9 @@ import streamlit.components.v1 as components
 # Import the same configuration used by the backend, also in local Streamlit runs.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import config
+from services.audio_chunks import join_audio_chunks
+from services.language_service import detect_language, response_language
+from services.speech_chunker import IncrementalSpeechSegments
 config.configure_runtime_environment()
 
 
@@ -451,6 +455,8 @@ st.markdown(
 def init_state() -> None:
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "conversation_session_id" not in st.session_state:
+        st.session_state.conversation_session_id = uuid.uuid4().hex
     if "api_url" not in st.session_state:
         st.session_state.api_url = DEFAULT_API_URL
     if "top_k" not in st.session_state:
@@ -575,6 +581,7 @@ def render_lip_sync_avatar(
     autoplay: bool = True,
     resume_listener_on_end: bool = True,
     queue_id: str | None = None,
+    request_id: str | None = None,
     audio_mime: str = DEFAULT_AUDIO_MIME,
     thinking: bool = False,
 ) -> None:
@@ -586,6 +593,7 @@ def render_lip_sync_avatar(
     autoplay_js = "true" if autoplay else "false"
     resume_listener_js = "true" if resume_listener_on_end else "false"
     queue_id_json = json.dumps(queue_id or "")
+    request_id_json = json.dumps(request_id or "")
     audio_mime_json = json.dumps(audio_mime or DEFAULT_AUDIO_MIME)
     thinking_js = "true" if thinking else "false"
     thinking_class = " thinking" if thinking else ""
@@ -781,6 +789,9 @@ def render_lip_sync_avatar(
             const shouldAutoplay = {autoplay_js};
             const shouldResumeListenerOnEnd = {resume_listener_js};
             const queueId = {queue_id_json};
+            const requestId = {request_id_json};
+            const avatarStartedAt = performance.now();
+            let firstPlaybackReported = false;
             const initialAudioMime = {audio_mime_json};
             const queuedPlayback = Boolean(queueId);
             let thinking = {thinking_js};
@@ -1440,7 +1451,7 @@ def render_lip_sync_avatar(
                 const message = event.data || {{}};
                 if (message.type !== "texmin:avatar-queue" || message.queueId !== queueId) return;
                 if (queueInterrupted) return;
-                if (message.audio) {{
+                if ((message.audio || message.skip) && message.sequence >= nextQueueSequence) {{
                     setThinking(false);
                     pendingQueueItems.set(message.sequence, {{
                         audio: message.audio,
@@ -1448,7 +1459,8 @@ def render_lip_sync_avatar(
                         mime: message.mime || initialAudioMime,
                     }});
                     while (pendingQueueItems.has(nextQueueSequence)) {{
-                        audioQueue.push(pendingQueueItems.get(nextQueueSequence));
+                        const readyItem = pendingQueueItems.get(nextQueueSequence);
+                        if (readyItem.audio) audioQueue.push(readyItem);
                         pendingQueueItems.delete(nextQueueSequence);
                         nextQueueSequence += 1;
                     }}
@@ -1472,6 +1484,14 @@ def render_lip_sync_avatar(
             }}
 
             audio.addEventListener("play", async () => {{
+                if (queuedPlayback && !firstPlaybackReported) {{
+                    firstPlaybackReported = true;
+                    console.info(JSON.stringify({{
+                        event: "voice_first_playback",
+                        request_id: requestId,
+                        elapsed_from_avatar_ms: Math.round(performance.now() - avatarStartedAt),
+                    }}));
+                }}
                 setAvatarSpeaking(true);
                 try {{
                     await prepareAudioGraph();
@@ -2039,6 +2059,8 @@ def render_voice_query_component() -> str | None:
         key="texmin_voice_query",
         height=92,
         server_stt=True,
+        api_url=st.session_state.api_url,
+        session_id=st.session_state.conversation_session_id,
     )
     if not value:
         return None
@@ -2098,6 +2120,8 @@ def _qa_events(url: str, payload: dict):
             top_k=payload["top_k"],
             temperature=payload["temperature"],
             chat_history=history,
+            session_id=payload.get("session_id"),
+            request_id=payload.get("request_id"),
         )
         return
 
@@ -2256,47 +2280,6 @@ def render_streaming_message(container, content: str, status: str = "") -> None:
     )
 
 
-def _split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
-    normalized = buffer.strip()
-    if not normalized:
-        return [], ""
-
-    segments = []
-    pending_sentences = []
-    emitted_cursor = 0
-    minimum_segment_chars = int(config.TTS_STREAM_MIN_CHARS)
-    for match in re.finditer(r"(.+?[.!?\u0964])(\s+|$)", normalized, flags=re.DOTALL):
-        segment = match.group(1).strip()
-        if segment:
-            pending_sentences.append(segment)
-        combined = " ".join(pending_sentences)
-        if len(combined) >= minimum_segment_chars:
-            segments.append(combined)
-            pending_sentences = []
-            emitted_cursor = match.end()
-
-    remainder = normalized[emitted_cursor:].strip()
-    if not segments and len(normalized) >= 300:
-        split_at = max(
-            normalized.rfind(",", 0, 285),
-            normalized.rfind(";", 0, 285),
-            normalized.rfind(":", 0, 285),
-            normalized.rfind(" - ", 0, 285),
-        )
-        if split_at <= 160 and len(normalized) >= 380:
-            split_at = normalized.rfind(" ", 0, 340)
-        if split_at > 160:
-            split_end = split_at
-            if normalized[split_at : split_at + 3] == " - ":
-                split_end = split_at + 3
-            elif normalized[split_at] in ",;:":
-                split_end = split_at + 1
-            segments.append(normalized[:split_end].strip(" ,;:-"))
-            remainder = normalized[split_end:].strip()
-
-    return segments, remainder
-
-
 def _send_avatar_queue_event(
     sender_container,
     queue_id: str,
@@ -2311,6 +2294,7 @@ def _send_avatar_queue_event(
         "queueId": queue_id,
         "sequence": sequence,
         "audio": base64.b64encode(audio_bytes).decode("utf-8") if audio_bytes else "",
+        "skip": not audio_bytes and not final,
         "mime": audio_mime,
         "text": spoken_text,
         "final": final,
@@ -2335,6 +2319,81 @@ def _send_avatar_queue_event(
             """,
             height=0,
         )
+
+
+def render_audio_queue_player(queue_id: str, request_id: str) -> None:
+    queue_json = json.dumps(queue_id)
+    request_json = json.dumps(request_id)
+    components.html(
+        f"""
+        <audio id="voice" controls playsinline style="width:100%;height:42px"></audio>
+        <script>
+          const queueId = {queue_json};
+          const requestId = {request_json};
+          const audio = document.getElementById("voice");
+          const ready = new Map();
+          const clips = [];
+          let nextSequence = 0;
+          let finalSequence = null;
+          let interrupted = false;
+          let firstPlayback = true;
+          const startedAt = performance.now();
+          const startedEpoch = Date.now();
+          function resumeListener() {{
+            window.localStorage.setItem("texmin_voice_resume_at", String(Date.now()));
+          }}
+          function playNext() {{
+            if (interrupted) return;
+            if (!clips.length) {{
+              if (finalSequence !== null && nextSequence >= finalSequence) resumeListener();
+              return;
+            }}
+            const item = clips.shift();
+            audio.src = `data:${{item.mime}};base64,${{item.audio}}`;
+            audio.load();
+            audio.play().catch(() => {{}});
+          }}
+          window.addEventListener("message", (event) => {{
+            const message = event.data || {{}};
+            if (message.type !== "texmin:avatar-queue" || message.queueId !== queueId || interrupted) return;
+            if ((message.audio || message.skip) && message.sequence >= nextSequence) {{
+              ready.set(message.sequence, message);
+              while (ready.has(nextSequence)) {{
+                const item = ready.get(nextSequence);
+                if (item.audio) clips.push(item);
+                ready.delete(nextSequence++);
+              }}
+            }}
+            if (message.final) finalSequence = message.finalSequence;
+            if (audio.paused && !audio.src) playNext();
+          }});
+          audio.addEventListener("play", () => {{
+            if (firstPlayback) {{
+              firstPlayback = false;
+              console.info(JSON.stringify({{event:"voice_first_playback",request_id:requestId,
+                elapsed_from_player_ms:Math.round(performance.now()-startedAt)}}));
+            }}
+          }});
+          audio.addEventListener("ended", () => {{
+            audio.removeAttribute("src");
+            playNext();
+          }});
+          function interrupt() {{
+            const interruptAt = Number(window.localStorage.getItem("texmin_voice_interrupt_at") || 0);
+            if (!interruptAt || interruptAt < startedEpoch) return;
+            interrupted = true;
+            clips.length = 0;
+            ready.clear();
+            audio.pause();
+            audio.removeAttribute("src");
+            resumeListener();
+          }}
+          window.addEventListener("storage", interrupt);
+          window.setInterval(interrupt, 250);
+        </script>
+        """,
+        height=48,
+    )
 
 
 def _render_streaming_avatar_audio(
@@ -2369,39 +2428,52 @@ def ask_api_stream(
         "top_k": st.session_state.top_k,
         "temperature": st.session_state.temperature,
         "chat_history": _chat_history_payload(exclude_latest_user=True),
+        "session_id": st.session_state.conversation_session_id,
+        "request_id": uuid.uuid4().hex,
     }
     answer = ""
     sources = []
     status = ""
-    audio_chunks = []
+    first_audio = None
+    replay_chunks = []
+    speech_segments = IncrementalSpeechSegments()
+    first_audio_started_at = None
+    response_started_at = time.perf_counter()
     audio_mime = DEFAULT_AUDIO_MIME
     audio_error = None
     done_received = False
     queue_sequence = 0
-    queue_id = (
-        uuid.uuid4().hex
-        if avatar_container is not None
-        and st.session_state.avatar_enabled
-        else None
-    )
+    queue_id = uuid.uuid4().hex if avatar_container is not None and st.session_state.tts_enabled else None
+    st.session_state.audio_queue_active = bool(queue_id)
     queue_sender = st.container() if queue_id else None
     tts_executor: ThreadPoolExecutor | None = None
     tts_futures: dict[int, tuple[Future, str]] = {}
     next_audio_sequence = 0
     tts_config = _current_tts_config(question)
+    tts_config["session_id"] = payload["session_id"]
+    tts_config["request_id"] = payload["request_id"]
+    spoken_words = 0
 
     def submit_tts(segment: str) -> None:
-        nonlocal queue_sequence, tts_executor
-        if not queue_id:
+        nonlocal queue_sequence, tts_executor, spoken_words
+        if not queue_id or not tts_config["enabled"] or not segment.strip():
             return
+        available_words = max(0, int(tts_config["max_words"]) - spoken_words)
+        if not available_words:
+            return
+        words = segment.split()
+        segment = " ".join(words[:available_words])
+        spoken_words += min(len(words), available_words)
+        if len(tts_futures) >= int(config.TTS_STREAM_CONCURRENCY) * 2:
+            flush_tts(block=True)
         if tts_executor is None:
-            tts_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="texmin-tts")
+            tts_executor = ThreadPoolExecutor(max_workers=int(config.TTS_STREAM_CONCURRENCY), thread_name_prefix="texmin-tts")
         sequence = queue_sequence
         queue_sequence += 1
         tts_futures[sequence] = (tts_executor.submit(_request_tts, segment, tts_config), segment)
 
     def flush_tts(block: bool = False) -> None:
-        nonlocal next_audio_sequence, audio_error, audio_mime
+        nonlocal next_audio_sequence, audio_error, audio_mime, first_audio, first_audio_started_at
         if queue_sender is None:
             return
         while next_audio_sequence in tts_futures:
@@ -2415,15 +2487,24 @@ def ask_api_stream(
             except TimeoutError:
                 audio_error = "Speech generation timed out. Your text answer is available above."
                 future.cancel()
+                for skipped_sequence in range(next_audio_sequence, queue_sequence):
+                    _send_avatar_queue_event(queue_sender, queue_id, skipped_sequence)
                 tts_futures.clear()
+                next_audio_sequence = queue_sequence
                 break
             except Exception as exc:
                 segment_audio, segment_mime, segment_error = None, DEFAULT_AUDIO_MIME, str(exc)
             del tts_futures[next_audio_sequence]
             if segment_error:
                 audio_error = segment_error
+                _send_avatar_queue_event(queue_sender, queue_id, next_audio_sequence)
             elif segment_audio:
-                audio_chunks.append(segment_audio)
+                if first_audio is None:
+                    first_audio = segment_audio
+                    first_audio_started_at = round((time.perf_counter() - response_started_at) * 1000, 1)
+                    print(json.dumps({"event": "voice_first_audio_ready", "request_id": payload["request_id"], "first_audio_ms": first_audio_started_at}), flush=True)
+                if not st.session_state.avatar_enabled:
+                    replay_chunks.append(segment_audio)
                 audio_mime = segment_mime
                 _send_avatar_queue_event(
                     queue_sender,
@@ -2437,18 +2518,18 @@ def ask_api_stream(
 
     if queue_id:
         with avatar_container:
-            render_lip_sync_avatar(
-                "",
-                "",
-                autoplay=True,
-                resume_listener_on_end=True,
-                queue_id=queue_id,
-                thinking=True,
-            )
+            if st.session_state.avatar_enabled:
+                render_lip_sync_avatar(
+                    "", "", autoplay=True, resume_listener_on_end=True,
+                    queue_id=queue_id, request_id=payload["request_id"], thinking=True,
+                )
+            else:
+                render_audio_queue_player(queue_id, payload["request_id"])
 
     try:
         render_streaming_message(container, "", status)
         for event in _qa_events(url, payload):
+            flush_tts()
             event_type = event.get("type")
             if event_type == "status":
                 status = event.get("message") or status
@@ -2457,6 +2538,8 @@ def ask_api_stream(
             elif event_type == "token":
                 token = event.get("text", "")
                 answer += token
+                for segment in speech_segments.push(token):
+                    submit_tts(segment)
                 render_streaming_message(container, answer, status)
             elif event_type == "done":
                 done_received = True
@@ -2470,6 +2553,12 @@ def ask_api_stream(
                 if queue_id and queue_sender is not None:
                     _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
                 return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
+            elif event_type == "cancelled":
+                if tts_executor is not None:
+                    tts_executor.shutdown(wait=False, cancel_futures=True)
+                if queue_id and queue_sender is not None:
+                    _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
+                return "", [], "__cancelled__", None, audio_mime, None
     except Exception as exc:
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
@@ -2477,6 +2566,10 @@ def ask_api_stream(
             _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
         transport = "in-process backend" if BACKEND_CALL_MODE == "inprocess" else url
         return "", [], f"Could not use {transport}. {exc}", None, audio_mime, audio_error
+    except BaseException:
+        if tts_executor is not None:
+            tts_executor.shutdown(wait=False, cancel_futures=True)
+        raise
 
     if not done_received or not answer.strip():
         if tts_executor is not None:
@@ -2493,9 +2586,8 @@ def ask_api_stream(
         )
 
     if queue_id and queue_sender is not None:
-        final_speech = answer.strip()
-        if final_speech and tts_config["enabled"] and not audio_error:
-            submit_tts(final_speech)
+        for segment in speech_segments.finish():
+            submit_tts(segment)
         flush_tts(block=True)
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
@@ -2505,7 +2597,7 @@ def ask_api_stream(
             next_audio_sequence,
             final=True,
         )
-        audio_bytes = audio_chunks[0] if len(audio_chunks) == 1 else None
+        audio_bytes = join_audio_chunks(replay_chunks, audio_mime) if not st.session_state.avatar_enabled else None
     else:
         audio_bytes = None
         if st.session_state.tts_enabled and answer.strip():
@@ -2523,7 +2615,6 @@ def ask_api_stream(
 
 
 def _current_tts_config(question: str = "") -> dict:
-    from services.language_service import response_language
     if not question:
         question = next((str(item.get("content", "")) for item in reversed(st.session_state.messages) if item.get("role") == "user"), "")
     return {
@@ -2538,25 +2629,27 @@ def _current_tts_config(question: str = "") -> dict:
     }
 
 
-def _request_tts(text: str, config: dict) -> tuple[bytes | None, str, str | None]:
-    if not config["enabled"]:
+def _request_tts(text: str, tts_options: dict) -> tuple[bytes | None, str, str | None]:
+    if not tts_options["enabled"]:
         return None, DEFAULT_AUDIO_MIME, None
 
-    voice_id = config["voice_id"]
+    voice_id = tts_options["voice_id"]
     if not voice_id:
         return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
 
-    url = config["api_url"] + "/tts/speech"
+    url = tts_options["api_url"] + "/tts/speech"
     payload = {
         "text": text,
+        "session_id": tts_options.get("session_id"),
+        "request_id": tts_options.get("request_id"),
         "voice_id": voice_id,
-        "language": config["language"],
-        "tone": config["tone"],
-        "rate": config["rate"],
-        "pitch": config["pitch"],
+        "language": detect_language(text, fallback=tts_options["language"]),
+        "tone": tts_options["tone"],
+        "rate": tts_options["rate"],
+        "pitch": tts_options["pitch"],
         "volume": "+0%",
         "response_format": "mp3" if DEFAULT_TTS_ENGINE in {"edge", "edge-tts"} else "wav",
-        "max_words": config["max_words"],
+        "max_words": tts_options["max_words"],
     }
 
     if BACKEND_CALL_MODE == "inprocess":
@@ -2719,6 +2812,9 @@ if not question and st.session_state.avatar_enabled and latest_audio_b64:
     )
 
 if question:
+    if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+        # A rerun interrupted its previous answer; omit that unfinished turn.
+        st.session_state.messages.pop()
     clear_voice_interrupt_signal()
     with live_response_container:
         user_message = {"role": "user", "content": question}
@@ -2733,7 +2829,11 @@ if question:
             avatar_stream_container,
         )
 
-    if error:
+    if error == "__cancelled__":
+        if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+            st.session_state.messages.pop()
+        stream_container.empty()
+    elif error:
         stream_container.error(error)
         st.session_state.messages.append(
             {
@@ -2758,9 +2858,7 @@ if question:
                 "audio_autoplay": not bool(audio_bytes),
             }
         )
-    if (voice_component_query or voice_query_param) and not (
-        audio_bytes and st.session_state.avatar_enabled
-    ):
+    if (voice_component_query or voice_query_param) and not st.session_state.get("audio_queue_active", False):
         resume_voice_listener_without_audio()
     if voice_query_param and "voice_query" in st.query_params:
         del st.query_params["voice_query"]

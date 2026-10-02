@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 
 from helpers.request_models import QARequest, QAResponse
 from services.qa_service import QAEngineError, answer_question, stream_answer_events
+from services.request_lifecycle import registry
 
 
 router = APIRouter(prefix="/qa", tags=["qa"])
@@ -18,6 +19,8 @@ def ask_question(payload: QARequest) -> QAResponse:
             top_k=payload.top_k,
             temperature=payload.temperature,
             chat_history=payload.chat_history,
+            session_id=payload.session_id,
+            request_id=payload.request_id,
         )
     except QAEngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -32,6 +35,8 @@ def stream_question(payload: QARequest) -> StreamingResponse:
                 top_k=payload.top_k,
                 temperature=payload.temperature,
                 chat_history=payload.chat_history,
+                session_id=payload.session_id,
+                request_id=payload.request_id,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except QAEngineError as exc:
@@ -49,3 +54,8 @@ def stream_question(payload: QARequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/sessions/{session_id}/cancel")
+def cancel_session(session_id: str, request_id: str | None = None) -> dict:
+    return {"cancelled": registry.cancel(session_id, request_id)}

@@ -42,6 +42,10 @@ def warm_up_local_models() -> None:
 
 def _warm_up_local_models() -> None:
     try:
+        warm_up_tts()
+    except Exception as exc:
+        print(f"TTS warm-up skipped: {exc}")
+    try:
         warm_up_qa_engine()
     except Exception as exc:
         print(f"QA warm-up skipped: {exc}")
@@ -49,10 +53,6 @@ def _warm_up_local_models() -> None:
         warm_up_stt()
     except Exception as exc:
         print(f"STT warm-up skipped: {exc}")
-    try:
-        warm_up_tts()
-    except Exception as exc:
-        print(f"TTS warm-up skipped: {exc}")
     reranker_status = reranker_runtime_status()
     if reranker_status["status"] == "unavailable":
         print(f"Reranker warm-up skipped: {reranker_status.get('error')}")

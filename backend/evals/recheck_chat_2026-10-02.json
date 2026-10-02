@@ -1,0 +1,29 @@
+{
+  "host": "Windows-10-10.0.19045-SP0",
+  "source": "E:\\Texmin AI\\backend\\raw_data_files\\Q&As\\BWE.docx",
+  "context_chars": 3500,
+  "models_missing": [
+    "llama3.1:8b-instruct-q4_K_M"
+  ],
+  "summary": [
+    {
+      "model": "llama3.2:latest",
+      "runs": 1,
+      "first_token_ms_p50": 21983.9,
+      "total_ms_p50": 39187.6,
+      "decode_tokens_per_second_p50": 5.24
+    }
+  ],
+  "samples": [
+    {
+      "model": "llama3.2:latest",
+      "first_token_ms": 21983.9,
+      "total_ms": 39187.6,
+      "prompt_tokens": 786,
+      "prefill_tokens_per_second": 41.11,
+      "output_tokens": 90,
+      "decode_tokens_per_second": 5.24,
+      "answer": "A Bucket Wheel Excavator (BWE) is a continuous mining machine that excavates material using a rotating wheel fitted with buckets. It is mainly used in large open-cast mines for continuous excavation of overburden, lignite, coal, soft rock, and other relatively unconsolidated materials. BWEs are particularly suitable for large-scale, continuous open-cast mining operations with relatively uniform and soft-to-medium-strength formations."
+    }
+  ]
+}

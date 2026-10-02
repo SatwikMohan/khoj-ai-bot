@@ -1,0 +1,115 @@
+{
+  "summary": {
+    "cases": 7,
+    "recall_at_5": 0.8571,
+    "precision_at_5": 0.1714,
+    "ndcg_at_5": 0.8571,
+    "mean_reciprocal_rank": 0.8571,
+    "latency_ms_p50": 60.7,
+    "latency_ms_max": 2219.7
+  },
+  "results": [
+    {
+      "question": "Which continuous mining machine uses a rotating wheel with buckets to excavate material?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/Shovel & Dumper.docx",
+        "raw_data_files/Q&As/Safety Modules.docx",
+        "raw_data_files/Q&As/Dragline.docx",
+        "raw_data_files/Q&As/UG Mines .docx"
+      ]
+    },
+    {
+      "question": "What is a continuous miner and what is its main purpose underground?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Q&As/UG Mines .docx",
+        "raw_data_files/Q&As/Safety Modules.docx",
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/Longwall.docx",
+        "raw_data_files/Q&As/Drilling & Blasting.docx"
+      ]
+    },
+    {
+      "question": "What is a dragline excavator used for in an open-cast mine?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Q&As/Dragline.docx",
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/Shovel & Dumper.docx",
+        "raw_data_files/Q&As/Drilling & Blasting.docx",
+        "raw_data_files/Q&As/Safety Modules.docx"
+      ]
+    },
+    {
+      "question": "Why is drilling required before blasting in mining?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Q&As/Drilling & Blasting.docx",
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/Safety Modules.docx",
+        "raw_data_files/Q&As/Shovel & Dumper.docx",
+        "raw_data_files/Q&As/Mining Geology.docx"
+      ]
+    },
+    {
+      "question": "Why is mine safety important around explosives and heavy machinery?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Q&As/Safety Modules.docx",
+        "raw_data_files/Q&As/Longwall.docx",
+        "raw_data_files/Q&As/Shovel & Dumper.docx",
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/UG Mines .docx"
+      ]
+    },
+    {
+      "question": "खनन में भारी मशीनों और विस्फोटकों के आसपास सुरक्षा क्यों महत्वपूर्ण है?",
+      "hit": false,
+      "rank": null,
+      "recall": 0.0,
+      "precision": 0.0,
+      "ndcg": 0.0,
+      "actual_sources": [
+        "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+        "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+        "raw_data_files/Critical Minerals/19_1751370840.pdf"
+      ]
+    },
+    {
+      "question": "Which ministry listed thirty critical minerals for India in December 2023?",
+      "hit": true,
+      "rank": 1,
+      "recall": 1.0,
+      "precision": 0.2,
+      "ndcg": 1.0,
+      "actual_sources": [
+        "raw_data_files/Critical Minerals/19_1751370840.pdf",
+        "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+        "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf"
+      ]
+    }
+  ]
+}
+

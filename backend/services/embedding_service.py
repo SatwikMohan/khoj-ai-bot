@@ -4,6 +4,8 @@ import json
 import os
 import urllib.error
 import urllib.request
+import time
+import threading
 from dataclasses import dataclass
 
 from langchain_core.embeddings import Embeddings
@@ -75,6 +77,7 @@ class PromptedOllamaEmbeddings(Embeddings):
 
     def __init__(self, profile: EmbeddingProfile, base_url: str, keep_alive: int):
         self.profile = profile
+        self._timing = threading.local()
         self._client = OllamaEmbeddings(
             model=profile.model,
             base_url=base_url,
@@ -85,7 +88,16 @@ class PromptedOllamaEmbeddings(Embeddings):
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         prefix = self.profile.document_prefix
         prepared = [f"{prefix}{text}" if prefix else text for text in texts]
-        return self._client.embed_documents(prepared)
+        started = time.perf_counter()
+        vectors = self._client.embed_documents(prepared)
+        self._timing.documents_ms = (time.perf_counter() - started) * 1000
+        if any(len(vector) != int(config.OLLAMA_EMBED_DIMENSIONS) for vector in vectors):
+            raise ValueError("Embedding dimensions do not match OLLAMA_EMBED_DIMENSIONS; keep the current index active and rebuild a compatible collection.")
+        return vectors
+
+    @property
+    def last_documents_ms(self) -> float:
+        return getattr(self._timing, "documents_ms", 0.0)
 
     def embed_query(self, text: str) -> list[float]:
         prefix = self.profile.query_prefix

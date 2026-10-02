@@ -1,0 +1,7 @@
+{"id":"bwe_en","question":"Which continuous mining machine uses a rotating wheel with buckets to excavate material?","expected_sources":["BWE.docx"]}
+{"id":"underground_en","question":"What is a continuous miner and what is its main purpose underground?","expected_sources":["UG Mines .docx"]}
+{"id":"dragline_en","question":"What is a dragline excavator used for in an open-cast mine?","expected_sources":["Dragline.docx"]}
+{"id":"drilling_en","question":"Why is drilling required before blasting in mining?","expected_sources":["Drilling & Blasting.docx"]}
+{"id":"safety_en","question":"Why is mine safety important around explosives and heavy machinery?","expected_sources":["Safety Modules.docx"]}
+{"id":"safety_hi_cross","question":"खनन में भारी मशीनों और विस्फोटकों के आसपास सुरक्षा क्यों महत्वपूर्ण है?","expected_sources":["Safety Modules.docx"]}
+{"id":"critical_minerals_en","question":"Which ministry listed thirty critical minerals for India in December 2023?","expected_sources":["19_1751370840.pdf"]}

@@ -1,0 +1,20 @@
+{
+  "question": "Explain a bucket wheel excavator and its main use in open-cast mining in five sentences.",
+  "model": "llama3.2:latest",
+  "tts_engine": "piper",
+  "tts_warmup_ms": 9607.9,
+  "first_token_ms": 22474.9,
+  "first_segment_submitted_ms": 40606.5,
+  "first_playable_audio_ms": 43245.6,
+  "llm_done_ms": 61514.9,
+  "audio_ready_before_llm_done": true,
+  "answer_chars": 570,
+  "backend_timings_ms": {
+    "retrieval": 5438.2,
+    "first_token": 15411.8,
+    "generation": 54438.8,
+    "total": 61501.2
+  },
+  "error": null
+}
+

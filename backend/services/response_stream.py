@@ -5,6 +5,8 @@ import threading
 import time
 from contextlib import closing
 
+from services.request_lifecycle import ActiveRequest, registry
+
 
 class AnswerTextFilter:
     """Handle tags split across chunks without censoring ordinary answer sentences."""
@@ -36,17 +38,11 @@ class AnswerTextFilter:
         return "".join(output)
 
 
-# Hold this permit until the actual worker finishes, even after a UI timeout.
-# Repeated requests must not accumulate blocked inference workers.
-RESPONSE_SLOT = threading.BoundedSemaphore(1)
-
-
-def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2.0):
-    if not RESPONSE_SLOT.acquire(blocking=False):
-        yield {"type": "error", "message": "A previous answer is still running. Please wait before retrying."}
-        return
+def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2.0,
+                   request: ActiveRequest | None = None):
+    """Bridge a blocking model iterator to SSE with cancellation and backpressure."""
     events = queue.Queue(maxsize=64)
-    cancelled = threading.Event()
+    cancelled = request.cancelled if request else threading.Event()
     finished = threading.Event()
 
     def send(event):
@@ -62,19 +58,33 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
         try:
             with closing(factory()) as iterator:
                 for event in iterator:
+                    if cancelled.is_set():
+                        break
                     if not send(event) or event.get("type") in {"done", "error"}:
                         break
         except Exception as exc:
-            send({"type": "error", "message": str(exc) or type(exc).__name__})
+            if not cancelled.is_set():
+                if request:
+                    request.status = "failed"
+                send({"type": "error", "message": str(exc) or type(exc).__name__})
         finally:
             finished.set()
-            RESPONSE_SLOT.release()
+            if request:
+                registry.finish(request)
 
     started = time.monotonic()
-    threading.Thread(target=produce, daemon=True, name="qa-response").start()
+    worker = threading.Thread(target=produce, daemon=True, name="qa-response")
+    if request:
+        request.worker = worker
+    worker.start()
     stage = "Preparing your answer"
+    completed = False
     try:
         while True:
+            if cancelled.is_set():
+                if request:
+                    yield {"type": "cancelled", "request_id": request.request_id}
+                return
             remaining = timeout_seconds - (time.monotonic() - started)
             if remaining <= 0:
                 yield {"type": "error", "message": f"Answer timed out after {timeout_seconds:g}s during: {stage}. Check Ollama or choose a smaller chat model in backend/config.py."}
@@ -82,6 +92,10 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
             try:
                 event = events.get(timeout=min(heartbeat_seconds, remaining))
             except queue.Empty:
+                if cancelled.is_set():
+                    if request:
+                        yield {"type": "cancelled", "request_id": request.request_id}
+                    return
                 if finished.is_set():
                     yield {"type": "error", "message": "The answer stream ended without a final response. Please retry."}
                     return
@@ -89,8 +103,14 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
                 continue
             if event.get("type") == "status":
                 stage = event.get("message", stage)
+            if cancelled.is_set():
+                if request:
+                    yield {"type": "cancelled", "request_id": request.request_id}
+                return
             yield event
             if event.get("type") in {"done", "error"}:
+                completed = event.get("type") == "done"
                 return
     finally:
-        cancelled.set()
+        if not completed:
+            cancelled.set()

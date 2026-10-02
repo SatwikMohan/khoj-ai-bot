@@ -145,6 +145,13 @@
     const storageInterruptKey = "texmin_voice_interrupt_at";
     const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
     const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
+    let backendApiUrl = "";
+    let backendSessionId = "";
+    window.addEventListener("message", (event) => {
+      if (event.data?.type !== "streamlit:render") return;
+      backendApiUrl = event.data.args?.api_url || "";
+      backendSessionId = event.data.args?.session_id || "";
+    });
     const noTranscriptSilenceLimitMs = 700;
     const transcriptSilenceLimitMs = 850;
     const finalTranscriptSilenceLimitMs = 520;
@@ -284,6 +291,11 @@
 
     function requestAvatarInterrupt() {
       localStorage.setItem(storageInterruptKey, String(Date.now()));
+      if (backendApiUrl && backendSessionId) {
+        fetch(`${backendApiUrl.replace(/\/$/, "")}/qa/sessions/${encodeURIComponent(backendSessionId)}/cancel`, {
+          method: "POST", mode: "no-cors", keepalive: true,
+        }).catch(() => {});
+      }
     }
 
     function inputIsSuppressed() {

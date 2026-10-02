@@ -23,6 +23,7 @@ from services.language_service import response_language, language_instruction
 from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
 from services.response_stream import AnswerTextFilter, bounded_events
+from services.request_lifecycle import registry
 from services.versioning import document_identity, select_documents, version_metadata
 
 
@@ -756,22 +757,39 @@ def _diversify_docs(docs, top_k: int):
     return select_documents(docs, "", top_k)
 
 
-def _retrieve_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None):
+def _retrieve_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None, cancel_event=None, lexical_collection_name: str | None = None):
     intent_question = scope_question or question
     fetch_k = max(top_k, config.RETRIEVAL_FETCH_K)
     threshold = float(config.RELEVANCE_SCORE_THRESHOLD)
 
     if config.HYBRID_SEARCH_ENABLED:
-        collection_name, _ = _active_index()
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval") as pool:
+        collection_name = lexical_collection_name or _active_index()[0]
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="retrieval")
+        try:
             dense_future = pool.submit(vector_store.similarity_search_with_relevance_scores, question, k=fetch_k)
             lexical_future = pool.submit(lexical_search, _vector_db_dir(), collection_name, question, fetch_k * 3)
-            scored_docs = dense_future.result()
+            def result_or_cancel(future):
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        future.cancel()
+                        return None
+                    try:
+                        return future.result(timeout=0.1)
+                    except TimeoutError:
+                        continue
+            scored_docs = result_or_cancel(dense_future)
+            if scored_docs is None:
+                lexical_future.cancel()
+                return []
             try:
-                lexical_docs = lexical_future.result()
+                lexical_docs = result_or_cancel(lexical_future)
+                if lexical_docs is None:
+                    return []
             except Exception as exc:
                 print(f"Lexical retrieval unavailable: {exc}", flush=True)
                 lexical_docs = []
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     else:
         scored_docs = vector_store.similarity_search_with_relevance_scores(question, k=fetch_k)
         lexical_docs = []
@@ -846,11 +864,11 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int, *, scope_
     return select_documents(selected_docs, intent_question, top_k)
 
 
-def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None):
+def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int, *, scope_question: str | None = None, cancel_event=None):
     # A broad explanation still needs evidence about the actual subject. Adding
     # unrelated annual-report/financial terms previously displaced safety rules.
     summary_k = max(top_k, int(config.SUMMARY_CONTEXT_CHUNKS))
-    return _retrieve_context(vector_store, question, summary_k, scope_question=scope_question)
+    return _retrieve_context(vector_store, question, summary_k, scope_question=scope_question, cancel_event=cancel_event)
 
 
 def _not_enough_context_response(question: str) -> QAResponse:
@@ -943,9 +961,13 @@ def answer_question(
     top_k: int = config.QA_TOP_K,
     temperature: float = config.QA_TEMPERATURE,
     chat_history: list[ChatMessage] | None = None,
+    session_id: str | None = None,
+    request_id: str | None = None,
 ) -> QAResponse:
     # HTTP and in-process calls use exactly the same bounded response path.
-    for event in stream_answer_events(question, top_k, temperature, chat_history):
+    for event in stream_answer_events(question, top_k, temperature, chat_history, session_id, request_id):
+        if event["type"] == "cancelled":
+            raise QAEngineError("The request was replaced by a newer query.")
         if event["type"] == "error":
             raise QAEngineError(event["message"])
         if event["type"] == "done":
@@ -958,11 +980,18 @@ def stream_answer_events(
     top_k: int = config.QA_TOP_K,
     temperature: float = config.QA_TEMPERATURE,
     chat_history: list[ChatMessage] | None = None,
+    session_id: str | None = None,
+    request_id: str | None = None,
 ) -> Iterator[dict]:
     _load_environment()
+    # Legacy callers without a session are independent; explicit sessions replace
+    # their own previous query and never another user's work.
+    request = registry.begin(session_id or f"anonymous-{request_id or __import__('uuid').uuid4().hex}", request_id)
     yield from bounded_events(
-        lambda: _stream_answer_events(question, top_k, temperature, chat_history),
+        lambda: _stream_answer_events(question, top_k, temperature, chat_history, request),
         timeout_seconds=max(1, config.QA_RESPONSE_TIMEOUT_SECONDS),
+        heartbeat_seconds=config.QA_STREAM_HEARTBEAT_SECONDS,
+        request=request,
     )
 
 
@@ -979,7 +1008,10 @@ def _feedback_retrieval_query(question: str, history) -> str:
     return _history_aware_query(question, history)
 
 
-def _stream_answer_events(question, top_k, temperature, chat_history):
+def _stream_answer_events(question, top_k, temperature, chat_history, request=None):
+    def active():
+        return request is None or registry.is_current(request)
+
     started_at = time.perf_counter()
     language = response_language(question)
     if _is_general_query(question):
@@ -997,10 +1029,12 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
     query_type = "summary" if _is_summary_query(question) else "document"
     retrieval_query = _feedback_retrieval_query(question, chat_history)
     docs = (
-        _retrieve_summary_context(vector_store, retrieval_query, top_k, scope_question=question)
+        _retrieve_summary_context(vector_store, retrieval_query, top_k, scope_question=question, cancel_event=request.cancelled if request else None)
         if query_type == "summary"
-        else _retrieve_context(vector_store, retrieval_query, top_k, scope_question=question)
+        else _retrieve_context(vector_store, retrieval_query, top_k, scope_question=question, cancel_event=request.cancelled if request else None)
     )
+    if not active():
+        return
     if not docs:
         response = _not_enough_context_response(question)
         yield {
@@ -1027,6 +1061,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
     chunks = chain.stream(inputs)
     try:
         for chunk in chunks:
+            if not active():
+                return
             # Ollama keeps reasoning_content separate from answer content. Never
             # concatenate or speak it, and do not censor normal answer sentences.
             metadata.update(getattr(chunk, "response_metadata", {}) or {})
@@ -1038,11 +1074,15 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
                 )
             token = filter_text.feed(content or "")
             if token:
+                if request:
+                    request.status = "streaming"
                 if first_token_ms is None:
                     first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
                 answer_parts.append(token)
                 yield {"type": "token", "text": token}
         remaining = filter_text.feed("", final=True)
+        if not active():
+            return
         if remaining:
             answer_parts.append(remaining)
             yield {"type": "token", "text": remaining}
@@ -1050,6 +1090,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history):
         chunks.close()
 
     answer = "".join(answer_parts).strip()
+    if not active():
+        return
     if not answer:
         reason = metadata.get("done_reason", "unknown")
         raise QAEngineError(

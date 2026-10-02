@@ -11,12 +11,15 @@ import tempfile
 import threading
 import time
 import wave
+import atexit
+import struct
 from functools import lru_cache
 from pathlib import Path
 
 
 from helpers.request_models import TTSRequest
 from services.language_service import detect_language
+from services.request_lifecycle import registry
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +38,8 @@ PYTTSX3_LOCK = threading.Lock()
 NEURAL_TTS_LOCK = threading.Lock()
 VOICE_HEALTH_LOCK = threading.Lock()
 VOICE_FAILURES: dict[str, tuple[int, float]] = {}
+PIPER_WORKERS: dict[str, "PersistentPiperWorker"] = {}
+PIPER_WORKERS_LOCK = threading.Lock()
 
 
 class TTSEngineError(RuntimeError):
@@ -181,6 +186,8 @@ async def _generate_segmented_audio(
 
 def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     _load_environment()
+    if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+        raise TTSEngineError("This speech request was replaced by a newer query.")
     response_format = payload.response_format.lower()
     if response_format not in SUPPORTED_FORMATS:
         raise TTSEngineError(
@@ -200,6 +207,8 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
     errors = []
     for candidate in dict.fromkeys(engines):
+        if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+            raise TTSEngineError("This speech request was cancelled.")
         if _voice_circuit_open(candidate):
             errors.append(f"{candidate}: temporarily disabled after repeated failures")
             continue
@@ -207,11 +216,15 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
             if candidate in {"edge", "edge-tts"} and config.OFFLINE_MODE:
                 raise TTSEngineError("Edge TTS requires internet; use piper or espeak offline.")
             audio, media_type = _synthesize_with_engine(candidate, payload)
+            if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+                raise TTSEngineError("This speech request was cancelled.")
             _validate_audio(audio, media_type)
             _record_voice_success(candidate)
             print(json.dumps({"event": "tts_completed", "engine": candidate}), flush=True)
             return audio, media_type
         except Exception as exc:
+            if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+                raise TTSEngineError("This speech request was cancelled.") from exc
             _record_voice_failure(candidate)
             errors.append(f"{candidate}: {exc}")
 
@@ -308,6 +321,9 @@ def warm_up_tts() -> None:
     status = tts_runtime_status()
     if status["status"] != "ready":
         raise TTSEngineError(status.get("error", "TTS warm-up failed."))
+    if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}:
+        for language in ("english", "hindi"):
+            _piper_worker(_piper_path(language)).synthesize("Voice ready.", 1.0, None)
 
 
 def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
@@ -516,6 +532,106 @@ def _piper_path(language: str) -> Path:
     return path if path.is_absolute() else directory / path
 
 
+class PersistentPiperWorker:
+    """One cached voice model; a cancelled job terminates its subprocess."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.process = None
+
+    def close(self):
+        process = self.process
+        self.process = None
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+    @staticmethod
+    def _read_exact(stream, length):
+        parts = []
+        while length:
+            part = stream.read(length)
+            if not part:
+                raise TTSEngineError("Piper worker stopped before sending audio.")
+            parts.append(part)
+            length -= len(part)
+        return b"".join(parts)
+
+    def synthesize(self, text: str, length_scale: float, cancelled: threading.Event | None) -> bytes:
+        while not self.lock.acquire(timeout=0.1):
+            if cancelled is not None and cancelled.is_set():
+                raise TTSEngineError("Piper speech generation was cancelled.")
+        try:
+            if cancelled is not None and cancelled.is_set():
+                raise TTSEngineError("Piper speech generation was cancelled.")
+            if self.process is None or self.process.poll() is not None:
+                self.close()
+                self.process = subprocess.Popen(
+                    [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py"), "--persistent", str(self.path.resolve())],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            process = self.process
+            stopped = threading.Event()
+            deadline = time.monotonic() + float(config.TTS_TIMEOUT_SECONDS)
+            timed_out = threading.Event()
+            def watch():
+                while not stopped.wait(0.1):
+                    if cancelled is not None and cancelled.is_set():
+                        process.terminate()
+                        return
+                    if time.monotonic() >= deadline:
+                        timed_out.set()
+                        process.terminate()
+                        return
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            try:
+                process.stdin.write((json.dumps({"text": text, "length_scale": length_scale}) + "\n").encode("utf-8"))
+                process.stdin.flush()
+                header = self._read_exact(process.stdout, 8)
+                length = struct.unpack("<Q", header)[0]
+                if length > 40 * 1024 * 1024:
+                    raise TTSEngineError("Piper worker returned an oversized audio chunk.")
+                payload = self._read_exact(process.stdout, length)
+                if not payload or payload[0] != 1:
+                    raise TTSEngineError(payload[1:].decode("utf-8", errors="replace") or "Piper synthesis failed.")
+                if cancelled is not None and cancelled.is_set():
+                    raise TTSEngineError("Piper speech generation was cancelled.")
+                return payload[1:]
+            except Exception as exc:
+                self.close()
+                if timed_out.is_set():
+                    raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
+                if isinstance(exc, TTSEngineError):
+                    raise
+                raise TTSEngineError(f"Piper worker failed: {exc}") from exc
+            finally:
+                stopped.set()
+        finally:
+            self.lock.release()
+
+
+def _piper_worker(path: Path) -> PersistentPiperWorker:
+    key = str(path.resolve())
+    with PIPER_WORKERS_LOCK:
+        if key not in PIPER_WORKERS:
+            PIPER_WORKERS[key] = PersistentPiperWorker(path)
+        return PIPER_WORKERS[key]
+
+
+@atexit.register
+def _close_piper_workers():
+    with PIPER_WORKERS_LOCK:
+        for worker in PIPER_WORKERS.values():
+            worker.close()
+
+
 def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     language = payload.language or detect_language(payload.text)
     path = _piper_path(language)
@@ -530,18 +646,23 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     rate, _, _ = _prosody_settings(payload)
     speed = max(0.65, min(1.5, 1 + _parse_percent(rate) / 100))
     job = {"model": str(path.resolve()), "text": spoken_text, "length_scale": 1 / speed}
-    try:
-        result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py")],
-            input=json.dumps(job).encode("utf-8"), capture_output=True,
-            timeout=float(config.TTS_TIMEOUT_SECONDS),
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
-    if result.returncode:
-        raise TTSEngineError(result.stderr.decode("utf-8", errors="replace")[-1500:])
-    return result.stdout, "audio/wav"
+    if not payload.session_id or not payload.request_id:
+        try:
+            result = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py")],
+                input=json.dumps(job).encode("utf-8"), capture_output=True,
+                timeout=float(config.TTS_TIMEOUT_SECONDS),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
+        if result.returncode:
+            raise TTSEngineError(result.stderr.decode("utf-8", errors="replace")[-1500:])
+        return result.stdout, "audio/wav"
+    request = registry.current(payload.session_id, payload.request_id)
+    if request is None:
+        raise TTSEngineError("This speech request was cancelled.")
+    return _piper_worker(path).synthesize(spoken_text, 1 / speed, request.cancelled), "audio/wav"
 
 
 def _synthesize_espeak_speech(payload: TTSRequest) -> tuple[bytes, str]:

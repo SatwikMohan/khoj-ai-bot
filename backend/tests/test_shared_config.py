@@ -54,7 +54,7 @@ class SharedConfigTests(unittest.TestCase):
         from PIL import Image
 
         recognize = Mock(return_value=" Sample document ")
-        with patch.multiple(config, OCR_ENABLED=True, OCR_LANG="eng", OCR_TESSERACT_CONFIG="--psm 6"), patch.dict(
+        with patch("train_engine.ocr_engine_available", return_value=True), patch.multiple(config, OCR_ENABLED=True, OCR_LANG="eng", OCR_TESSERACT_CONFIG="--psm 6"), patch.dict(
             "sys.modules", {"pytesseract": SimpleNamespace(image_to_string=recognize)}
         ):
             self.assertEqual(train_engine.ocr_image(Image.new("RGB", (4, 4))), "Sample document")

@@ -1,4 +1,6 @@
 import threading
+import io
+import wave
 import unittest
 from unittest.mock import patch
 
@@ -9,6 +11,9 @@ from langchain_core.runnables import RunnableGenerator
 from services.model_config import thinking_setting
 from services.qa_service import _feedback_retrieval_query, _is_general_query, answer_question, stream_answer_events
 from services.response_stream import AnswerTextFilter, bounded_events
+from services.request_lifecycle import registry
+from services.speech_chunker import IncrementalSpeechSegments
+from services.audio_chunks import join_audio_chunks
 
 
 class AnswerFilterTests(unittest.TestCase):
@@ -29,6 +34,32 @@ class AnswerFilterTests(unittest.TestCase):
         text = 'They need clearance. The limit is < 10. Based on the documents, use PPE.'
         self.assertEqual(parser.feed(text) + parser.feed('', final=True), text)
 
+    def test_first_speech_segment_is_ready_before_generation_ends(self):
+        segmenter = IncrementalSpeechSegments()
+        self.assertEqual(segmenter.push('The mine safety procedure requires checking equipment and ventilation before the shift begins.'),
+                         ['The mine safety procedure requires checking equipment and ventilation before the shift begins.'])
+        self.assertEqual(segmenter.push(' The next sentence is still being generated'), [])
+        self.assertEqual(segmenter.finish(), ['The next sentence is still being generated'])
+
+    def test_speech_segmenter_preserves_spaces_across_tokens(self):
+        segmenter = IncrementalSpeechSegments()
+        segmenter.push('The mine safety procedure requires checking ')
+        parts = segmenter.push('equipment and ventilation before the shift begins.')
+        self.assertEqual(parts, ['The mine safety procedure requires checking equipment and ventilation before the shift begins.'])
+
+    def test_replay_wav_keeps_audio_chunks_in_order(self):
+        def clip(frames):
+            output = io.BytesIO()
+            with wave.open(output, 'wb') as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(1)
+                wav_file.setframerate(8000)
+                wav_file.writeframes(frames)
+            return output.getvalue()
+        joined = join_audio_chunks([clip(b'abc'), clip(b'def')], 'audio/wav')
+        with wave.open(io.BytesIO(joined), 'rb') as wav_file:
+            self.assertEqual(wav_file.readframes(6), b'abcdef')
+
 
 class ResponseDeliveryTests(unittest.TestCase):
     def test_greeting_does_not_swallow_a_document_question(self):
@@ -42,7 +73,6 @@ class ResponseDeliveryTests(unittest.TestCase):
             patch('services.qa_service._retrieve_context', return_value=[Document(
                 page_content='The storage limit is 100 kg.', metadata={'source': 'rules.pdf'},
             )]),
-            patch('services.response_stream.RESPONSE_SLOT', threading.BoundedSemaphore(1)),
             patch.multiple('config', RESPONSE_LANGUAGE='english', QA_RESPONSE_TIMEOUT_SECONDS=3),
         ]
         for item in patches:
@@ -96,28 +126,64 @@ class ResponseDeliveryTests(unittest.TestCase):
         ])
         self.assertIn('storage limit', result)
 
+    def test_old_model_tokens_and_final_answer_are_discarded_after_replacement(self):
+        release = threading.Event()
+        first_token = threading.Event()
+        def slow(inputs):
+            list(inputs)
+            first_token.set()
+            yield AIMessageChunk(content='Old first sentence. ')
+            release.wait(2)
+            yield AIMessageChunk(content='Old late sentence.')
+        old_events = []
+        with patch('services.qa_service._llm', side_effect=[RunnableGenerator(slow),
+                                                          self.model([AIMessageChunk(content='New answer.')])]):
+            consumer = threading.Thread(target=lambda: old_events.extend(stream_answer_events(
+                'Explain storage limit', session_id='test-qa-replacement', request_id='old')))
+            consumer.start()
+            self.assertTrue(first_token.wait(1))
+            new_events = list(stream_answer_events('Explain storage rules', session_id='test-qa-replacement', request_id='new'))
+            release.set()
+            consumer.join(1)
+        self.assertFalse(consumer.is_alive())
+        self.assertTrue(any(event['type'] == 'cancelled' for event in old_events))
+        self.assertFalse(any(event['type'] == 'done' for event in old_events))
+        self.assertNotIn('Old late', ''.join(event.get('text', '') for event in old_events))
+        self.assertEqual(new_events[-1]['answer'], 'New answer.')
+
 
 class BoundedStreamTests(unittest.TestCase):
-    def test_stalled_retrieval_times_out_and_does_not_spawn_more_workers(self):
+    def test_new_request_cancels_stalled_old_request_without_blocking_other_session(self):
         release = threading.Event()
         finished = threading.Event()
+        started = threading.Event()
         def stalled():
+            started.set()
             yield {'type': 'status', 'message': 'Searching documents'}
             try:
                 release.wait(2)
                 yield {'type': 'done', 'answer': 'late'}
             finally:
                 finished.set()
-        with patch('services.response_stream.RESPONSE_SLOT', threading.BoundedSemaphore(1)):
-            try:
-                events = list(bounded_events(stalled, .05, .01))
-                self.assertEqual(events[-1]['type'], 'error')
-                self.assertIn('Searching documents', events[-1]['message'])
-                busy = list(bounded_events(stalled, .05, .01))
-                self.assertIn('previous answer', busy[0]['message'])
-            finally:
-                release.set()
-                self.assertTrue(finished.wait(1))
+        first = registry.begin('test-replace-session')
+        events = []
+        consumer = threading.Thread(target=lambda: events.extend(bounded_events(stalled, 2, .01, request=first)))
+        consumer.start()
+        self.assertTrue(started.wait(1))
+        second = registry.begin('test-replace-session')
+        independent = registry.begin('test-independent-session')
+        try:
+            consumer.join(1)
+            self.assertFalse(consumer.is_alive())
+            self.assertTrue(first.cancelled.is_set())
+            self.assertFalse(second.cancelled.is_set())
+            self.assertFalse(independent.cancelled.is_set())
+            self.assertNotIn('late', [event.get('answer') for event in events])
+        finally:
+            release.set()
+            registry.cancel(second.session_id)
+            registry.cancel(independent.session_id)
+            self.assertTrue(finished.wait(1))
 
     def test_truncated_stream_is_not_reported_as_success(self):
         def incomplete():

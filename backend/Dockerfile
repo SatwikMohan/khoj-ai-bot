@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential cmake curl espeak-ng ffmpeg git libsndfile1 ninja-build python3-venv tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin \
+    && apt-get install -y --no-install-recommends build-essential cmake curl espeak-ng ffmpeg git libsndfile1 ninja-build python3-venv tesseract-ocr tesseract-ocr-eng tesseract-ocr-hin libreoffice-writer libreoffice-calc libreoffice-impress \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv --system-site-packages /opt/texmin-venv
