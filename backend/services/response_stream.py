@@ -1,6 +1,7 @@
 """Bounded response delivery and incremental removal of explicit reasoning tags."""
 
 import queue
+import re
 import threading
 import time
 from contextlib import closing
@@ -35,6 +36,92 @@ class AnswerTextFilter:
             if not self.hidden:
                 output.append(self.pending[0])
             self.pending = self.pending[1:]
+        return "".join(output)
+
+
+class CitationTextFilter:
+    """Remove only generated retrieval labels before tokens reach chat or TTS.
+
+    The filter buffers one sentence or Markdown line so split model chunks
+    cannot expose half of a citation before it can be recognized.
+    """
+
+    _PREFIX = re.compile(
+        r"(?i)\b(?:from|according to|as (?:stated|mentioned) in)\s+"
+        r"(?:the\s+)?(?:reference|source|document)\s*#?\d+"
+        r"(?:\s*,?\s*page\s*\d+)?\s*[,;:]?\s*"
+    )
+    _CONTEXT = re.compile(
+        r"(?i)\b(?:as (?:mentioned|shown|stated) in|according to|from)\s+"
+        r"(?:the\s+)?(?:retrieved|provided|supplied|private)\s+"
+        r"(?:context|passages?|material)\s*[,;:]?\s*"
+    )
+    _PAGE = re.compile(
+        r"(?i)(?:,?\s*(?:on|at|see|refer to)\s+page\s+\d+"
+        r"(?:\s+of\s+(?:the\s+)?document)?)"
+    )
+    _NUMBERED = re.compile(
+        r"(?i)[ \t]+(?:\[\s*\d+(?:\s*,\s*\d+)*\s*\]|\(reference\s+\d+\))"
+        r"(?=\s|[.,;:!?\u0964]|$)"
+    )
+    _REFERENCE_SUBJECT = re.compile(
+        r"(?i)\b(?:reference|document|source|chunk)\s*#?\d+\s*"
+        r"(?:[,;:]|(?:states?|says?|shows?|mentions?|contains?|indicates?)\s+(?:that\s+)?)\s*"
+    )
+    _PAGE_SUBJECT = re.compile(
+        r"(?i)\bpage\s+\d+\s+(?:of\s+(?:the\s+)?document\s+)?"
+        r"(?:states?|says?|shows?|mentions?|contains?|indicates?)\s+(?:that\s+)?"
+    )
+    _SOURCE_LINE = re.compile(r"(?im)^\s*source\s*:\s*(?:document|reference)\s*\d+\s*$")
+
+    def __init__(self, *, enabled: bool = True):
+        self.enabled = enabled
+        self.pending = ""
+        self.in_code = False
+
+    @classmethod
+    def _clean(cls, text: str) -> str:
+        leading_label = bool(
+            cls._PREFIX.match(text.lstrip()) or cls._REFERENCE_SUBJECT.match(text.lstrip())
+            or cls._PAGE_SUBJECT.match(text.lstrip()) or cls._CONTEXT.match(text.lstrip())
+            or cls._PAGE.match(text.lstrip())
+        )
+        text = cls._SOURCE_LINE.sub("", text)
+        text = cls._PREFIX.sub("", text)
+        text = cls._REFERENCE_SUBJECT.sub("", text)
+        text = cls._PAGE_SUBJECT.sub("", text)
+        text = cls._CONTEXT.sub("", text)
+        text = cls._PAGE.sub("", text)
+        text = cls._NUMBERED.sub("", text)
+        text = re.sub(r"\s+([.,;:!?\u0964])", r"\1", text)
+        text = re.sub(r"(?m)^\s*[,;:]\s*", "", text)
+        if leading_label:
+            text = re.sub(r"^([a-z])", lambda m: m.group(1).upper(), text, count=1)
+        return text
+
+    def feed(self, text: str, final: bool = False) -> str:
+        if not self.enabled:
+            return text
+        self.pending += text
+        output = []
+        while self.pending:
+            match = re.search(r"[.!?\u0964](?:\s|$)|\n", self.pending)
+            if match:
+                end = match.end()
+            elif len(self.pending) > 400:
+                # Keep enough tail to recognize a label split across chunks.
+                end = len(self.pending) - 120
+            elif final:
+                end = len(self.pending)
+            else:
+                break
+            segment = self.pending[:end]
+            if segment.lstrip().startswith(chr(96) * 3):
+                output.append(segment)
+                self.in_code = not self.in_code
+            else:
+                output.append(segment if self.in_code else self._clean(segment))
+            self.pending = self.pending[end:]
         return "".join(output)
 
 

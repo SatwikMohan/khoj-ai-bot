@@ -9,8 +9,8 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableGenerator
 
 from services.model_config import thinking_setting
-from services.qa_service import _feedback_retrieval_query, _is_general_query, answer_question, stream_answer_events
-from services.response_stream import AnswerTextFilter, bounded_events
+from services.qa_service import _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
+from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
 from services.request_lifecycle import registry
 from services.speech_chunker import IncrementalSpeechSegments
 from services.audio_chunks import join_audio_chunks
@@ -33,6 +33,17 @@ class AnswerFilterTests(unittest.TestCase):
         parser = AnswerTextFilter()
         text = 'They need clearance. The limit is < 10. Based on the documents, use PPE.'
         self.assertEqual(parser.feed(text) + parser.feed('', final=True), text)
+
+    def test_citation_filter_handles_split_stream_and_preserves_subject_terms(self):
+        raw = "From Reference 1, page 4, the limit is 100 kg [1]."
+        for split in range(len(raw) + 1):
+            cleaner = CitationTextFilter()
+            result = cleaner.feed(raw[:split]) + cleaner.feed(raw[split:]) + cleaner.feed("", final=True)
+            self.assertEqual(result, "The limit is 100 kg.", split)
+        cleaner = CitationTextFilter()
+        self.assertEqual(cleaner.feed("Reference voltage and page size are fields.", final=True),
+                         "Reference voltage and page size are fields.")
+        self.assertEqual(CitationTextFilter(enabled=False).feed(raw, final=True), raw)
 
     def test_first_speech_segment_is_ready_before_generation_ends(self):
         segmenter = IncrementalSpeechSegments()
@@ -99,7 +110,39 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(text, events[-1]['answer'])
         self.assertIn('100 kg', text)
         self.assertNotIn('private', text)
-        self.assertEqual(events[-1]['sources'][0]['source'], 'rules.pdf')
+        self.assertEqual(events[-1]['sources'], [])
+
+    def test_normal_context_hides_locations_but_explicit_request_can_use_them(self):
+        docs = [Document(page_content="The storage limit is 100 kg.",
+                         metadata={"source": "rules.pdf", "page": 4, "year": "2025"})]
+        ordinary = _format_context(docs)
+        requested = _format_context(docs, include_locations=True)
+        self.assertIn("100 kg", ordinary)
+        self.assertIn("year 2025", ordinary)
+        self.assertNotIn("rules.pdf", ordinary)
+        self.assertNotIn("page 5", ordinary)
+        self.assertIn("rules.pdf", requested)
+        self.assertIn("page 5", requested)
+        self.assertTrue(_wants_source_locations("Which page in the document states the limit?"))
+        self.assertTrue(_wants_source_locations("Sources?"))
+        self.assertTrue(_wants_source_locations("\u0938\u094d\u0930\u094b\u0924 \u092c\u0924\u093e\u0907\u090f"))
+        self.assertFalse(_wants_source_locations("What is the reference voltage?"))
+
+    def test_streamed_citations_are_removed_before_history_or_tts(self):
+        model = self.model([AIMessageChunk(content="From Ref"), AIMessageChunk(
+            content="erence 1, page 4, the storage limit is 100 kg [1].")])
+        with patch('services.qa_service._llm', return_value=model):
+            events = list(stream_answer_events('What is the storage limit?'))
+        streamed = ''.join(e['text'] for e in events if e['type'] == 'token')
+        self.assertEqual(streamed, "The storage limit is 100 kg.")
+        self.assertEqual(events[-1]['answer'], streamed)
+        self.assertNotIn("Reference", _format_chat_history([
+            {"role": "assistant", "content": "From Reference 1, the storage limit is 100 kg."}
+        ]))
+        with patch('services.qa_service._llm', return_value=model):
+            explicit = list(stream_answer_events("Which page in the document states the limit?"))
+        self.assertIn("Reference 1", explicit[-1]['answer'])
+        self.assertEqual(explicit[-1]['sources'][0]['source'], 'rules.pdf')
 
     def test_reasoning_only_response_returns_error_not_generic_answer(self):
         model = self.model([AIMessageChunk(content='', response_metadata={'done_reason': 'length'})])
@@ -118,7 +161,7 @@ class ResponseDeliveryTests(unittest.TestCase):
     def test_non_streaming_endpoint_uses_same_answer(self):
         with patch('services.qa_service._llm', return_value=self.model([AIMessageChunk(content='100 kg [1].')])):
             response = answer_question('What is the storage limit?')
-        self.assertEqual(response.answer, '100 kg [1].')
+        self.assertEqual(response.answer, '100 kg.')
 
     def test_feedback_keeps_the_question_being_explained(self):
         result = _feedback_retrieval_query('I do not understand; explain simpler', [

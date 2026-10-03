@@ -66,7 +66,10 @@ API_HOST = "0.0.0.0"
 API_PORT = 8000
 API_LOG_LEVEL = "info"
 TEXMIN_HOST = "localhost"
-AVATAR_MODEL_FILE = "assets/scene.gltf"
+AVATAR_MODEL_FILE = "assets/scene.gltf"  # Retained for older deployments.
+AVATAR_ENABLED = True
+TTS_ENABLED = True
+TTS_MAX_WORDS = 140
 
 # Indexing and retrieval. Changing embedding models requires running ingestion.
 CHROMA_COLLECTION_NAME = "texmin_qa"

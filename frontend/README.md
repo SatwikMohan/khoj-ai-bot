@@ -1,4 +1,4 @@
-# Texmin AI Streamlit Chat
+# AI interface
 
 Install Ollama and pull the local models first:
 
@@ -24,8 +24,16 @@ python -m pip install -r backend/requirements.txt -r frontend/requirements.txt
 python frontend/run_combined.py
 ```
 
-The UI imports backend service functions by default, while the FastAPI endpoints remain live on
-port 8000. Set `BACKEND_CALL_MODE = "http"` in `backend/config.py` to test the HTTP transport instead.
+The interface uses two columns: an offline CSS AI visualization and a scrollable conversation.
+Text and voice input remain available beneath the conversation. Retrieval and voice activity
+drive the visualization; there is no settings panel. Configure model selection, TTS, and API
+transport in backend/config.py.
+
+The default BACKEND_CALL_MODE value of http calls FastAPI using QA_API_URL.
+The combined deployment runs both services locally. For a separate frontend container, set
+QA_API_URL to a backend address reachable from that container and route the configured
+BROWSER_API_PATH to FastAPI for browser microphone requests. The frontend image includes
+only small shared voice helpers; model inference stays in the backend.
 
 All application settings live in `backend/config.py`. For example:
 
