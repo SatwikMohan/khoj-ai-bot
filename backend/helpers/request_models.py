@@ -11,6 +11,7 @@ class QARequest(BaseModel):
     question: str = Field(..., min_length=1, description="User question for the QA bot.")
     session_id: str | None = Field(None, max_length=128, description="Conversation session for latest-query-wins cancellation.")
     request_id: str | None = Field(None, max_length=128, description="Unique identifier for this query.")
+    input_type: str = Field("text", pattern="^(text|audio)$")
     top_k: int = Field(config.QA_TOP_K, ge=1, le=10, description="Number of context chunks to retrieve.")
     temperature: float = Field(config.QA_TEMPERATURE, ge=0, le=1, description="Controls response warmth/variation.")
     chat_history: list[ChatMessage] = Field(

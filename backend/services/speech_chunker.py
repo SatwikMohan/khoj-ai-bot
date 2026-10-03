@@ -24,7 +24,10 @@ def split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
     while len(remainder) >= maximum:
         cut = max(remainder.rfind(mark, minimum, maximum) for mark in (" ", ",", ";", ":", "\n"))
         if cut < minimum:
-            cut = maximum
+            next_space = re.search(r"\s", remainder[maximum:])
+            if next_space is None:
+                break  # Wait for a word boundary; never split a word or Hindi grapheme.
+            cut = maximum + next_space.start()
         candidate = remainder[:cut].strip(" ,;:\n")
         if candidate:
             segments.append(candidate)

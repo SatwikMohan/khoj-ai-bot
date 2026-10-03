@@ -56,10 +56,12 @@ OFFLINE_MODE = True
 ASSISTANT_NAME = "Khoj"
 ASSISTANT_PERSONA = "a calm, perceptive colleague who explains difficult material in plain language"
 RESPONSE_LANGUAGE = "auto"
-HINGLISH_SCRIPT = "mixed"
-BACKEND_CALL_MODE = "inprocess"
+HINGLISH_SCRIPT = "roman"
+BACKEND_CALL_MODE = "http"
 BACKEND_SOURCE_DIR = str(BACKEND_ROOT)
 QA_API_URL = "http://127.0.0.1:8000"
+BROWSER_API_PATH = "/api"
+BROWSER_ALLOWED_ORIGINS = ("http://localhost:8501", "http://127.0.0.1:8501")
 API_HOST = "0.0.0.0"
 API_PORT = 8000
 API_LOG_LEVEL = "info"
@@ -127,6 +129,14 @@ STT_MIN_AUDIO_RMS = 0.0025
 STT_MIN_SNR_DB = 4.0
 STT_MIN_FRAME_RMS = 0.004
 STT_MIN_ACTIVE_FRAME_RATIO = 0.02
+STT_AUDIO_SAMPLE_RATE = 16000
+RECORDING_BUFFER_MS = 250
+REQUEST_CANCELLATION_POLL_SECONDS = 0.1
+RECORDING_NO_SPEECH_TIMEOUT_SECONDS = 10
+RECORDING_MAX_SECONDS = 30
+RECORDING_SILENCE_MS = 1100
+RECORDING_SPEECH_CONFIRM_MS = 150
+STT_REQUEST_TIMEOUT_SECONDS = 90
 
 # Reference-free offline speech.
 TTS_ENGINE = "piper"
@@ -135,12 +145,15 @@ PIPER_ENGLISH_VOICE = "en_US-lessac-medium"
 # Optional ISO 639-1 code to installed Piper voice name or absolute ONNX path.
 PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
 TTS_PRELOAD_VOICES = True
-TTS_FALLBACK_ENGINES = "espeak"
+TTS_FALLBACK_ENGINES = ""  # Avoid a different speaker after a Piper failure.
 TTS_TIMEOUT_SECONDS = 45
 TTS_RESPONSE_TIMEOUT_SECONDS = 120
 TTS_FAILURE_THRESHOLD = 2
 TTS_FAILURE_COOLDOWN_SECONDS = 60
 TTS_MIN_AUDIO_BYTES = 1024
+TTS_SAMPLE_RATE = 22050
+TTS_CHANNELS = 1
+TTS_SAMPLE_WIDTH_BYTES = 2
 TTS_STREAM_MIN_CHARS = 60
 TTS_STREAM_MAX_CHARS = 320
 TTS_STREAM_CONCURRENCY = 2
@@ -149,6 +162,7 @@ TTS_TONE = "warm"
 TTS_RATE = "+0%"
 TTS_PITCH = "+0Hz"
 TTS_VOICE = "configured"
+TTS_HINGLISH_VOICE_LANGUAGE = "en"  # Roman text must not enter the Hindi phonemizer.
 ESPEAK_RATE = 155
 
 
@@ -162,12 +176,18 @@ def validate_config() -> None:
         raise ValueError("CHUNK_OVERLAP must be smaller than positive CHUNK_SIZE.")
     if OLLAMA_EMBED_DIMENSIONS <= 0 or EMBEDDING_BATCH_SIZE <= 0 or INGESTION_WORKERS <= 0:
         raise ValueError("Embedding dimensions, batch size and ingestion workers must be positive.")
+    if STT_AUDIO_SAMPLE_RATE != 16000 or RECORDING_BUFFER_MS <= 0 or REQUEST_CANCELLATION_POLL_SECONDS <= 0:
+        raise ValueError("Whisper input must be 16 kHz and recording/cancellation intervals positive.")
+    if min(TTS_SAMPLE_RATE, TTS_CHANNELS, TTS_SAMPLE_WIDTH_BYTES) <= 0:
+        raise ValueError("TTS audio format settings must be positive.")
     if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0:
         raise ValueError("Streaming speech chunk sizes and concurrency must be positive and ordered.")
     if not 0 <= INDEX_MIN_RECALL_AT_5 <= 1:
         raise ValueError("INDEX_MIN_RECALL_AT_5 must be between zero and one.")
     if min(QA_TOP_K, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
         raise ValueError("Retrieval limits must be positive.")
+    if TTS_ENGINE.strip().lower() in {"piper", "auto"} and TTS_HINGLISH_VOICE_LANGUAGE != "en":
+        raise ValueError("Roman Hinglish requires the English Piper phonemizer.")
     if OFFLINE_MODE and TTS_ENGINE.strip().lower() in {"edge", "edge-tts"}:
         raise ValueError("Edge TTS requires internet and cannot be the offline speech engine.")
 

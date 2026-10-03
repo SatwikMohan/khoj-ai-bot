@@ -3,6 +3,7 @@ import config
 config.configure_runtime_environment()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import threading
 from fastapi.responses import JSONResponse
 
@@ -16,6 +17,7 @@ from services.tts_service import tts_runtime_status, warm_up_tts
 
 
 app = FastAPI(title="Texmin AI QA Bot")
+app.add_middleware(CORSMiddleware, allow_origins=list(config.BROWSER_ALLOWED_ORIGINS), allow_methods=["POST"], allow_headers=["Content-Type"])
 app.include_router(qa_router)
 app.include_router(stt_router)
 app.include_router(tts_router)

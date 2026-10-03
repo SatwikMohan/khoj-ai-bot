@@ -1564,502 +1564,19 @@ def render_message(message: dict) -> None:
         st.markdown(f'<div class="audio-note">{escape(audio_error)}</div>', unsafe_allow_html=True)
 
 
-def render_speech_to_text_control() -> None:
-    components.html(
-        """
-        <style>
-            html,
-            body {
-                margin: 0;
-                background: transparent;
-                font-family: Inter, Segoe UI, Arial, sans-serif;
-                color: #edf3ff;
-            }
-
-            .voice-query {
-                border: 1px solid rgba(82, 214, 180, 0.24);
-                border-radius: 12px;
-                background: rgba(16, 24, 39, 0.7);
-                padding: 10px;
-                display: grid;
-                grid-template-columns: auto minmax(120px, 1fr);
-                gap: 10px;
-                align-items: center;
-                box-sizing: border-box;
-            }
-
-            .mic-button {
-                border: 1px solid rgba(82, 214, 180, 0.42);
-                border-radius: 10px;
-                background: rgba(82, 214, 180, 0.1);
-                color: #b7ffeb;
-                height: 38px;
-                padding: 0 12px;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                font-weight: 760;
-                cursor: pointer;
-                white-space: nowrap;
-            }
-
-            .mic-button.recording {
-                border-color: rgba(255, 101, 132, 0.65);
-                background: rgba(255, 101, 132, 0.14);
-                color: #ffd5de;
-            }
-
-            .mic-dot {
-                width: 9px;
-                height: 9px;
-                border-radius: 999px;
-                background: #52d6b4;
-                box-shadow: 0 0 0 4px rgba(82, 214, 180, 0.16);
-            }
-
-            .mic-button.recording .mic-dot {
-                background: #ff6584;
-                box-shadow: 0 0 0 4px rgba(255, 101, 132, 0.18);
-            }
-
-            .voice-panel {
-                min-width: 0;
-                display: grid;
-                grid-template-columns: minmax(90px, 1fr) minmax(140px, 1.8fr);
-                gap: 10px;
-                align-items: center;
-            }
-
-            canvas {
-                width: 100%;
-                height: 38px;
-                border-radius: 8px;
-                background: rgba(9, 14, 24, 0.54);
-                box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-            }
-
-            .voice-text {
-                min-width: 0;
-            }
-
-            .voice-status {
-                color: #9fb0c7;
-                font-size: 0.75rem;
-                line-height: 1.25;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-
-            .voice-preview {
-                color: #edf3ff;
-                font-size: 0.78rem;
-                line-height: 1.3;
-                min-height: 1.3em;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-                margin-top: 2px;
-            }
-
-            @media (max-width: 560px) {
-                .voice-query,
-                .voice-panel {
-                    grid-template-columns: 1fr;
-                }
-
-                .mic-button {
-                    justify-content: center;
-                    width: 100%;
-                }
-            }
-        </style>
-
-        <div class="voice-query">
-            <button class="mic-button" id="micButton" type="button" aria-label="Start voice query">
-                <span class="mic-dot"></span>
-                <span id="micLabel">Start recording</span>
-            </button>
-            <div class="voice-panel">
-                <canvas id="waveCanvas" width="260" height="76" aria-label="Input volume waves"></canvas>
-                <div class="voice-text">
-                    <div class="voice-status" id="voiceStatus">Audio is transcribed locally by your browser.</div>
-                    <div class="voice-preview" id="voicePreview"></div>
-                </div>
-            </div>
-        </div>
-
-        <script>
-            const button = document.getElementById("micButton");
-            const label = document.getElementById("micLabel");
-            const statusText = document.getElementById("voiceStatus");
-            const preview = document.getElementById("voicePreview");
-            const canvas = document.getElementById("waveCanvas");
-            const canvasContext = canvas.getContext("2d");
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            let recognition = null;
-            let listening = false;
-            let mediaStream = null;
-            let audioContext = null;
-            let analyser = null;
-            let waveData = null;
-            let animationId = null;
-            let finalTranscript = "";
-            let interimTranscript = "";
-            let latestTranscript = "";
-            let heardSpeech = false;
-            let lastVoiceAt = 0;
-            let lastTranscriptAt = 0;
-            const noTranscriptSilenceLimitMs = 1850;
-            const transcriptSilenceLimitMs = 850;
-            const finalTranscriptSilenceLimitMs = 520;
-            const continuedSpeechThreshold = 0.055;
-            const voiceThreshold = 0.025;
-
-            function drawIdleWave() {
-                const width = canvas.width;
-                const height = canvas.height;
-                canvasContext.clearRect(0, 0, width, height);
-                canvasContext.fillStyle = "rgba(9, 14, 24, 0.45)";
-                canvasContext.fillRect(0, 0, width, height);
-                const bars = 28;
-                const gap = 3;
-                const barWidth = (width - gap * (bars - 1)) / bars;
-                for (let index = 0; index < bars; index += 1) {
-                    const phase = index / bars;
-                    const barHeight = 5 + Math.sin(phase * Math.PI) * 10;
-                    const x = index * (barWidth + gap);
-                    const y = (height - barHeight) / 2;
-                    canvasContext.fillStyle = "rgba(82, 214, 180, 0.22)";
-                    canvasContext.fillRect(x, y, barWidth, barHeight);
-                }
-            }
-
-            function drawLiveWave() {
-                if (!analyser || !waveData) {
-                    drawIdleWave();
-                    return;
-                }
-
-                analyser.getByteTimeDomainData(waveData);
-                let sum = 0;
-                for (let index = 0; index < waveData.length; index += 1) {
-                    const value = (waveData[index] - 128) / 128;
-                    sum += value * value;
-                }
-                const volume = Math.min(1, Math.sqrt(sum / waveData.length) * 4.2);
-                if (listening) {
-                    const now = Date.now();
-                    const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
-                    if (transcript) {
-                        const quietLimit = interimTranscript ? transcriptSilenceLimitMs : finalTranscriptSilenceLimitMs;
-                        if (volume > continuedSpeechThreshold) {
-                            lastTranscriptAt = now;
-                        } else if (now - (lastTranscriptAt || lastVoiceAt) > quietLimit) {
-                            stopRecording("silence");
-                        }
-                    } else if (volume > voiceThreshold) {
-                        heardSpeech = true;
-                        lastVoiceAt = now;
-                    } else if (heardSpeech && now - lastVoiceAt > noTranscriptSilenceLimitMs) {
-                        stopRecording("silence");
-                    }
-                }
-                const width = canvas.width;
-                const height = canvas.height;
-                const bars = 34;
-                const gap = 3;
-                const barWidth = (width - gap * (bars - 1)) / bars;
-
-                canvasContext.clearRect(0, 0, width, height);
-                canvasContext.fillStyle = "rgba(9, 14, 24, 0.45)";
-                canvasContext.fillRect(0, 0, width, height);
-
-                for (let index = 0; index < bars; index += 1) {
-                    const sampleIndex = Math.floor((index / bars) * waveData.length);
-                    const sample = Math.abs((waveData[sampleIndex] - 128) / 128);
-                    const pulse = 0.35 + sample * 1.8 + volume * 1.2;
-                    const barHeight = Math.max(4, Math.min(height - 8, pulse * height * 0.45));
-                    const x = index * (barWidth + gap);
-                    const y = (height - barHeight) / 2;
-                    const intensity = Math.min(1, 0.38 + volume * 0.62);
-                    canvasContext.fillStyle = `rgba(${Math.round(82 + 45 * intensity)}, ${Math.round(214 + 22 * intensity)}, ${Math.round(180 + 20 * intensity)}, ${0.35 + intensity * 0.55})`;
-                    canvasContext.fillRect(x, y, barWidth, barHeight);
-                }
-
-                animationId = requestAnimationFrame(drawLiveWave);
-            }
-
-            function setButtonState(recording) {
-                button.classList.toggle("recording", recording);
-                label.textContent = recording ? "Stop recording" : "Start recording";
-            }
-
-            function findChatInput() {
-                try {
-                    const parentDocument = window.parent.document;
-                    const textareas = Array.from(parentDocument.querySelectorAll("textarea"));
-                    return textareas.find((node) => {
-                        const placeholder = node.getAttribute("placeholder") || "";
-                        return placeholder.toLowerCase().includes("message khoj");
-                    }) || textareas[textareas.length - 1] || null;
-                } catch (error) {
-                    console.error(error);
-                    return null;
-                }
-            }
-
-            function findSendButton(input) {
-                try {
-                    const parentDocument = window.parent.document;
-                    const chatInput = input ? input.closest("[data-testid='stChatInput']") : null;
-                    const localButton = chatInput ? chatInput.querySelector("button") : null;
-                    if (localButton) return localButton;
-
-                    return parentDocument.querySelector("button[data-testid='stChatInputSubmitButton']")
-                        || parentDocument.querySelector("button[aria-label='Send message']")
-                        || parentDocument.querySelector("button[title='Send message']");
-                } catch (error) {
-                    console.error(error);
-                    return null;
-                }
-            }
-
-            function submitViaChatInput(text) {
-                const cleaned = text.trim();
-                if (!cleaned) return false;
-
-                try {
-                    const input = findChatInput();
-                    if (!input) return false;
-
-                    const setter = Object.getOwnPropertyDescriptor(window.parent.HTMLTextAreaElement.prototype, "value").set;
-                    setter.call(input, cleaned);
-                    input.dispatchEvent(new InputEvent("input", {
-                        bubbles: true,
-                        inputType: "insertText",
-                        data: cleaned,
-                    }));
-                    input.dispatchEvent(new Event("change", { bubbles: true }));
-                    input.focus();
-
-                    let attempts = 0;
-                    const submitWhenReady = () => {
-                        attempts += 1;
-                        const sendButton = findSendButton(input);
-                        if (sendButton && !sendButton.disabled && sendButton.getAttribute("aria-disabled") !== "true") {
-                            sendButton.click();
-                            return;
-                        }
-
-                        if (attempts < 8) {
-                            window.setTimeout(submitWhenReady, 120);
-                            return;
-                        }
-
-                        if (input.value.trim()) {
-                            input.dispatchEvent(new KeyboardEvent("keydown", {
-                                key: "Enter",
-                                code: "Enter",
-                                bubbles: true,
-                                cancelable: true,
-                            }));
-                        }
-                    };
-                    window.setTimeout(submitWhenReady, 120);
-                    return true;
-                } catch (error) {
-                    console.error(error);
-                    return false;
-                }
-            }
-
-            function sendTranscriptAsQuery(text) {
-                try {
-                    const encoded = encodeURIComponent(text.trim());
-                    if (!encoded) return false;
-                    window.parent.location.href = `?voice_query=${encoded}`;
-                    return true;
-                } catch (error) {
-                    console.error(error);
-                    return false;
-                }
-            }
-
-            function submitTranscript(text) {
-                const cleaned = text.trim();
-                if (!cleaned) return false;
-                return submitViaChatInput(cleaned) || sendTranscriptAsQuery(cleaned);
-            }
-
-            async function startMeter() {
-                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                audioContext = new AudioContext();
-                analyser = audioContext.createAnalyser();
-                analyser.fftSize = 512;
-                waveData = new Uint8Array(analyser.fftSize);
-                const source = audioContext.createMediaStreamSource(mediaStream);
-                source.connect(analyser);
-                drawLiveWave();
-            }
-
-            function stopMeter() {
-                if (animationId) {
-                    cancelAnimationFrame(animationId);
-                    animationId = null;
-                }
-                if (mediaStream) {
-                    mediaStream.getTracks().forEach((track) => track.stop());
-                    mediaStream = null;
-                }
-                if (audioContext) {
-                    audioContext.close();
-                    audioContext = null;
-                }
-                analyser = null;
-                waveData = null;
-                drawIdleWave();
-            }
-
-            function buildRecognition() {
-                const instance = new SpeechRecognition();
-                instance.lang = navigator.language || "en-IN";
-                if (!["en", "hi"].includes(instance.lang.slice(0, 2).toLowerCase())) {{
-                    instance.lang = "en-IN";
-                }}
-                instance.continuous = true;
-                instance.interimResults = true;
-
-                instance.onresult = (event) => {
-                    interimTranscript = "";
-                    for (let index = event.resultIndex; index < event.results.length; index += 1) {
-                        const transcript = event.results[index][0].transcript;
-                        if (event.results[index].isFinal) {
-                            finalTranscript = `${finalTranscript} ${transcript}`.trim();
-                        } else {
-                            interimTranscript = `${interimTranscript} ${transcript}`.trim();
-                        }
-                    }
-
-                    const visibleText = [finalTranscript, interimTranscript].filter(Boolean).join(" ");
-                    latestTranscript = visibleText.trim();
-                    if (latestTranscript) {{
-                        heardSpeech = true;
-                        const now = Date.now();
-                        lastVoiceAt = now;
-                        lastTranscriptAt = now;
-                    }}
-                    preview.textContent = visibleText;
-                    statusText.textContent = interimTranscript ? "Listening..." : "Speech recognized.";
-                };
-
-                instance.onerror = (event) => {
-                    statusText.textContent = event.error === "not-allowed"
-                        ? "Microphone permission was blocked."
-                        : `Speech recognition stopped: ${event.error}`;
-                    listening = false;
-                    setButtonState(false);
-                    stopMeter();
-                };
-
-                instance.onend = () => {
-                    if (listening) {
-                        try {
-                            instance.start();
-                            return;
-                        } catch (error) {
-                            console.error(error);
-                        }
-                    }
-
-                    const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
-                    const submitted = submitTranscript(transcript);
-                    statusText.textContent = submitted
-                        ? "Sending voice query..."
-                        : transcript
-                            ? "Transcript captured, but the query could not be sent."
-                            : heardSpeech
-                                ? "I heard audio, but the browser did not return text. Try Chrome or Edge over HTTPS."
-                                : "Recording stopped. No transcript was captured.";
-                    setButtonState(false);
-                    stopMeter();
-                };
-
-                return instance;
-            }
-
-            async function startRecording() {
-                if (!SpeechRecognition) {
-                    statusText.textContent = "Speech recognition is supported in Chrome or Edge.";
-                    return;
-                }
-                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                    statusText.textContent = "Microphone access is not available in this browser.";
-                    return;
-                }
-
-                finalTranscript = "";
-                interimTranscript = "";
-                latestTranscript = "";
-                heardSpeech = false;
-                lastVoiceAt = Date.now();
-                lastTranscriptAt = 0;
-                preview.textContent = "";
-                listening = true;
-                setButtonState(true);
-                statusText.textContent = "Requesting microphone permission...";
-
-                try {
-                    await startMeter();
-                    recognition = buildRecognition();
-                    recognition.start();
-                    statusText.textContent = "Listening...";
-                } catch (error) {
-                    console.error(error);
-                    listening = false;
-                    setButtonState(false);
-                    stopMeter();
-                    statusText.textContent = "Microphone could not start.";
-                }
-            }
-
-            function stopRecording(reason = "manual") {
-                if (!listening && !recognition) return;
-                listening = false;
-                statusText.textContent = reason === "silence"
-                    ? "Silence detected. Sending query..."
-                    : "Sending voice query...";
-                if (recognition) {
-                    recognition.stop();
-                } else {
-                    setButtonState(false);
-                    stopMeter();
-                }
-            }
-
-            button.addEventListener("click", () => {
-                if (listening) {
-                    stopRecording();
-                } else {
-                    startRecording();
-                }
-            });
-
-            drawIdleWave();
-        </script>
-        """,
-        height=92,
-    )
-
-
-def render_voice_query_component() -> str | None:
+def render_voice_query_component() -> dict | None:
     value = voice_query_component(
         default=None,
         key="texmin_voice_query",
         height=92,
         server_stt=True,
-        api_url=st.session_state.api_url,
+        browser_api_path=config.BROWSER_API_PATH,
+        no_speech_timeout_seconds=config.RECORDING_NO_SPEECH_TIMEOUT_SECONDS,
+        max_recording_seconds=config.RECORDING_MAX_SECONDS,
+        silence_ms=config.RECORDING_SILENCE_MS,
+        recording_buffer_ms=config.RECORDING_BUFFER_MS,
+        speech_confirm_ms=config.RECORDING_SPEECH_CONFIRM_MS,
+        stt_timeout_seconds=config.STT_REQUEST_TIMEOUT_SECONDS,
         session_id=st.session_state.conversation_session_id,
     )
     if not value:
@@ -2068,12 +1585,15 @@ def render_voice_query_component() -> str | None:
     if isinstance(value, str):
         query_id = value
         text = value
+        input_type = "text"
     else:
+        input_type = "audio"
         query_id = str(value.get("id", ""))
         text = str(value.get("text", "")).strip()
         audio_b64 = str(value.get("audio_b64", ""))
         audio_mime = str(value.get("audio_mime", "audio/webm"))
         if audio_b64 and query_id != st.session_state.last_voice_query_id:
+            input_type = "text"  # Legacy component did not begin a voice request.
             text, transcription_error = ask_stt(audio_b64, audio_mime)
             if transcription_error:
                 st.warning(transcription_error)
@@ -2082,7 +1602,7 @@ def render_voice_query_component() -> str | None:
         return None
 
     st.session_state.last_voice_query_id = query_id
-    return text
+    return {"text": text, "request_id": query_id, "input_type": input_type}
 
 
 @lru_cache(maxsize=1)
@@ -2122,6 +1642,7 @@ def _qa_events(url: str, payload: dict):
             chat_history=history,
             session_id=payload.get("session_id"),
             request_id=payload.get("request_id"),
+            input_type=payload.get("input_type", "text"),
         )
         return
 
@@ -2421,6 +1942,8 @@ def ask_api_stream(
     question: str,
     container,
     avatar_container=None,
+    request_id: str | None = None,
+    input_type: str = "text",
 ) -> tuple[str, list[dict], str | None, bytes | None, str, str | None]:
     url = st.session_state.api_url.rstrip("/") + "/qa/ask/stream"
     payload = {
@@ -2429,7 +1952,8 @@ def ask_api_stream(
         "temperature": st.session_state.temperature,
         "chat_history": _chat_history_payload(exclude_latest_user=True),
         "session_id": st.session_state.conversation_session_id,
-        "request_id": uuid.uuid4().hex,
+        "request_id": request_id or uuid.uuid4().hex,
+        "input_type": input_type,
     }
     answer = ""
     sources = []
@@ -2714,9 +2238,11 @@ with st.sidebar:
         "Show lip-sync avatar",
         value=st.session_state.avatar_enabled,
     )
-    voice_labels = [*VOICE_OPTIONS.keys(), CUSTOM_VOICE_LABEL]
+    voice_labels = [*VOICE_OPTIONS.keys()]
+    if DEFAULT_TTS_ENGINE not in {"auto", "piper", "espeak"}:
+        voice_labels.append(CUSTOM_VOICE_LABEL)
     if st.session_state.tts_voice_choice not in voice_labels:
-        st.session_state.tts_voice_choice = CUSTOM_VOICE_LABEL
+        st.session_state.tts_voice_choice = voice_labels[0]
     st.session_state.tts_voice_choice = st.selectbox(
         "Preferred voice",
         voice_labels,
@@ -2800,7 +2326,8 @@ live_response_container = st.container()
 st.markdown("</div>", unsafe_allow_html=True)
 
 voice_component_query = render_voice_query_component()
-question = st.chat_input(f"Message {ASSISTANT_NAME}...") or voice_component_query or voice_query_param
+typed_question = st.chat_input(f"Message {ASSISTANT_NAME}...")
+question = typed_question or (voice_component_query or {}).get("text") or voice_query_param
 
 latest_audio_b64, latest_audio_text, latest_audio_autoplay, latest_audio_mime = latest_assistant_audio()
 if not question and st.session_state.avatar_enabled and latest_audio_b64:
@@ -2815,7 +2342,13 @@ if question:
     if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
         # A rerun interrupted its previous answer; omit that unfinished turn.
         st.session_state.messages.pop()
-    clear_voice_interrupt_signal()
+    if typed_question:
+        components.html(
+            '<script>window.localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
+            height=0,
+        )
+    else:
+        clear_voice_interrupt_signal()
     with live_response_container:
         user_message = {"role": "user", "content": question}
         st.session_state.messages.append(user_message)
@@ -2827,6 +2360,8 @@ if question:
             question,
             stream_container,
             avatar_stream_container,
+            request_id=voice_component_query["request_id"] if voice_component_query and not typed_question else None,
+            input_type=voice_component_query["input_type"] if voice_component_query and not typed_question else "text",
         )
 
     if error == "__cancelled__":

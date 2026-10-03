@@ -22,8 +22,17 @@ def _load_environment() -> None:
     config.configure_runtime_environment()
 
 
-@lru_cache(maxsize=1)
+_MODEL_LOAD_LOCK = threading.Lock()
+
+
 def _model():
+    # lru_cache alone may run its wrapped function twice on simultaneous misses.
+    with _MODEL_LOAD_LOCK:
+        return _model_cached()
+
+
+@lru_cache(maxsize=1)
+def _model_cached():
     _load_environment()
     engine = config.STT_ENGINE.strip().lower()
     if engine in {"transformers", "pytorch", "torch"}:
@@ -122,9 +131,12 @@ def transcribe_audio(
     audio: bytes,
     suffix: str = ".webm",
     language: str | None = None,
+    cancelled: threading.Event | None = None,
 ) -> dict:
     _load_environment()
     max_bytes = int(config.STT_MAX_AUDIO_BYTES)
+    if cancelled is not None and cancelled.is_set():
+        raise STTEngineError("This voice interaction was replaced.")
     if not audio:
         raise STTEngineError("No audio was received.")
     if len(audio) > max_bytes:
@@ -138,15 +150,23 @@ def transcribe_audio(
             audio_file.write(audio)
             path = audio_file.name
 
-        with TRANSCRIBE_SEMAPHORE:
+        samples = _decode_audio(path)
+        if cancelled is not None and cancelled.is_set():
+            raise STTEngineError("This voice interaction was replaced.")
+        while not TRANSCRIBE_SEMAPHORE.acquire(timeout=float(config.REQUEST_CANCELLATION_POLL_SECONDS)):
+            if cancelled is not None and cancelled.is_set():
+                raise STTEngineError("This voice interaction was replaced.")
+        try:
+            if cancelled is not None and cancelled.is_set():
+                raise STTEngineError("This voice interaction was replaced.")
             model_state = _model()
             if model_state["engine"] == "transformers":
                 text, detected_language, language_probability, duration = _transcribe_transformers(
-                    model_state, path, language
+                    model_state, samples, language, cancelled
                 )
             else:
                 segments, info = model_state["model"].transcribe(
-                    path,
+                    samples,
                     language=language or None,
                     beam_size=int(config.WHISPER_BEAM_SIZE),
                     best_of=int(config.WHISPER_BEST_OF),
@@ -164,6 +184,8 @@ def transcribe_audio(
                 detected_language = getattr(info, "language", language or "unknown")
                 language_probability = float(getattr(info, "language_probability", 0.0))
                 duration = float(getattr(info, "duration", 0.0))
+        finally:
+            TRANSCRIBE_SEMAPHORE.release()
     except STTEngineError:
         raise
     except Exception as exc:
@@ -175,6 +197,8 @@ def transcribe_audio(
             except OSError:
                 pass
 
+    if cancelled is not None and cancelled.is_set():
+        raise STTEngineError("This voice interaction was replaced.")
     if not text:
         raise STTEngineError("Speech was not detected in the recording.")
 
@@ -211,7 +235,7 @@ def _decode_audio(path: str):
     audio = np.concatenate(samples).astype(np.float32) / 32768.0
     max_seconds = float(config.WHISPER_MAX_AUDIO_SECONDS)
     if len(audio) > int(16000 * max_seconds):
-        audio = audio[: int(16000 * max_seconds)]
+        raise STTEngineError(f"Recording exceeds the {max_seconds:g} second limit.")
     _validate_speech_signal(audio, np)
     return audio
 
@@ -252,10 +276,11 @@ def _validate_speech_signal(audio, np_module=None) -> None:
         raise STTEngineError("Only background noise was detected. Please speak closer to the microphone.")
 
 
-def _transcribe_transformers(model_state: dict, path: str, language: str | None):
+def _transcribe_transformers(model_state: dict, audio, language: str | None, cancelled: threading.Event | None = None):
     import torch
 
-    audio = _decode_audio(path)
+    if cancelled is not None and cancelled.is_set():
+        raise STTEngineError("This voice interaction was replaced.")
     processor = model_state["processor"]
     model = model_state["model"]
     inputs = processor(
@@ -278,5 +303,7 @@ def _transcribe_transformers(model_state: dict, path: str, language: str | None)
         generate_kwargs["attention_mask"] = attention_mask.to(model_state["device"])
     with torch.inference_mode():
         generated_ids = model.generate(input_features, **generate_kwargs)
+    if cancelled is not None and cancelled.is_set():
+        raise STTEngineError("This voice interaction was replaced.")
     text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
     return text, language or "auto", 0.0, len(audio) / 16000.0

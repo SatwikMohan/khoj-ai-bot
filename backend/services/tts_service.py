@@ -273,10 +273,14 @@ def _validate_audio(audio: bytes, media_type: str) -> None:
         return
     try:
         with wave.open(io.BytesIO(audio), "rb") as wav_file:
+            audio_format = (wav_file.getframerate(), wav_file.getnchannels(), wav_file.getsampwidth())
             duration = wav_file.getnframes() / max(1, wav_file.getframerate())
             sample = wav_file.readframes(min(wav_file.getnframes(), wav_file.getframerate()))
     except (wave.Error, EOFError) as exc:
         raise TTSEngineError(f"voice returned an invalid WAV file: {exc}") from exc
+    expected_format = (int(config.TTS_SAMPLE_RATE), int(config.TTS_CHANNELS), int(config.TTS_SAMPLE_WIDTH_BYTES))
+    if config.TTS_ENGINE.strip().lower() in {"piper", "auto"} and audio_format != expected_format:
+        raise TTSEngineError(f"voice returned WAV format {audio_format}; expected {expected_format}")
     if duration < 0.08 or not sample or not any(sample):
         raise TTSEngineError("voice returned silent or abnormally short audio")
 
@@ -301,6 +305,8 @@ def tts_runtime_status() -> dict:
         if missing:
             status.update(status="unavailable", error="Missing Piper voice files: " + ", ".join(missing))
         status["voices"] = [str(path) for path in paths]
+        status["cross_language_speaker_consistency"] = False
+        status["english_voice_accent"] = "US (configured en_US-lessac-medium)"
     elif engine == "espeak":
         if not shutil.which("espeak-ng"):
             status.update(status="unavailable", error="Install espeak-ng for the offline fallback.")
@@ -322,8 +328,8 @@ def warm_up_tts() -> None:
     if status["status"] != "ready":
         raise TTSEngineError(status.get("error", "TTS warm-up failed."))
     if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}:
-        for language in ("english", "hindi"):
-            _piper_worker(_piper_path(language)).synthesize("Voice ready.", 1.0, None)
+        for language, sample in (("english", "Voice ready."), ("hindi", "\u0906\u0935\u093e\u091c\u093c \u0924\u0948\u092f\u093e\u0930 \u0939\u0948\u0964")):
+            _piper_worker(_piper_path(language)).synthesize(sample, 1.0, None)
 
 
 def _synthesize_edge_speech(payload: TTSRequest) -> tuple[bytes, str]:
@@ -523,7 +529,7 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
 def _piper_path(language: str) -> Path:
     directory = Path(config.PIPER_MODEL_DIR)
-    code = {"hindi": "hi", "hinglish": "hi", "english": "en"}.get(language, language)
+    code = {"hindi": "hi", "hinglish": config.TTS_HINGLISH_VOICE_LANGUAGE, "english": "en"}.get(language, language)
     name = {"hi": config.PIPER_HINDI_VOICE, "en": config.PIPER_ENGLISH_VOICE, **config.PIPER_ADDITIONAL_VOICES}.get(code)
     if not name:
         raise TTSEngineError(f"No Piper voice is configured for language '{code}'.")
@@ -563,7 +569,7 @@ class PersistentPiperWorker:
         return b"".join(parts)
 
     def synthesize(self, text: str, length_scale: float, cancelled: threading.Event | None) -> bytes:
-        while not self.lock.acquire(timeout=0.1):
+        while not self.lock.acquire(timeout=float(config.REQUEST_CANCELLATION_POLL_SECONDS)):
             if cancelled is not None and cancelled.is_set():
                 raise TTSEngineError("Piper speech generation was cancelled.")
         try:
@@ -581,7 +587,7 @@ class PersistentPiperWorker:
             deadline = time.monotonic() + float(config.TTS_TIMEOUT_SECONDS)
             timed_out = threading.Event()
             def watch():
-                while not stopped.wait(0.1):
+                while not stopped.wait(float(config.REQUEST_CANCELLATION_POLL_SECONDS)):
                     if cancelled is not None and cancelled.is_set():
                         process.terminate()
                         return
@@ -634,6 +640,11 @@ def _close_piper_workers():
 
 def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     language = payload.language or detect_language(payload.text)
+    # Piper voices are monolingual. Route Roman Hinglish and Latin-only technical
+    # chunks to the English phonemizer; Devanagari goes to the Hindi phonemizer.
+    language = "hi" if _contains_devanagari(payload.text) else (
+        config.TTS_HINGLISH_VOICE_LANGUAGE if language == "hinglish" else "en"
+    )
     path = _piper_path(language)
     if not path.is_file() or not Path(str(path) + ".json").is_file():
         raise TTSEngineError(

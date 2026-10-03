@@ -963,9 +963,10 @@ def answer_question(
     chat_history: list[ChatMessage] | None = None,
     session_id: str | None = None,
     request_id: str | None = None,
+    input_type: str = "text",
 ) -> QAResponse:
     # HTTP and in-process calls use exactly the same bounded response path.
-    for event in stream_answer_events(question, top_k, temperature, chat_history, session_id, request_id):
+    for event in stream_answer_events(question, top_k, temperature, chat_history, session_id, request_id, input_type):
         if event["type"] == "cancelled":
             raise QAEngineError("The request was replaced by a newer query.")
         if event["type"] == "error":
@@ -982,11 +983,18 @@ def stream_answer_events(
     chat_history: list[ChatMessage] | None = None,
     session_id: str | None = None,
     request_id: str | None = None,
+    input_type: str = "text",
 ) -> Iterator[dict]:
     _load_environment()
     # Legacy callers without a session are independent; explicit sessions replace
     # their own previous query and never another user's work.
-    request = registry.begin(session_id or f"anonymous-{request_id or __import__('uuid').uuid4().hex}", request_id)
+    if input_type == "audio":
+        request = registry.promote_voice(session_id or "", request_id or "")
+        if request is None:
+            yield {"type": "cancelled", "request_id": request_id}
+            return
+    else:
+        request = registry.begin(session_id or f"anonymous-{request_id or __import__('uuid').uuid4().hex}", request_id)
     yield from bounded_events(
         lambda: _stream_answer_events(question, top_k, temperature, chat_history, request),
         timeout_seconds=max(1, config.QA_RESPONSE_TIMEOUT_SECONDS),

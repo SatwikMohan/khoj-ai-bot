@@ -135,636 +135,382 @@
     const statusText = document.getElementById("voiceStatus");
     const preview = document.getElementById("voicePreview");
     const canvas = document.getElementById("waveCanvas");
-    const canvasContext = canvas.getContext("2d");
-    // Final transcription is always performed by the private DGX service. Keeping the
-    // browser recognizer disabled prevents Chrome/Edge from sending microphone audio to a vendor.
-    const SpeechRecognition = null;
-    const storageModeKey = "texmin_voice_conversation";
-    const storageResumeKey = "texmin_voice_resume_at";
-    const storageWaitingKey = "texmin_voice_waiting_since";
-    const storageInterruptKey = "texmin_voice_interrupt_at";
-    const storageAvatarSpeakingKey = "texmin_voice_avatar_speaking_at";
-    const storageInputSuppressedUntilKey = "texmin_voice_input_suppressed_until";
-    let backendApiUrl = "";
-    let backendSessionId = "";
-    window.addEventListener("message", (event) => {
-      if (event.data?.type !== "streamlit:render") return;
-      backendApiUrl = event.data.args?.api_url || "";
-      backendSessionId = event.data.args?.session_id || "";
-    });
-    const noTranscriptSilenceLimitMs = 700;
-    const transcriptSilenceLimitMs = 850;
-    const finalTranscriptSilenceLimitMs = 520;
-    const continuedSpeechThreshold = 0.055;
-    const calibrationDurationMs = 700;
-    const speechConfirmationMs = 180;
-    const resumeDelayMs = 40;
-    const resumePollMs = 120;
-    const waitingFreshMs = 300000;
-    const voiceThreshold = 0.04;
-    const waitingVoiceThreshold = 0.065;
-    const interruptVoiceThreshold = 0.09;
-    const interruptHoldMs = 260;
-
-    let recognition = null;
-    let listening = false;
-    let mediaStream = null;
-    let audioContext = null;
+    const painter = canvas.getContext("2d");
+    const modeKey = "texmin_voice_conversation";
+    const waitingKey = "texmin_voice_waiting_since";
+    const resumeKey = "texmin_voice_resume_at";
+    const interruptKey = "texmin_voice_interrupt_at";
+    const speakingKey = "texmin_voice_avatar_speaking_at";
+    let sessionId = "";
+    let settings = {};
+    let phase = "idle";
+    let generation = 0;
+    let requestId = "";
+    let ownInterruptAt = 0;
+    let beginPromise = null;
+    let beginChain = Promise.resolve();
+    let uploadController = null;
+    let stream = null;
+    let context = null;
     let analyser = null;
-    let waveData = null;
-    let animationId = null;
-    let finalTranscript = "";
-    let interimTranscript = "";
-    let latestTranscript = "";
+    let samples = null;
+    let recorder = null;
+    let chunks = [];
+    let mime = "";
+    let raf = 0;
+    let startedAt = 0;
+    let lastSpeechAt = 0;
+    let candidateAt = 0;
     let heardSpeech = false;
-    let lastVoiceAt = 0;
-    let lastTranscriptAt = 0;
-    let lastResumeAt = localStorage.getItem(storageResumeKey) || "";
-    let interruptVoiceStartedAt = 0;
-    let interruptPending = false;
-    let interruptArmed = false;
-    let mediaRecorder = null;
-    let recordedChunks = [];
-    let recordingMime = "audio/webm";
-    let submissionPending = false;
-    let calibrationStartedAt = 0;
-    let calibrationSamples = [];
-    let noiseFloor = 0.008;
-    let speechCandidateAt = 0;
+    let noiseFloor = 0.005;
+    let waitingCandidateAt = 0;
+    let lastResumeAt = localStorage.getItem(resumeKey) || "";
+    let waitingMeterPending = false;
 
-    function percentile(values, ratio) {
-      if (!values.length) return 0;
-      const sorted = [...values].sort((left, right) => left - right);
-      return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+    function send(type, data) {
+      window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
     }
+    window.addEventListener("message", event => {
+      if (event.data?.type !== "streamlit:render") return;
+      settings = event.data.args || {};
+      sessionId = settings.session_id || "";
+      send("streamlit:setFrameHeight", {height: 92});
+      if (phase === "waiting" && !stream) startWaitingMonitor();
+    });
+    send("streamlit:componentReady", {apiVersion: 1});
+    send("streamlit:setFrameHeight", {height: 92});
 
-    function calibrating(now = Date.now()) {
-      return calibrationStartedAt > 0 && now - calibrationStartedAt < calibrationDurationMs;
+    function show(next, message) {
+      phase = next;
+      button.classList.toggle("listening", next === "listening");
+      button.classList.toggle("waiting", next === "waiting");
+      label.textContent = {
+        idle: "Start conversation", permission: "Cancel microphone",
+        listening: "Stop & transcribe", processing: "Cancel transcription",
+        waiting: "Interrupt", error: "Try again"
+      }[next] || "Start conversation";
+      statusText.textContent = message;
+      button.disabled = false;
     }
-
-    function updateNoiseFloor(volume, now) {
-      if (calibrating(now)) {
-        calibrationSamples.push(volume);
-        if (calibrationSamples.length > 80) calibrationSamples.shift();
-        noiseFloor = Math.max(0.004, percentile(calibrationSamples, 0.35));
-        return;
+    function apiBases() {
+      const bases = [location.origin + (settings.browser_api_path || "/api")];
+      if (["localhost", "127.0.0.1"].includes(location.hostname)) {
+        bases.push(location.protocol + "//" + location.hostname + ":8000");
       }
-
-      const speechThreshold = Math.max(voiceThreshold, noiseFloor * 2.6 + 0.012);
-      if (!heardSpeech && volume < speechThreshold * 0.82) {
-        noiseFloor = noiseFloor * 0.96 + volume * 0.04;
-      }
+      return bases;
     }
-
-    function activeVoiceThreshold(waiting = false, speaking = false) {
-      const adaptive = noiseFloor * (waiting ? 3.2 : 2.6) + (waiting ? 0.02 : 0.012);
-      const minimum = speaking
-        ? interruptVoiceThreshold
-        : waiting
-          ? waitingVoiceThreshold
-          : voiceThreshold;
-      return Math.max(minimum, adaptive);
-    }
-
-    function sendStreamlitMessage(type, data) {
-      window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
-    }
-
-    function setFrameHeight() {
-      sendStreamlitMessage("streamlit:setFrameHeight", { height: 92 });
-    }
-
-    function setComponentReady() {
-      sendStreamlitMessage("streamlit:componentReady", { apiVersion: 1 });
-      setFrameHeight();
-    }
-
-    function setComponentValue(value) {
-      sendStreamlitMessage("streamlit:setComponentValue", {
-        value,
-        dataType: "json",
-      });
-    }
-
-    function drawIdleWave() {
-      const width = canvas.width;
-      const height = canvas.height;
-      canvasContext.clearRect(0, 0, width, height);
-      canvasContext.fillStyle = "rgba(9, 14, 24, 0.45)";
-      canvasContext.fillRect(0, 0, width, height);
-      const bars = 28;
-      const gap = 3;
-      const barWidth = (width - gap * (bars - 1)) / bars;
-      for (let index = 0; index < bars; index += 1) {
-        const phase = index / bars;
-        const barHeight = 5 + Math.sin(phase * Math.PI) * 10;
-        const x = index * (barWidth + gap);
-        const y = (height - barHeight) / 2;
-        canvasContext.fillStyle = "rgba(82, 214, 180, 0.22)";
-        canvasContext.fillRect(x, y, barWidth, barHeight);
-      }
-    }
-
-    function setButtonState(state) {
-      button.classList.toggle("listening", state === "listening");
-      button.classList.toggle("waiting", state === "waiting");
-      if (state === "listening") {
-        label.textContent = "Listening";
-      } else if (state === "waiting") {
-        label.textContent = "Interrupt";
-      } else {
-        label.textContent = localStorage.getItem(storageModeKey) === "on"
-          ? "Resume conversation"
-          : "Start conversation";
-      }
-    }
-
-    function isWaitingForAssistant() {
-      return localStorage.getItem(storageModeKey) === "on"
-        && Boolean(localStorage.getItem(storageWaitingKey));
-    }
-
-    function assistantIsSpeaking() {
-      const speakingAt = Number(localStorage.getItem(storageAvatarSpeakingKey) || 0);
-      return speakingAt > 0 && Date.now() - speakingAt < 1800;
-    }
-
-    function requestAvatarInterrupt() {
-      localStorage.setItem(storageInterruptKey, String(Date.now()));
-      if (backendApiUrl && backendSessionId) {
-        fetch(`${backendApiUrl.replace(/\/$/, "")}/qa/sessions/${encodeURIComponent(backendSessionId)}/cancel`, {
-          method: "POST", mode: "no-cors", keepalive: true,
-        }).catch(() => {});
-      }
-    }
-
-    function inputIsSuppressed() {
-      const suppressedUntil = Number(localStorage.getItem(storageInputSuppressedUntilKey) || 0);
-      return suppressedUntil > Date.now();
-    }
-
-    function currentTranscript() {
-      return (latestTranscript || finalTranscript || interimTranscript).trim();
-    }
-
-    function transcriptQuietLimit() {
-      return interimTranscript ? transcriptSilenceLimitMs : finalTranscriptSilenceLimitMs;
-    }
-
-    function submitTranscript(text) {
-      const cleaned = text.trim();
-      if (!cleaned) return false;
-      localStorage.setItem(storageModeKey, "on");
-      localStorage.setItem(storageWaitingKey, String(Date.now()));
-      setComponentValue({
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        text: cleaned,
-      });
-      statusText.textContent = "";
-      setButtonState("waiting");
-      return true;
-    }
-
-    function drawLiveWave() {
-      if (!analyser || !waveData) {
-        drawIdleWave();
-        return;
-      }
-
-      analyser.getByteTimeDomainData(waveData);
-      let sum = 0;
-      for (let index = 0; index < waveData.length; index += 1) {
-        const value = (waveData[index] - 128) / 128;
-        sum += value * value;
-      }
-      const volume = Math.min(1, Math.sqrt(sum / waveData.length) * 4.2);
-      const now = Date.now();
-      updateNoiseFloor(volume, now);
-      if (listening) {
-        if (calibrating(now)) {
-          statusText.textContent = "Checking background noise...";
-        } else if (statusText.textContent === "Checking background noise...") {
-          statusText.textContent = "Listening...";
+    async function apiFetch(path, options) {
+      let lastError;
+      for (const base of apiBases()) {
+        try {
+          const response = await fetch(base + path, options);
+          if (response.status === 404 && apiBases().length > 1) continue;
+          if (!response.ok) {
+            let detail = response.statusText;
+            try { detail = (await response.json()).detail || detail; } catch (_) {}
+            throw new Error(detail || "Local speech service failed.");
+          }
+          return response.json();
+        } catch (error) {
+          if (error.name === "AbortError") throw error;
+          lastError = error;
+          if (!(error instanceof TypeError)) break;
         }
-        const hasTranscript = Boolean(currentTranscript());
-        if (hasTranscript) {
-          const threshold = Math.max(continuedSpeechThreshold, noiseFloor * 2.0 + 0.01);
-          if (volume > threshold) {
-            lastTranscriptAt = now;
-          } else if (now - (lastTranscriptAt || lastVoiceAt) > transcriptQuietLimit()) {
-            finishUtterance();
+      }
+      throw lastError || new Error("Local speech service is unavailable.");
+    }
+    function current(id) { return id === generation; }
+    function interruptAudio() {
+      ownInterruptAt = Date.now();
+      localStorage.setItem(interruptKey, String(ownInterruptAt));
+    }
+    function stopCapture() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.onstop = null;
+        recorder.ondataavailable = null;
+        recorder.stop();
+      }
+      recorder = null;
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      if (context) context.close().catch(() => {});
+      context = null;
+      analyser = null;
+      samples = null;
+      chunks = [];
+      painter.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    function cancelCurrent(message = "Recording cancelled.") {
+      generation++;
+      if (uploadController) uploadController.abort();
+      uploadController = null;
+      const oldSession = sessionId;
+      const oldRequest = requestId;
+      const pendingBegin = beginPromise;
+      if (oldSession && oldRequest) {
+        const cancelOld = () => apiFetch("/qa/sessions/" + encodeURIComponent(oldSession) +
+          "/cancel?request_id=" + encodeURIComponent(oldRequest),
+          {method: "POST", keepalive: true}).catch(() => {});
+        if (pendingBegin) pendingBegin.then(cancelOld, cancelOld);
+        else cancelOld();
+      }
+      requestId = "";
+      beginPromise = null;
+      stopCapture();
+      localStorage.removeItem(waitingKey);
+      show("idle", message);
+    }
+    async function acquireMeter(id) {
+      if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        throw new Error("This browser cannot record microphone audio.");
+      }
+      const acquiredStream = await navigator.mediaDevices.getUserMedia({audio: {
+        channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true
+      }});
+      if (!current(id)) {
+        acquiredStream.getTracks().forEach(track => track.stop());
+        return false;
+      }
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      const acquiredContext = new AudioContext();
+      try {
+        await acquiredContext.resume();
+        if (!current(id)) {
+          acquiredStream.getTracks().forEach(track => track.stop());
+          await acquiredContext.close();
+          return false;
+        }
+        const acquiredAnalyser = acquiredContext.createAnalyser();
+        acquiredAnalyser.fftSize = 512;
+        acquiredContext.createMediaStreamSource(acquiredStream).connect(acquiredAnalyser);
+        stream = acquiredStream;
+        context = acquiredContext;
+        analyser = acquiredAnalyser;
+        samples = new Uint8Array(analyser.fftSize);
+        return true;
+      } catch (error) {
+        acquiredStream.getTracks().forEach(track => track.stop());
+        acquiredContext.close().catch(() => {});
+        throw error;
+      }
+    }
+    function volume() {
+      analyser.getByteTimeDomainData(samples);
+      let squared = 0;
+      for (const value of samples) {
+        const amplitude = (value - 128) / 128;
+        squared += amplitude * amplitude;
+      }
+      return Math.sqrt(squared / samples.length);
+    }
+    function draw(level) {
+      painter.clearRect(0, 0, canvas.width, canvas.height);
+      painter.fillStyle = "rgba(9,14,24,.54)";
+      painter.fillRect(0, 0, canvas.width, canvas.height);
+      painter.fillStyle = "rgba(82,214,180,.7)";
+      for (let i = 0; i < 28; i++) {
+        const height = Math.max(3, Math.min(70, 4 + level * 440 * (0.55 + Math.sin(i * 2.1) * 0.3)));
+        painter.fillRect(i * 9.3, (76 - height) / 2, 6, height);
+      }
+    }
+    function tick(id) {
+      if (!current(id) || !analyser) return;
+      const now = Date.now();
+      const level = volume();
+      draw(level);
+      if (phase === "listening") {
+        const threshold = Math.max(0.018, noiseFloor * 2.5 + 0.006);
+        if (level > threshold) {
+          if (!candidateAt) candidateAt = now;
+          if (now - candidateAt >= (settings.speech_confirm_ms || 150)) {
+            heardSpeech = true;
+            lastSpeechAt = now;
+            statusText.textContent = "Speech detected. Listening...";
+          }
+        } else {
+          candidateAt = 0;
+          if (!heardSpeech) noiseFloor = noiseFloor * 0.96 + level * 0.04;
+        }
+        if (!heardSpeech && now - startedAt > (settings.no_speech_timeout_seconds || 10) * 1000) {
+          cancelCurrent("No speech detected. Please try again.");
+          return;
+        }
+        if (heardSpeech && now - lastSpeechAt > (settings.silence_ms || 1100)) {
+          finishRecording(id);
+          return;
+        }
+        if (now - startedAt > (settings.max_recording_seconds || 30) * 1000) {
+          finishRecording(id);
+          return;
+        }
+      } else if (phase === "waiting") {
+        const speaking = Date.now() - Number(localStorage.getItem(speakingKey) || 0) < 1800;
+        const threshold = Math.max(speaking ? 0.09 : 0.045, noiseFloor * 3 + 0.02);
+        if (level > threshold) {
+          if (!waitingCandidateAt) waitingCandidateAt = now;
+          if (now - waitingCandidateAt > 300) {
+            stopCapture();
+            startListening();
             return;
           }
-        } else if (!calibrating(now) && volume > activeVoiceThreshold()) {
-          if (!speechCandidateAt) speechCandidateAt = now;
-          if (now - speechCandidateAt >= speechConfirmationMs) {
-            heardSpeech = true;
-            lastVoiceAt = now;
-          }
-        } else if (!heardSpeech) {
-          speechCandidateAt = 0;
-        } else if (heardSpeech && now - lastVoiceAt > noTranscriptSilenceLimitMs) {
-          finishUtterance();
-          return;
-        }
-      } else if (!calibrating(now) && isWaitingForAssistant() && !inputIsSuppressed()) {
-        const speaking = assistantIsSpeaking();
-        const bargeInThreshold = activeVoiceThreshold(true, speaking);
-        if (volume > bargeInThreshold) {
-          if (!interruptVoiceStartedAt) interruptVoiceStartedAt = now;
-          if (now - interruptVoiceStartedAt > interruptHoldMs) {
-            interruptAndListen();
-          }
         } else {
-          interruptVoiceStartedAt = 0;
+          waitingCandidateAt = 0;
+          noiseFloor = noiseFloor * 0.98 + level * 0.02;
         }
       }
-
-      const width = canvas.width;
-      const height = canvas.height;
-      const bars = 34;
-      const gap = 3;
-      const barWidth = (width - gap * (bars - 1)) / bars;
-      canvasContext.clearRect(0, 0, width, height);
-      canvasContext.fillStyle = "rgba(9, 14, 24, 0.45)";
-      canvasContext.fillRect(0, 0, width, height);
-
-      for (let index = 0; index < bars; index += 1) {
-        const sampleIndex = Math.floor((index / bars) * waveData.length);
-        const sample = Math.abs((waveData[sampleIndex] - 128) / 128);
-        const pulse = 0.35 + sample * 1.8 + volume * 1.2;
-        const barHeight = Math.max(4, Math.min(height - 8, pulse * height * 0.45));
-        const x = index * (barWidth + gap);
-        const y = (height - barHeight) / 2;
-        const intensity = Math.min(1, 0.38 + volume * 0.62);
-        canvasContext.fillStyle = `rgba(${Math.round(82 + 45 * intensity)}, ${Math.round(214 + 22 * intensity)}, ${Math.round(180 + 20 * intensity)}, ${0.35 + intensity * 0.55})`;
-        canvasContext.fillRect(x, y, barWidth, barHeight);
-      }
-
-      animationId = requestAnimationFrame(drawLiveWave);
+      raf = requestAnimationFrame(() => tick(id));
     }
-
-    async function startMeter() {
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      audioContext = new AudioContext();
-      analyser = audioContext.createAnalyser();
-      analyser.fftSize = 512;
-      waveData = new Uint8Array(analyser.fftSize);
-      const source = audioContext.createMediaStreamSource(mediaStream);
-      source.connect(analyser);
-      calibrationStartedAt = Date.now();
-      calibrationSamples = [];
-      noiseFloor = 0.008;
-      speechCandidateAt = 0;
-      drawLiveWave();
-    }
-
-    function startRecorder() {
-      if (!mediaStream || !window.MediaRecorder || (mediaRecorder && mediaRecorder.state === "recording")) {
-        return;
-      }
-      recordedChunks = [];
-      const mimeCandidates = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm"];
-      recordingMime = mimeCandidates.find((mime) => MediaRecorder.isTypeSupported(mime)) || "";
-      mediaRecorder = recordingMime
-        ? new MediaRecorder(mediaStream, { mimeType: recordingMime })
-        : new MediaRecorder(mediaStream);
-      recordingMime = mediaRecorder.mimeType || recordingMime || "audio/webm";
-      mediaRecorder.addEventListener("dataavailable", (event) => {
-        if (event.data && event.data.size) recordedChunks.push(event.data);
-      });
-      mediaRecorder.start(200);
-    }
-
-    function discardRecording() {
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.onstop = null;
-        mediaRecorder.stop();
-      }
-      mediaRecorder = null;
-      recordedChunks = [];
-      submissionPending = false;
-    }
-
-    function submitRecordedAudio(fallbackText = "") {
-      if (submissionPending) return;
-      submissionPending = true;
-      const recorder = mediaRecorder;
-      if (!recorder || recorder.state === "inactive") {
-        submissionPending = false;
-        const submitted = submitTranscript(fallbackText);
-        stopMeter();
-        if (!submitted) {
-          statusText.textContent = "I did not catch speech yet.";
-          setButtonState("idle");
-        }
-        return;
-      }
-
-      recorder.addEventListener("stop", () => {
-        const blob = new Blob(recordedChunks, { type: recordingMime || "audio/webm" });
-        mediaRecorder = null;
-        recordedChunks = [];
-        stopMeter();
-        if (!blob.size) {
-          submissionPending = false;
-          submitTranscript(fallbackText);
-          return;
-        }
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const encoded = String(reader.result || "").split(",", 2)[1] || "";
-          setComponentValue({
-            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-            text: "",
-            transcript_hint: fallbackText,
-            audio_b64: encoded,
-            audio_mime: blob.type || recordingMime || "audio/webm",
-          });
-          localStorage.setItem(storageModeKey, "on");
-          localStorage.setItem(storageWaitingKey, String(Date.now()));
-          setButtonState("waiting");
-          statusText.textContent = "Transcribing locally...";
-          submissionPending = false;
-        };
-        reader.readAsDataURL(blob);
-      }, { once: true });
-      recorder.stop();
-    }
-
-    function stopMeter() {
-      if (animationId) {
-        cancelAnimationFrame(animationId);
-        animationId = null;
-      }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((track) => track.stop());
-        mediaStream = null;
-      }
-      if (audioContext) {
-        audioContext.close();
-        audioContext = null;
-      }
-      analyser = null;
-      waveData = null;
-      drawIdleWave();
-    }
-
-    function finishUtterance() {
-      if (!listening) return;
-      listening = false;
-      statusText.textContent = "";
-      if (!heardSpeech && !currentTranscript()) {
-        discardRecording();
-        stopMeter();
-        statusText.textContent = "I did not hear clear speech. Please try again.";
-        setButtonState("idle");
-        return;
-      }
-      if (recognition) {
-        recognition.stop();
-      } else {
-        submitRecordedAudio(latestTranscript);
-      }
-    }
-
-    function buildRecognition() {
-      const instance = new SpeechRecognition();
-      instance.lang = navigator.language || "en-IN";
-      if (!["en", "hi"].includes(instance.lang.slice(0, 2).toLowerCase())) {
-        instance.lang = "en-IN";
-      }
-      instance.continuous = true;
-      instance.interimResults = true;
-
-      instance.onresult = (event) => {
-        interimTranscript = "";
-        for (let index = event.resultIndex; index < event.results.length; index += 1) {
-          const transcript = event.results[index][0].transcript;
-          if (event.results[index].isFinal) {
-            finalTranscript = `${finalTranscript} ${transcript}`.trim();
-          } else {
-            interimTranscript = `${interimTranscript} ${transcript}`.trim();
-          }
-        }
-
-        latestTranscript = [finalTranscript, interimTranscript].filter(Boolean).join(" ").trim();
-        if (latestTranscript) {
-          heardSpeech = true;
-          const now = Date.now();
-          lastVoiceAt = now;
-          lastTranscriptAt = now;
-        }
-        if (listening) {
-          preview.textContent = latestTranscript;
-          statusText.textContent = "Listening...";
-        }
-      };
-
-      instance.onerror = (event) => {
-        recognition = null;
-        if (interruptArmed && !listening) {
-          if (event.error !== "no-speech" && event.error !== "aborted") {
-            console.info(`Interrupt recognition paused: ${event.error}`);
-          }
-          return;
-        }
-        if (listening) {
-          listening = false;
-          statusText.textContent = "Using offline speech recognition...";
-          submitRecordedAudio(currentTranscript());
-        }
-      };
-
-      instance.onend = () => {
-        recognition = null;
-        if (interruptArmed && !listening) {
-          finalTranscript = "";
-          interimTranscript = "";
-          latestTranscript = "";
-          window.setTimeout(startInterruptMeter, resumeDelayMs);
-          return;
-        }
-        const transcript = (latestTranscript || finalTranscript || interimTranscript).trim();
-        submitRecordedAudio(transcript);
-      };
-
-      return instance;
-    }
-
     async function startListening() {
-      if (listening || interruptPending) return;
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        statusText.textContent = "Microphone access is not available in this browser.";
-        return;
-      }
-
-      finalTranscript = "";
-      interimTranscript = "";
-      latestTranscript = "";
-      interruptArmed = false;
-      localStorage.removeItem(storageWaitingKey);
-      heardSpeech = false;
-      speechCandidateAt = 0;
-      lastVoiceAt = Date.now();
-      lastTranscriptAt = 0;
+      if (!sessionId) { show("error", "Conversation is not ready. Please retry."); return; }
+      if (phase === "listening" || phase === "permission" || phase === "processing") cancelCurrent();
+      const id = ++generation;
+      stopCapture();
+      if (uploadController) uploadController.abort();
+      uploadController = null;
+      requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+      interruptAudio();
+      localStorage.setItem(modeKey, "on");
+      localStorage.removeItem(waitingKey);
+      const newRequestId = requestId;
+      const newSessionId = sessionId;
+      beginPromise = beginChain.catch(() => {}).then(() =>
+        apiFetch("/qa/sessions/" + encodeURIComponent(newSessionId) + "/interactions", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({request_id: newRequestId})
+        })
+      );
+      beginChain = beginPromise;
+      beginPromise.catch(error => {
+        if (current(id)) cancelCurrent(error.message || "The local speech service is unavailable.");
+      });
+      show("permission", "Requesting microphone permission...");
       preview.textContent = "";
-      listening = true;
-      setButtonState("listening");
-      statusText.textContent = "Listening...";
-
       try {
-        await startMeter();
-        startRecorder();
-        if (SpeechRecognition) {
-          recognition = buildRecognition();
-          recognition.start();
-        } else {
-          statusText.textContent = "Listening with offline speech recognition...";
+        if (!await acquireMeter(id)) return;
+        const choices = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4"];
+        mime = choices.find(candidate => MediaRecorder.isTypeSupported(candidate)) || "";
+        recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
+        mime = recorder.mimeType || mime;
+        if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(mime.split(";", 1)[0])) {
+          throw new Error("This browser's recording format is not supported.");
         }
+        chunks = [];
+        recorder.ondataavailable = event => { if (current(id) && event.data?.size) chunks.push(event.data); };
+        recorder.onerror = () => { if (current(id)) cancelCurrent("Microphone recording failed. Please retry."); };
+        recorder.start(settings.recording_buffer_ms || 250);
+        startedAt = Date.now();
+        lastSpeechAt = 0;
+        candidateAt = 0;
+        heardSpeech = false;
+        noiseFloor = 0.005;
+        show("listening", "Listening... Tap to stop.");
+        tick(id);
       } catch (error) {
-        console.error(error);
-        listening = false;
-        setButtonState("idle");
-        stopMeter();
-        statusText.textContent = "Microphone could not start.";
+        if (current(id)) cancelCurrent(error.name === "NotAllowedError"
+          ? "Microphone permission denied." : (error.message || "Microphone could not start."));
       }
     }
-
-    async function startInterruptMeter() {
-      if (listening || interruptPending || !isWaitingForAssistant()) return;
+    async function finishRecording(id) {
+      if (!current(id) || phase !== "listening") return;
+      show("processing", "Processing audio locally...");
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      const activeRecorder = recorder;
+      if (!activeRecorder || activeRecorder.state === "inactive") {
+        cancelCurrent("The recording stopped unexpectedly. Please retry.");
+        return;
+      }
+      const stopped = new Promise(resolve => { activeRecorder.onstop = resolve; });
+      activeRecorder.stop();
+      await stopped;
+      if (!current(id)) return;
+      const blob = new Blob(chunks, {type: mime});
+      stopCapture();
+      if (!blob.size) { cancelCurrent("The recording was empty. Please retry."); return; }
+      const extension = mime.startsWith("audio/ogg") ? "ogg" : mime.startsWith("audio/mp4") ? "m4a" : "webm";
+      const form = new FormData();
+      form.append("audio", blob, "recording." + extension);
+      form.append("session_id", sessionId);
+      form.append("request_id", requestId);
+      uploadController = new AbortController();
+      const timeout = setTimeout(() => uploadController?.abort(), (settings.stt_timeout_seconds || 90) * 1000);
       try {
-        interruptArmed = true;
-        if (!mediaStream) await startMeter();
-        if (!isWaitingForAssistant() || listening) return;
-        if (SpeechRecognition && !recognition) {
-          finalTranscript = "";
-          interimTranscript = "";
-          latestTranscript = "";
-          recognition = buildRecognition();
-          recognition.start();
-        }
-        setButtonState("waiting");
-        statusText.textContent = assistantIsSpeaking()
-          ? "KHOJ is speaking. Speak or tap to interrupt."
-          : "Speak anytime. I can catch the next question.";
+        await beginPromise;
+        if (!current(id)) return;
+        const result = await apiFetch("/stt/transcribe", {
+          method: "POST", body: form, signal: uploadController.signal
+        });
+        if (!current(id)) return;
+        const text = String(result.text || "").trim();
+        if (!text) throw new Error("Speech was not detected. Please try again.");
+        preview.textContent = text;
+        show("waiting", "Transcription completed. Query submitted.");
+        localStorage.setItem(waitingKey, String(Date.now()));
+        send("streamlit:setComponentValue", {
+          value: {id: requestId, request_id: requestId, input_type: "audio", text},
+          dataType: "json"
+        });
+        startWaitingMonitor();
       } catch (error) {
-        console.info("Interrupt listening could not start yet.", error);
+        if (current(id)) cancelCurrent(error.name === "AbortError"
+          ? "Transcription timed out or was cancelled." : (error.message || "Transcription failed."));
+      } finally {
+        clearTimeout(timeout);
+        uploadController = null;
       }
     }
-
-    function endConversation() {
-      localStorage.setItem(storageModeKey, "off");
-      localStorage.removeItem(storageWaitingKey);
-      listening = false;
-      interruptArmed = false;
-      if (recognition) {
-        recognition.abort();
-        recognition = null;
+    async function startWaitingMonitor() {
+      if (phase !== "waiting" || stream || waitingMeterPending) return;
+      const id = generation;
+      waitingMeterPending = true;
+      try {
+        if (!await acquireMeter(id)) return;
+        if (phase !== "waiting") { stopCapture(); return; }
+        waitingCandidateAt = 0;
+        tick(id);
+      } catch (_) {
+        if (current(id)) statusText.textContent = "Tap Interrupt to ask another question.";
+      } finally {
+        waitingMeterPending = false;
       }
-      discardRecording();
-      stopMeter();
-      setButtonState("idle");
-      statusText.textContent = "Conversation paused.";
     }
-
-    function interruptAndListen() {
-      if (listening || interruptPending) return;
-      interruptPending = true;
-      const recognitionAlreadyRunning = Boolean(recognition);
-      requestAvatarInterrupt();
-      localStorage.setItem(storageModeKey, "on");
-      localStorage.removeItem(storageWaitingKey);
-      interruptVoiceStartedAt = 0;
-      interruptArmed = false;
-      listening = true;
-      heardSpeech = heardSpeech || Boolean(currentTranscript());
-      lastVoiceAt = Date.now();
-      preview.textContent = currentTranscript();
-      setButtonState("listening");
-      statusText.textContent = "Listening...";
-
-      if (recognitionAlreadyRunning) {
-        startRecorder();
-        interruptPending = false;
-        return;
+    button.addEventListener("click", () => {
+      if (phase === "listening") finishRecording(generation);
+      else if (phase === "permission" || phase === "processing") cancelCurrent();
+      else startListening();
+    });
+    window.addEventListener("keydown", event => {
+      if (event.key === "Escape" && ["permission", "listening", "processing", "waiting"].includes(phase)) {
+        cancelCurrent("Voice interaction cancelled.");
       }
-
-      listening = false;
-      stopMeter();
-      window.setTimeout(() => {
-        interruptPending = false;
-        startListening();
-      }, resumeDelayMs);
-    }
-
-    function handleButtonClick() {
-      if (listening) {
-        finishUtterance();
-        return;
+    });
+    window.addEventListener("storage", event => {
+      if (event.key === interruptKey && Number(event.newValue || 0) > ownInterruptAt && phase !== "idle") {
+        cancelCurrent("Interrupted by a newer query.");
       }
-      if (isWaitingForAssistant()) {
-        interruptAndListen();
-        return;
-      }
-      localStorage.setItem(storageModeKey, "on");
-      startListening();
-    }
-
-    function maybeResumeAfterAvatar() {
-      const mode = localStorage.getItem(storageModeKey);
-      const resumeAt = localStorage.getItem(storageResumeKey) || "";
-      if (mode === "on" && resumeAt && resumeAt !== lastResumeAt && !listening) {
+    });
+    setInterval(() => {
+      const resumeAt = localStorage.getItem(resumeKey) || "";
+      if (resumeAt && resumeAt !== lastResumeAt) {
         lastResumeAt = resumeAt;
-        localStorage.removeItem(storageWaitingKey);
-        if (recognition && interruptArmed) {
-          finalTranscript = "";
-          interimTranscript = "";
-          latestTranscript = "";
-          interruptArmed = false;
-          heardSpeech = false;
-          lastVoiceAt = Date.now();
-          lastTranscriptAt = 0;
-          preview.textContent = "";
-          listening = true;
-          setButtonState("listening");
-          statusText.textContent = "Listening...";
-          return;
+        if (phase === "waiting") {
+          stopCapture();
+          startListening();
         }
-        interruptArmed = false;
-        stopMeter();
-        window.setTimeout(startListening, resumeDelayMs);
       }
-    }
-
-    button.addEventListener("click", handleButtonClick);
-    window.addEventListener("storage", maybeResumeAfterAvatar);
-    window.setInterval(() => {
-      maybeResumeAfterAvatar();
-      startInterruptMeter();
-    }, resumePollMs);
-
-    setComponentReady();
-    drawIdleWave();
-
-    const waitingSince = Number(localStorage.getItem(storageWaitingKey) || 0);
-    const waitingIsFresh = waitingSince > 0 && Date.now() - waitingSince < waitingFreshMs;
-    if (localStorage.getItem(storageModeKey) === "on" && waitingIsFresh) {
-      setButtonState("waiting");
-      statusText.textContent = "I'll listen next. Speak or tap to interrupt.";
-      startInterruptMeter();
+    }, 250);
+    window.addEventListener("beforeunload", () => {
+      if (uploadController) uploadController.abort();
+      stopCapture();
+    });
+    const waitingAt = Number(localStorage.getItem(waitingKey) || 0);
+    if (localStorage.getItem(modeKey) === "on" && waitingAt && Date.now() - waitingAt < 300000) {
+      show("waiting", "Speak or tap to interrupt.");
+      if (sessionId) startWaitingMonitor();
     } else {
-      localStorage.setItem(storageModeKey, "off");
-      localStorage.removeItem(storageWaitingKey);
-      setButtonState("idle");
+      show("idle", "Tap once and speak naturally.");
     }
   </script>
 </body>

@@ -1,6 +1,7 @@
 import json
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 
 from helpers.request_models import QARequest, QAResponse
@@ -21,6 +22,7 @@ def ask_question(payload: QARequest) -> QAResponse:
             chat_history=payload.chat_history,
             session_id=payload.session_id,
             request_id=payload.request_id,
+            input_type=payload.input_type,
         )
     except QAEngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -37,6 +39,7 @@ def stream_question(payload: QARequest) -> StreamingResponse:
                 chat_history=payload.chat_history,
                 session_id=payload.session_id,
                 request_id=payload.request_id,
+                input_type=payload.input_type,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except QAEngineError as exc:
@@ -54,6 +57,18 @@ def stream_question(payload: QARequest) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+class VoiceInteraction(BaseModel):
+    request_id: str = Field(..., min_length=1, max_length=128)
+
+
+@router.post("/sessions/{session_id}/interactions")
+def begin_voice_interaction(session_id: str, payload: VoiceInteraction) -> dict:
+    if len(session_id) > 128:
+        raise HTTPException(status_code=422, detail="Session ID is too long.")
+    request = registry.begin(session_id, payload.request_id, input_type="audio", status="recording")
+    return {"session_id": request.session_id, "request_id": request.request_id, "status": request.status}
 
 
 @router.post("/sessions/{session_id}/cancel")

@@ -85,10 +85,16 @@ def response_language(question: str) -> str:
 
 def language_instruction(code: str) -> str:
     if code == "hinglish":
-        script = "Devanagari Hindi with Latin technical terms" if config.HINGLISH_SCRIPT == "mixed" else "natural Roman Hindi and English"
-        return f"Reply in natural Hinglish using {script}. Keep technical identifiers unchanged."
+        return (
+            "Reply in natural Roman-script Hinglish with consistent Hindi spellings and standard "
+            "English technical terms. Do not switch to Devanagari unless the message does. "
+            "Keep product names, code, acronyms and identifiers exactly as written."
+        )
     if code == "hi":
-        return "Reply in natural Hindi in Devanagari. Keep technical identifiers unchanged."
+        return (
+            "Reply in grammatical Hindi in Devanagari with correct spelling and matras. "
+            "Keep English technical terms, product names, code, acronyms and identifiers unchanged."
+        )
     if code == "en":
-        return "Reply in natural English. Keep technical identifiers unchanged."
+        return "Reply in grammatical English with standard spelling. Keep technical identifiers unchanged."
     return f"Reply in the user's language ({code}). Keep technical identifiers unchanged."
