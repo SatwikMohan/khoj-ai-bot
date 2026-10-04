@@ -19,7 +19,8 @@ ROMAN_HINDI = {
     "aap", "hai", "hain", "kya", "kaise", "kaisa", "kaisi", "mujhe",
     "batao", "bataye", "bataiye", "kripya", "dhanyavad", "shukriya",
     "namaste", "nahi", "mera", "meri", "hoga", "karo", "samjhao",
-    "chahiye", "mein", "se", "ka", "ki", "ke",
+    "chahiye", "mein", "se", "ka", "ki", "ke", "yaar", "kal",
+    "jaana", "jana", "karna", "aaj", "aur", "ko", "yaad", "dilao",
 }
 ENGLISH_CLUES = {"the", "and", "is", "are", "what", "which", "with", "from", "this", "that", "their", "into", "before", "after"}
 SHORT_LANGUAGE_WORDS = {

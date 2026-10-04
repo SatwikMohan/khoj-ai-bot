@@ -2,9 +2,12 @@ import tempfile
 import unittest
 import io
 import wave
-import numpy as np
 from pathlib import Path
 from unittest.mock import patch
+
+import numpy as np
+
+import config
 
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
@@ -224,7 +227,7 @@ class SpeechReliabilityTests(unittest.TestCase):
 
     def test_hinglish_auto_tts_uses_piper_without_reference_audio(self):
         with tempfile.TemporaryDirectory() as directory:
-            for voice in ("hi_IN-pratham-medium", "en_US-lessac-medium"):
+            for voice in (config.PIPER_HINDI_VOICE, config.PIPER_ENGLISH_VOICE):
                 (Path(directory) / f"{voice}.onnx").write_bytes(b"test")
                 (Path(directory) / f"{voice}.onnx.json").write_text("{}")
             environment = {

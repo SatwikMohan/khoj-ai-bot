@@ -1,4 +1,6 @@
 import json
+import io
+import wave
 import tempfile
 import threading
 import unittest
@@ -207,7 +209,13 @@ class LanguageAndVoiceTests(unittest.TestCase):
 
             def run(*args, **kwargs):
                 calls.append(json.loads(kwargs["input"])["model"])
-                return SimpleNamespace(returncode=0, stdout=b"audio")
+                output = io.BytesIO()
+                with wave.open(output, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(22050)
+                    wav.writeframes(b"\x00\x10" * 2205)
+                return SimpleNamespace(returncode=0, stdout=output.getvalue())
 
             with patch.object(config, "PIPER_MODEL_DIR", directory), patch("services.tts_service.subprocess.run", side_effect=run):
                 _synthesize_piper_speech(TTSRequest(text="English answer", language="en"))

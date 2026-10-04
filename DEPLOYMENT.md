@@ -66,18 +66,25 @@ The default is Piper CPU speech, using local `.onnx` and `.onnx.json` files:
 ```python
 TTS_ENGINE = "piper"
 PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
-PIPER_ENGLISH_VOICE = "en_US-lessac-medium"
-TTS_FALLBACK_ENGINES = "espeak"
+PIPER_ENGLISH_VOICE = "en_IN-spicor-english"
+PIPER_DEVICE = "cpu"
+TTS_FALLBACK_ENGINES = ""
 TTS_TIMEOUT_SECONDS = 45
 RESPONSE_LANGUAGE = "auto"
-HINGLISH_SCRIPT = "mixed"
+HINGLISH_SCRIPT = "roman"
 ```
 
-Hindi words should be written in Devanagari. English terms may remain in Latin
-script; code-switching pronunciation is model-dependent and should be listened
-to on representative answers. The Hindi voice is a preset speaker, not a voice
-clone. The espeak-ng fallback is less natural but works offline when installed.
-Set `TTS_FALLBACK_ENGINES = ""` to disable that fallback. Selected engines appear in
+Speech-only phrase routing transliterates a curated set of Romanized Hindi
+words and sends English technical terms to the English phonemizer. Displayed
+chat text remains unchanged. The Hindi and English voices are separate speakers.
+The selected English default is the Indian English `en_IN-spicor-english`.
+Its repository labels the checkpoint AGPL-3.0; review the terms for deployment.
+`scripts/provision_models.py --only-tts` downloads this third-party model
+and JSON with pinned SHA256 verification. Stage the files under
+`backend/models/piper` locally or `/models/piper` in Docker for offline use.
+Comparison clips are under `backend/evals/voice_samples`.
+The espeak-ng fallback is less natural but works offline when installed.
+Set `TTS_FALLBACK_ENGINES = "espeak"` to enable that optional fallback. Selected engines appear in
 the `tts_completed` log event. Reference recordings, transcripts and gated HF
 access are no longer used by the default speech stack.
 
@@ -85,12 +92,13 @@ Locally, voices default to `backend/models/piper`. In Docker, `config.py` select
 `PIPER_MODEL_DIR = "/models/piper"` in the persistent `ai_models` volume.
 Set `PIPER_MODEL_DIR` explicitly only if you use a different local directory.
 Voice values may also be absolute paths to compatible Piper ONNX models.
-Both Hindi and English models are provisioned and checked. The query text selects
+PIPER_DEVICE defaults to CPU; CUDA requires an ARM64-compatible ONNX Runtime GPU
+installation in the Spark container. Both active Hindi and English models are
+provisioned and checked. The query text selects
 the answer language automatically. `langid` handles longer Latin-script queries
 offline; script and Hinglish rules handle shorter ones. Ambiguous short queries
 fall back to English. `PIPER_ADDITIONAL_VOICES` maps other ISO language codes to
-locally installed Piper voices. Other languages use installed `espeak-ng` voices
-when available; `espeak-ng --voices` lists them. If no voice supports the language,
+locally installed Piper voices. Other languages require a configured Piper voice, or an installed `espeak-ng` voice when the fallback is enabled; `espeak-ng --voices` lists them. If no voice supports the language,
 the text answer remains visible and speech returns a clear error.
 
 Provision once with internet access, or copy the model files from a connected
@@ -285,12 +293,12 @@ repair the DGX network automatically.
 On a connected machine with the project dependencies installed:
 
 ```bash
-python -m piper.download_voices hi_IN-pratham-medium en_US-lessac-medium --download-dir ./piper-voices
+python backend/scripts/provision_models.py --only-tts
 ```
 
-Copy the resulting `piper-voices` directory (two `.onnx` and two `.onnx.json`
-files) into the project directory on the DGX. Substitute your configured voice
-names if changed. Import and verify them without internet:
+Copy the resulting `backend/models/piper` directory (the selected Hindi and
+Indian English `.onnx` and adjacent `.onnx.json` files) into the project
+directory on the DGX as `piper-voices`. Import and verify them without internet:
 
 ```bash
 docker compose run --rm --no-deps -v "$PWD/piper-voices:/voice-import:ro" backend-model-init sh -c 'mkdir -p /models/piper && cp /voice-import/*.onnx /voice-import/*.onnx.json /models/piper/'

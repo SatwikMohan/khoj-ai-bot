@@ -66,7 +66,7 @@ API_HOST = "0.0.0.0"
 API_PORT = 8000
 API_LOG_LEVEL = "info"
 TEXMIN_HOST = "localhost"
-AVATAR_MODEL_FILE = "assets/scene.gltf"  # Retained for older deployments.
+AVATAR_MODEL_FILE = "assets/scene.gltf"  # Original local GLTF avatar, resolved from frontend/.
 AVATAR_ENABLED = True
 TTS_ENABLED = True
 TTS_MAX_WORDS = 140
@@ -144,7 +144,18 @@ STT_REQUEST_TIMEOUT_SECONDS = 90
 # Reference-free offline speech.
 TTS_ENGINE = "piper"
 PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
-PIPER_ENGLISH_VOICE = "en_US-lessac-medium"
+PIPER_INDIAN_ENGLISH_VOICE = "en_IN-spicor-english"
+PIPER_ENGLISH_VOICE = PIPER_INDIAN_ENGLISH_VOICE  # Selected after local listening comparison.
+# Third-party voice is absent from Piper's registry. Provision with pinned file hashes.
+PIPER_CUSTOM_VOICE_SOURCES = {
+    "en_IN-spicor-english": {
+        "model_url": "https://huggingface.co/navgurukul-ai-labs/text-to-speech-en-IN-piper/resolve/main/en_IN-dataset%3Dspicor-english-base%3Dljspeech-epochs%3D1089.onnx",
+        "model_sha256": "e19debae94b70ecc9d22603820373c4dc9bfceb4de8675e1138d2072fca11494",
+        "config_url": "https://huggingface.co/navgurukul-ai-labs/text-to-speech-en-IN-piper/resolve/main/en_IN-dataset%3Dspicor-english-base%3Dljspeech-epochs%3D1089.onnx.json",
+        "config_sha256": "108c16883ad72e74f8c1894dd75b045fc955d4c3b338e4a501737cf6c85ce99e",
+    },
+}
+PIPER_DEVICE = "cpu"  # "cuda" requires a compatible ONNX Runtime GPU build on the deployment host.
 # Optional ISO 639-1 code to installed Piper voice name or absolute ONNX path.
 PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
 TTS_PRELOAD_VOICES = True
@@ -165,7 +176,6 @@ TTS_TONE = "warm"
 TTS_RATE = "+0%"
 TTS_PITCH = "+0Hz"
 TTS_VOICE = "configured"
-TTS_HINGLISH_VOICE_LANGUAGE = "en"  # Roman text must not enter the Hindi phonemizer.
 ESPEAK_RATE = 155
 
 
@@ -189,8 +199,8 @@ def validate_config() -> None:
         raise ValueError("INDEX_MIN_RECALL_AT_5 must be between zero and one.")
     if min(QA_TOP_K, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
         raise ValueError("Retrieval limits must be positive.")
-    if TTS_ENGINE.strip().lower() in {"piper", "auto"} and TTS_HINGLISH_VOICE_LANGUAGE != "en":
-        raise ValueError("Roman Hinglish requires the English Piper phonemizer.")
+    if PIPER_DEVICE not in {"cpu", "cuda"}:
+        raise ValueError("PIPER_DEVICE must be cpu or cuda.")
     if OFFLINE_MODE and TTS_ENGINE.strip().lower() in {"edge", "edge-tts"}:
         raise ValueError("Edge TTS requires internet and cannot be the offline speech engine.")
 

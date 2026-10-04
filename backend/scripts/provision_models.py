@@ -1,8 +1,9 @@
 import argparse
+import hashlib
 import sys
-import os
-import json
+import tempfile
 from pathlib import Path
+from urllib.request import urlopen
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +42,49 @@ def provision_whisper() -> None:
     )
 
 
+def _matches_sha256(path: Path, expected: str) -> bool:
+    if not path.is_file():
+        return False
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest() == expected.lower()
+
+
+def _download_pinned_file(destination: Path, url: str, expected_sha256: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=destination.name + ".", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            digest = hashlib.sha256()
+            with urlopen(url, timeout=120) as response:
+                for block in iter(lambda: response.read(1024 * 1024), b""):
+                    temporary.write(block)
+                    digest.update(block)
+        if digest.hexdigest() != expected_sha256.lower():
+            raise RuntimeError(f"SHA256 mismatch for {destination.name}")
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _provision_custom_voice(path: Path, source: dict[str, str], offline: bool) -> None:
+    files = (
+        (path, source["model_url"], source["model_sha256"]),
+        (Path(str(path) + ".json"), source["config_url"], source["config_sha256"]),
+    )
+    for destination, url, expected in files:
+        if _matches_sha256(destination, expected):
+            continue
+        if offline:
+            raise RuntimeError(f"Missing or mismatched offline voice: {destination}")
+        print(f"Downloading and verifying {destination.name}", flush=True)
+        _download_pinned_file(destination, url, expected)
+
+
 def provision_tts(offline: bool = False) -> None:
     from helpers.request_models import TTSRequest
     from services.tts_service import _piper_path, _synthesize_with_engine, _validate_audio
@@ -53,7 +97,10 @@ def provision_tts(offline: bool = False) -> None:
 
         for language in ("hindi", "english", *config.PIPER_ADDITIONAL_VOICES):
             path = _piper_path(language)
-            if not path.is_file() or not Path(str(path) + ".json").is_file():
+            custom_source = config.PIPER_CUSTOM_VOICE_SOURCES.get(path.stem)
+            if custom_source:
+                _provision_custom_voice(path, custom_source, offline)
+            elif not path.is_file() or not Path(str(path) + ".json").is_file():
                 if offline:
                     raise RuntimeError(f"Missing offline voice: {path}")
                 path.parent.mkdir(parents=True, exist_ok=True)

@@ -24,10 +24,11 @@ python -m pip install -r backend/requirements.txt -r frontend/requirements.txt
 python frontend/run_combined.py
 ```
 
-The interface uses two columns: an offline CSS AI visualization and a scrollable conversation.
-Text and voice input remain available beneath the conversation. Retrieval and voice activity
-drive the visualization; there is no settings panel. Configure model selection, TTS, and API
-transport in backend/config.py.
+The interface uses two columns: the original offline GLTF avatar on the left and a
+scrollable conversation on the right. Text and voice input remain available beneath
+the conversation. Listening, retrieval, generation, playback, and interruption drive
+the avatar's available rig motion; there is no settings panel. Configure the avatar
+model, TTS, and API transport in backend/config.py.
 
 The default BACKEND_CALL_MODE value of http calls FastAPI using QA_API_URL.
 The combined deployment runs both services locally. For a separate frontend container, set
@@ -53,9 +54,13 @@ The broader retrieval defaults help the bot compare repeated topics across diffe
 facts, years, rules, figures, and sources instead of answering from the first matching chunk only.
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
-Text-to-speech selects Hindi or English Piper voices from the query language.
-Other languages use a configured local Piper voice or an installed `espeak-ng`
-voice. The response language is detected from the query without a language menu.
+Text-to-speech routes Hindi and English phrases through separate offline Piper
+voices, including known Romanized Hindi and English technical terms in a Hinglish
+response. Displayed chat text remains unchanged. Other languages require a
+configured local Piper voice or an installed espeak-ng fallback. The default
+English Piper voice is the selected Indian English `en_IN-spicor-english`.
+Its repository labels the checkpoint AGPL-3.0; review the terms for deployment.
+See [the avatar and speech report](../AVATAR_TTS_REPORT.md) for test results and limits.
 Set `TTS_ENGINE = "piper"` and run `python scripts/provision_models.py --only-tts` from
 `backend` once to download and verify the voices. No reference WAV is required.
 See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,

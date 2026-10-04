@@ -9,3 +9,6 @@ __pycache__/
 *.log
 raw_data_files/
 /assets/
+backend/evals/voice_samples/
+frontend/tests/avatar_smoke.*
+frontend/tests/avatar_mobile_smoke.*

@@ -14,7 +14,7 @@ def main():
     with contextlib.redirect_stdout(sys.stderr):
         from piper import PiperVoice, SynthesisConfig
 
-        voice = PiperVoice.load(request["model"], use_cuda=False)
+        voice = PiperVoice.load(request["model"], use_cuda=bool(request.get("use_cuda", False)))
         output = io.BytesIO()
         with wave.open(output, "wb") as wav_file:
             voice.synthesize_wav(
@@ -24,10 +24,10 @@ def main():
     sys.stdout.buffer.write(output.getvalue())
 
 
-def persistent_main(model_path: str):
+def persistent_main(model_path: str, use_cuda: bool = False):
     with contextlib.redirect_stdout(sys.stderr):
         from piper import PiperVoice, SynthesisConfig
-        voice = PiperVoice.load(model_path, use_cuda=False)
+        voice = PiperVoice.load(model_path, use_cuda=use_cuda)
     for line in sys.stdin.buffer:
         try:
             request = json.loads(line)
@@ -47,7 +47,7 @@ def persistent_main(model_path: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--persistent":
-        persistent_main(sys.argv[2])
+    if len(sys.argv) in {3, 4} and sys.argv[1] == "--persistent":
+        persistent_main(sys.argv[2], len(sys.argv) == 4 and sys.argv[3] == "cuda")
     else:
         main()

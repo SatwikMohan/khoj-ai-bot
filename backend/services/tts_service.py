@@ -19,6 +19,8 @@ from pathlib import Path
 
 from helpers.request_models import TTSRequest
 from services.language_service import detect_language
+from services.speech_language import speech_phrases, normalize_speech_text
+from services.audio_chunks import join_speech_segments
 from services.request_lifecycle import registry
 
 
@@ -117,7 +119,7 @@ def _markdown_to_spoken_text(text: str, max_words: int) -> str:
     words = spoken.split()
     if len(words) > max_words:
         spoken = " ".join(words[:max_words]).rstrip(" ,;:")
-        spoken += ". I will pause here, so the spoken version stays clear and comfortable."
+        spoken += ("\u0964 \u092e\u0948\u0902 \u092f\u0939\u093e\u0901 \u0930\u0941\u0915\u0924\u093e \u0939\u0942\u0901\u0964" if _contains_devanagari(text) else ". I will pause here.")
 
     return spoken
 
@@ -305,8 +307,9 @@ def tts_runtime_status() -> dict:
         if missing:
             status.update(status="unavailable", error="Missing Piper voice files: " + ", ".join(missing))
         status["voices"] = [str(path) for path in paths]
+        status["device"] = config.PIPER_DEVICE
         status["cross_language_speaker_consistency"] = False
-        status["english_voice_accent"] = "US (configured en_US-lessac-medium)"
+        status["english_voice_accent"] = "Indian" if config.PIPER_ENGLISH_VOICE.startswith("en_IN-") else "not Indian (configured " + config.PIPER_ENGLISH_VOICE + ")"
     elif engine == "espeak":
         if not shutil.which("espeak-ng"):
             status.update(status="unavailable", error="Install espeak-ng for the offline fallback.")
@@ -529,7 +532,7 @@ def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
 def _piper_path(language: str) -> Path:
     directory = Path(config.PIPER_MODEL_DIR)
-    code = {"hindi": "hi", "hinglish": config.TTS_HINGLISH_VOICE_LANGUAGE, "english": "en"}.get(language, language)
+    code = {"hindi": "hi", "english": "en"}.get(language, language)
     name = {"hi": config.PIPER_HINDI_VOICE, "en": config.PIPER_ENGLISH_VOICE, **config.PIPER_ADDITIONAL_VOICES}.get(code)
     if not name:
         raise TTSEngineError(f"No Piper voice is configured for language '{code}'.")
@@ -578,7 +581,7 @@ class PersistentPiperWorker:
             if self.process is None or self.process.poll() is not None:
                 self.close()
                 self.process = subprocess.Popen(
-                    [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py"), "--persistent", str(self.path.resolve())],
+                    [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py"), "--persistent", str(self.path.resolve()), config.PIPER_DEVICE],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
@@ -639,41 +642,70 @@ def _close_piper_workers():
 
 
 def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
-    language = payload.language or detect_language(payload.text)
-    # Piper voices are monolingual. Route Roman Hinglish and Latin-only technical
-    # chunks to the English phonemizer; Devanagari goes to the Hindi phonemizer.
-    language = "hi" if _contains_devanagari(payload.text) else (
-        config.TTS_HINGLISH_VOICE_LANGUAGE if language == "hinglish" else "en"
-    )
-    path = _piper_path(language)
-    if not path.is_file() or not Path(str(path) + ".json").is_file():
-        raise TTSEngineError(
-            f"Piper needs {path} and its .onnx.json config. "
-            "Run python scripts/provision_models.py --only-tts first."
-        )
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     if not spoken_text:
         raise TTSEngineError("There is no speakable text.")
+    spoken_text = normalize_speech_text(spoken_text, payload.language)
+    phrases = speech_phrases(spoken_text, payload.language)
+    if not phrases:
+        raise TTSEngineError("There is no speakable text.")
+    jobs = []
+    for language, phrase in phrases:
+        path = _piper_path(language)
+        if not path.is_file() or not Path(str(path) + ".json").is_file():
+            raise TTSEngineError(
+                f"Piper needs {path} and its .onnx.json config. "
+                "Run python scripts/provision_models.py --only-tts first."
+            )
+        jobs.append((path, phrase))
     rate, _, _ = _prosody_settings(payload)
     speed = max(0.65, min(1.5, 1 + _parse_percent(rate) / 100))
-    job = {"model": str(path.resolve()), "text": spoken_text, "length_scale": 1 / speed}
-    if not payload.session_id or not payload.request_id:
+    length_scale = 1 / speed
+    request = None
+    if payload.session_id and payload.request_id:
+        request = registry.current(payload.session_id, payload.request_id)
+        if request is None:
+            raise TTSEngineError("This speech request was cancelled.")
+
+    # Retain the isolated single-clip path for simple calls. Mixed-language
+    # phrases use cached workers so each voice is loaded only once.
+    if len(jobs) == 1 and request is None:
+        path, phrase = jobs[0]
         try:
             result = subprocess.run(
                 [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py")],
-                input=json.dumps(job).encode("utf-8"), capture_output=True,
-                timeout=float(config.TTS_TIMEOUT_SECONDS),
+                input=json.dumps({"model": str(path.resolve()), "text": phrase,
+                                  "length_scale": length_scale,
+                                  "use_cuda": config.PIPER_DEVICE == "cuda"}).encode("utf-8"),
+                capture_output=True, timeout=float(config.TTS_TIMEOUT_SECONDS),
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except subprocess.TimeoutExpired as exc:
             raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
         if result.returncode:
             raise TTSEngineError(result.stderr.decode("utf-8", errors="replace")[-1500:])
-        return result.stdout, "audio/wav"
-    request = registry.current(payload.session_id, payload.request_id)
-    if request is None:
-        raise TTSEngineError("This speech request was cancelled.")
-    return _piper_worker(path).synthesize(spoken_text, 1 / speed, request.cancelled), "audio/wav"
+        try:
+            normalized = join_speech_segments([result.stdout], int(config.TTS_SAMPLE_RATE))
+        except (ValueError, wave.Error, EOFError) as exc:
+            raise TTSEngineError(f"Piper returned incompatible WAV audio: {exc}") from exc
+        if not normalized:
+            raise TTSEngineError("Piper returned no speech audio.")
+        return normalized, "audio/wav"
+
+    clips = []
+    for path, phrase in jobs:
+        if request is not None and request.cancelled.is_set():
+            raise TTSEngineError("This speech request was cancelled.")
+        clips.append(_piper_worker(path).synthesize(
+            phrase, length_scale, request.cancelled if request is not None else None
+        ))
+    try:
+        combined = join_speech_segments(clips, int(config.TTS_SAMPLE_RATE))
+    except (ValueError, wave.Error, EOFError) as exc:
+        raise TTSEngineError(f"Could not join multilingual speech phrases: {exc}") from exc
+    if not combined:
+        raise TTSEngineError("Piper returned no speech audio.")
+    return combined, "audio/wav"
 
 
 def _synthesize_espeak_speech(payload: TTSRequest) -> tuple[bytes, str]:

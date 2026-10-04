@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "frontend"))
 import config
 from visualization import render_ai_visualization
+from avatar_renderer import render_script
 
 
 class FakeResponse:
@@ -41,6 +42,13 @@ class InterfaceTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertTrue(any("The limit is 100 kg." in str(item.value) for item in app.markdown))
 
+    def test_missing_avatar_asset_shows_an_error(self):
+        with patch.object(config, "AVATAR_MODEL_FILE", "assets/missing-avatar.gltf"):
+            import_map, script = render_script()
+        self.assertEqual(import_map, "{}")
+        self.assertIn("Avatar renderer unavailable", script)
+        self.assertIn("modelStatus", script)
+
     def test_visualization_is_local_and_supports_audio_queue(self):
         with patch("visualization.components.html") as render:
             render_ai_visualization(queue_id="test-queue", thinking=True)
@@ -48,7 +56,11 @@ class InterfaceTests(unittest.TestCase):
         self.assertIn("texmin:avatar-queue", html)
         self.assertIn("texmin_ai_activity", html)
         self.assertIn("texmin_voice_interrupt_at", html)
-        self.assertNotIn("https://", html)
+        self.assertNotIn("https://unpkg.com/three", html)
+        self.assertIn("male04 face rigged", html)
+        self.assertIn('id="avatarScene"', html)
+        self.assertIn("data:model/gltf+json;base64,", html)
+        self.assertIn("data:text/javascript;base64,", html)
         self.assertEqual(render.call_args.kwargs["height"], 620)
 
 
