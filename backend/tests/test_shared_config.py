@@ -2,6 +2,7 @@ import ast
 import io
 import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from unittest.mock import Mock, patch
 import config
 from scripts.configure_gateway import render_gateway
 from scripts.provision_ollama import provision_models
+from scripts.provision_models import provision_whisper
 from services.embedding_service import embedding_profile
 
 
@@ -25,6 +27,32 @@ class SharedConfigTests(unittest.TestCase):
                     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "config":
                         with self.subTest(path=str(path), setting=node.attr):
                             self.assertTrue(hasattr(config, node.attr), node.attr)
+
+    def test_dgx_whisper_profile_is_complete_and_provisionable(self):
+        self.assertEqual(config.STT_ENGINE, "transformers")
+        self.assertEqual(config.WHISPER_TRANSFORMERS_MODEL, "openai/whisper-large-v3-turbo")
+        self.assertEqual(config.WHISPER_DEVICE, "auto")
+        processor = SimpleNamespace(from_pretrained=Mock())
+        model = SimpleNamespace(from_pretrained=Mock())
+        with patch.dict(sys.modules, {
+            "transformers": SimpleNamespace(
+                AutoProcessor=processor, AutoModelForSpeechSeq2Seq=model
+            )
+        }):
+            provision_whisper()
+        processor.from_pretrained.assert_called_once_with(
+            config.WHISPER_TRANSFORMERS_MODEL, local_files_only=False
+        )
+        self.assertEqual(model.from_pretrained.call_args.args, (config.WHISPER_TRANSFORMERS_MODEL,))
+
+    def test_missing_speech_setting_fails_at_config_validation(self):
+        engine = config.STT_ENGINE
+        try:
+            del config.STT_ENGINE
+            with self.assertRaisesRegex(ValueError, "STT_ENGINE"):
+                config.validate_config()
+        finally:
+            config.STT_ENGINE = engine
 
     def test_model_settings_do_not_come_from_environment(self):
         with patch.dict(os.environ, {"OLLAMA_EMBED_MODEL": "ignored-legacy-setting"}):

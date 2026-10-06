@@ -9,17 +9,15 @@ import os
 from pathlib import Path
 
 
-# Local Windows test profile. Provision the commented DGX models and rebuild the
-# index before switching the chat model, embedding model, and dimensions together.
-# OLLAMA_CHAT_MODEL = "llama3.2:latest"
-# OLLAMA_EMBED_MODEL = "nomic-embed-text"
-# OLLAMA_EMBED_DIMENSIONS = 768
-# STT_ENGINE = "faster-whisper"; WHISPER_MODEL = "small"
-# WHISPER_DEVICE = "cpu"; WHISPER_COMPUTE_TYPE = "int8"
-# RERANK_ENABLED = False; EMBEDDING_BATCH_SIZE = 32
+# DGX Spark deployment profile. The Windows machine is for local development and
+# tests only; its smaller model settings are examples below.
 OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
 OLLAMA_EMBED_MODEL = "bge-m3"
 OLLAMA_EMBED_DIMENSIONS = 1024
+# Windows local test alternatives; switch all three together when testing locally:
+# OLLAMA_CHAT_MODEL = "llama3.2:latest"
+# OLLAMA_EMBED_MODEL = "nomic-embed-text"
+# OLLAMA_EMBED_DIMENSIONS = 768
 # Provision these tags in the Ollama Docker volume and build/promote a new index
 # before starting the app; the Windows nomic index uses a different vector space.
 # The application sends these model names to Ollama; it never opens model files.
@@ -105,11 +103,17 @@ RERANK_CANDIDATES = 12
 RERANK_MAX_LENGTH = 1024
 VERSION_CANDIDATES = 16
 
-# Speech recognition. The active local profile uses faster-whisper on CPU;
-# the commented Transformers profile can use CUDA on DGX after provisioning.
-# STT_ENGINE = "transformers"; WHISPER_MODEL = "large-v3-turbo"
+# DGX Spark speech recognition; "auto" selects CUDA when available.
+STT_ENGINE = "transformers"
+WHISPER_MODEL = "large-v3-turbo"  # Used only if switching to faster-whisper.
 WHISPER_TRANSFORMERS_MODEL = "openai/whisper-large-v3-turbo"
-# WHISPER_DEVICE = "auto"; WHISPER_COMPUTE_TYPE = "float16"
+WHISPER_DEVICE = "auto"
+WHISPER_COMPUTE_TYPE = "float16"
+# Windows local test alternatives; switch these four together for local tests:
+# STT_ENGINE = "faster-whisper"
+# WHISPER_MODEL = "small"
+# WHISPER_DEVICE = "cpu"
+# WHISPER_COMPUTE_TYPE = "int8"
 WHISPER_CPU_THREADS = 4
 WHISPER_WORKERS = 1
 WHISPER_BEAM_SIZE = 1
@@ -176,6 +180,22 @@ ESPEAK_RATE = 155
 
 def validate_config() -> None:
     """Reject incompatible application settings before work begins."""
+    required_models = (
+        "OLLAMA_CHAT_MODEL", "OLLAMA_EMBED_MODEL", "OLLAMA_EMBED_DIMENSIONS",
+        "STT_ENGINE", "WHISPER_MODEL", "WHISPER_TRANSFORMERS_MODEL",
+        "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE",
+    )
+    missing = [name for name in required_models if name not in globals()]
+    if missing:
+        raise ValueError(
+            "Missing model settings in backend/config.py: " + ", ".join(missing)
+        )
+    if STT_ENGINE.strip().lower() not in {"transformers", "pytorch", "torch", "faster-whisper"}:
+        raise ValueError("STT_ENGINE must be transformers or faster-whisper.")
+    if not WHISPER_MODEL.strip() or not WHISPER_TRANSFORMERS_MODEL.strip():
+        raise ValueError("Both Whisper model names must be configured.")
+    if not WHISPER_DEVICE.strip() or not WHISPER_COMPUTE_TYPE.strip():
+        raise ValueError("Whisper device and compute type must be configured.")
     if not OLLAMA_CHAT_MODEL.strip() or not OLLAMA_EMBED_MODEL.strip():
         raise ValueError("Both Ollama model names must be configured.")
     if QA_REASONING_ENABLED or OLLAMA_THINK.strip().lower() not in {"false", "auto"}:
