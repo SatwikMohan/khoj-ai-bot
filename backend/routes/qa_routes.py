@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from helpers.request_models import QARequest, QAResponse
 from services.qa_service import QAEngineError, answer_question, stream_answer_events
-from services.request_lifecycle import registry
+from services.voice_interaction import begin_voice_interaction as begin_voice_request, cancel_interaction
 
 
 router = APIRouter(prefix="/qa", tags=["qa"])
@@ -67,10 +67,12 @@ class VoiceInteraction(BaseModel):
 def begin_voice_interaction(session_id: str, payload: VoiceInteraction) -> dict:
     if len(session_id) > 128:
         raise HTTPException(status_code=422, detail="Session ID is too long.")
-    request = registry.begin(session_id, payload.request_id, input_type="audio", status="recording")
-    return {"session_id": request.session_id, "request_id": request.request_id, "status": request.status}
+    try:
+        return begin_voice_request(session_id, payload.request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/sessions/{session_id}/cancel")
 def cancel_session(session_id: str, request_id: str | None = None) -> dict:
-    return {"cancelled": registry.cancel(session_id, request_id)}
+    return {"cancelled": cancel_interaction(session_id, request_id)}

@@ -24,6 +24,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
 COPY backend /app/backend
 COPY frontend /app/frontend
 
-EXPOSE 8000 8501
+EXPOSE 8501
 
-CMD ["python", "/app/frontend/run_combined.py"]
+WORKDIR /app/frontend
+CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501", "--browser.gatherUsageStats=false"]

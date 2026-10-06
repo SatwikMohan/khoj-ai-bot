@@ -40,7 +40,7 @@ class VoiceLifecycleTests(unittest.TestCase):
 
     def test_stale_transcription_cannot_become_a_query(self):
         self.begin("voice")
-        with patch("routes.stt_routes.transcribe_audio") as transcribe:
+        with patch("services.voice_interaction.transcribe_audio") as transcribe:
             def replace(*args):
                 registry.begin(self.session, "typed")
                 return {"text": "stale"}
@@ -52,7 +52,7 @@ class VoiceLifecycleTests(unittest.TestCase):
     def test_live_transcription_preserves_request_for_qa(self):
         self.begin("voice")
         self.assertIsNone(registry.promote_voice(self.session, "voice"))
-        with patch("routes.stt_routes.transcribe_audio", return_value={"text": "Mujhe Python samjhao"}) as transcribe:
+        with patch("services.voice_interaction.transcribe_audio", return_value={"text": "Mujhe Python samjhao"}) as transcribe:
             response = self.upload("voice")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["text"], "Mujhe Python samjhao")

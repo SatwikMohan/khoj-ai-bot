@@ -216,13 +216,12 @@ python scripts/provision_ollama.py
 python scripts/provision_models.py
 python train_engine.py
 cd ..
-python frontend/run_combined.py
+cd frontend && streamlit run app.py
 ```
 
-The provisioning script reads both model names from `config.py`. The combined
-runner starts both Streamlit and the retained FastAPI endpoints. Streamlit calls
-backend functions directly by default; Ollama is a local service and does not
-require internet for inference.
+The provisioning script reads both model names from config.py.
+Streamlit imports the backend services directly. Ollama is a local model service
+and does not require internet for inference.
 
 Ingestion version 8 records years and versions found in source paths and includes
 them in chunk IDs. Run `python train_engine.py` to build a candidate, then
@@ -232,8 +231,8 @@ context budget. Dates in an unversioned document are treated as content evidence
 not asserted as its version.
 
 If an answer fails, the page shows the error immediately. Logs include the active
-model, completion reason, retrieval time and generation time. `/ready` checks
-document QA; `/health` provides deeper speech and reranker diagnostics.
+model, completion reason, retrieval time and generation time. The optional FastAPI
+server retains /ready and /health for external clients.
 
 ## HTTPS, microphone access and retrieval evaluation
 

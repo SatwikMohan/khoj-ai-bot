@@ -151,9 +151,7 @@
     let generation = 0;
     let requestId = "";
     let ownInterruptAt = 0;
-    let beginPromise = null;
-    let beginChain = Promise.resolve();
-    let uploadController = null;
+    let beginAck = null;
     let stream = null;
     let context = null;
     let analyser = null;
@@ -178,6 +176,11 @@
       if (event.data?.type !== "streamlit:render") return;
       settings = event.data.args || {};
       sessionId = settings.session_id || "";
+      if (beginAck && settings.accepted_request_id === beginAck.id) {
+        const pending = beginAck;
+        beginAck = null;
+        pending.resolve(true);
+      }
       send("streamlit:setFrameHeight", {height: 92});
       if (phase === "waiting" && !stream) startWaitingMonitor();
     });
@@ -207,32 +210,20 @@
       statusText.textContent = message;
       button.disabled = false;
     }
-    function apiBases() {
-      const bases = [location.origin + (settings.browser_api_path || "/api")];
-      if (["localhost", "127.0.0.1"].includes(location.hostname)) {
-        bases.push(location.protocol + "//" + location.hostname + ":8000");
-      }
-      return bases;
+    function sendValue(value) {
+      send("streamlit:setComponentValue", {value, dataType: "json"});
     }
-    async function apiFetch(path, options) {
-      let lastError;
-      for (const base of apiBases()) {
-        try {
-          const response = await fetch(base + path, options);
-          if (response.status === 404 && apiBases().length > 1) continue;
-          if (!response.ok) {
-            let detail = response.statusText;
-            try { detail = (await response.json()).detail || detail; } catch (_) {}
-            throw new Error(detail || "Local speech service failed.");
-          }
-          return response.json();
-        } catch (error) {
-          if (error.name === "AbortError") throw error;
-          lastError = error;
-          if (!(error instanceof TypeError)) break;
-        }
-      }
-      throw lastError || new Error("Local speech service is unavailable.");
+    function waitForBeginAck(id) {
+      return new Promise(resolve => {
+        const timeout = setTimeout(() => {
+          if (beginAck?.id === id) beginAck = null;
+          resolve(false);
+        }, 10000);
+        beginAck = {id, resolve: accepted => {
+          clearTimeout(timeout);
+          resolve(accepted);
+        }};
+      });
     }
     function current(id) { return id === generation; }
     function interruptAudio() {
@@ -259,20 +250,13 @@
     }
     function cancelCurrent(message = "Recording cancelled.") {
       generation++;
-      if (uploadController) uploadController.abort();
-      uploadController = null;
-      const oldSession = sessionId;
-      const oldRequest = requestId;
-      const pendingBegin = beginPromise;
-      if (oldSession && oldRequest) {
-        const cancelOld = () => apiFetch("/qa/sessions/" + encodeURIComponent(oldSession) +
-          "/cancel?request_id=" + encodeURIComponent(oldRequest),
-          {method: "POST", keepalive: true}).catch(() => {});
-        if (pendingBegin) pendingBegin.then(cancelOld, cancelOld);
-        else cancelOld();
+      if (beginAck) {
+        const pending = beginAck;
+        beginAck = null;
+        pending.resolve(false);
       }
+      if (requestId) sendValue({kind: "cancel", request_id: requestId});
       requestId = "";
-      beginPromise = null;
       stopCapture();
       localStorage.removeItem(waitingKey);
       show("idle", message);
@@ -382,28 +366,20 @@
       if (phase === "listening" || phase === "permission" || phase === "processing") cancelCurrent();
       const id = ++generation;
       stopCapture();
-      if (uploadController) uploadController.abort();
-      uploadController = null;
       requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
       interruptAudio();
       localStorage.setItem(modeKey, "on");
       localStorage.removeItem(waitingKey);
-      const newRequestId = requestId;
-      const newSessionId = sessionId;
-      beginPromise = beginChain.catch(() => {}).then(() =>
-        apiFetch("/qa/sessions/" + encodeURIComponent(newSessionId) + "/interactions", {
-          method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({request_id: newRequestId})
-        })
-      );
-      beginChain = beginPromise;
-      beginPromise.catch(error => {
-        if (current(id)) cancelCurrent(error.message || "The local speech service is unavailable.");
-      });
-      show("permission", "Requesting microphone permission...");
+      const acknowledged = waitForBeginAck(requestId);
+      sendValue({kind: "begin", request_id: requestId});
+      show("permission", "Preparing local microphone...");
       preview.textContent = "";
       try {
-        if (!await acquireMeter(id)) return;
+        if (!await acknowledged) {
+          if (current(id)) cancelCurrent("Microphone setup timed out. Please retry.");
+          return;
+        }
+        if (!current(id) || !await acquireMeter(id)) return;
         const choices = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4"];
         mime = choices.find(candidate => MediaRecorder.isTypeSupported(candidate)) || "";
         recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
@@ -444,36 +420,23 @@
       const blob = new Blob(chunks, {type: mime});
       stopCapture();
       if (!blob.size) { cancelCurrent("The recording was empty. Please retry."); return; }
-      const extension = mime.startsWith("audio/ogg") ? "ogg" : mime.startsWith("audio/mp4") ? "m4a" : "webm";
-      const form = new FormData();
-      form.append("audio", blob, "recording." + extension);
-      form.append("session_id", sessionId);
-      form.append("request_id", requestId);
-      uploadController = new AbortController();
-      const timeout = setTimeout(() => uploadController?.abort(), (settings.stt_timeout_seconds || 90) * 1000);
       try {
-        await beginPromise;
-        if (!current(id)) return;
-        const result = await apiFetch("/stt/transcribe", {
-          method: "POST", body: form, signal: uploadController.signal
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Microphone recording could not be read."));
+          reader.readAsDataURL(blob);
         });
         if (!current(id)) return;
-        const text = String(result.text || "").trim();
-        if (!text) throw new Error("Speech was not detected. Please try again.");
-        preview.textContent = text;
-        show("waiting", "Transcription completed. Query submitted.");
+        show("waiting", "Transcribing and answering locally...");
         localStorage.setItem(waitingKey, String(Date.now()));
-        send("streamlit:setComponentValue", {
-          value: {id: requestId, request_id: requestId, input_type: "audio", text},
-          dataType: "json"
+        sendValue({
+          kind: "audio", request_id: requestId,
+          audio_mime: mime, audio_b64: String(dataUrl).split(",", 2)[1] || ""
         });
         startWaitingMonitor();
       } catch (error) {
-        if (current(id)) cancelCurrent(error.name === "AbortError"
-          ? "Transcription timed out or was cancelled." : (error.message || "Transcription failed."));
-      } finally {
-        clearTimeout(timeout);
-        uploadController = null;
+        if (current(id)) cancelCurrent(error.message || "Recording could not be sent.");
       }
     }
     async function startWaitingMonitor() {
@@ -517,7 +480,6 @@
       }
     }, 250);
     window.addEventListener("beforeunload", () => {
-      if (uploadController) uploadController.abort();
       stopCapture();
     });
     const waitingAt = Number(localStorage.getItem(waitingKey) || 0);

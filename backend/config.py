@@ -9,8 +9,8 @@ import os
 from pathlib import Path
 
 
-# DGX Spark deployment models. The Windows test system only has the commented
-# smaller models installed; switch all three values together for local tests.
+# Local Windows test profile. Provision the commented DGX models and rebuild the
+# index before switching the chat model, embedding model, and dimensions together.
 # OLLAMA_CHAT_MODEL = "llama3.2:latest"
 # OLLAMA_EMBED_MODEL = "nomic-embed-text"
 # OLLAMA_EMBED_DIMENSIONS = 768
@@ -19,12 +19,12 @@ from pathlib import Path
 # RERANK_ENABLED = False; EMBEDDING_BATCH_SIZE = 32
 OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
 OLLAMA_EMBED_MODEL = "bge-m3"
+OLLAMA_EMBED_DIMENSIONS = 1024
 # Provision these tags in the Ollama Docker volume and build/promote a new index
 # before starting the app; the Windows nomic index uses a different vector space.
 # The application sends these model names to Ollama; it never opens model files.
 # Docker's Ollama service stores weights in its persistent /root/.ollama volume.
 OLLAMA_CHAT_QUANTIZATION = "Q4_K_M"  # Documentation only; select actual weights with the Ollama model tag.
-OLLAMA_EMBED_DIMENSIONS = 1024
 OLLAMA_KEEP_ALIVE = 1800
 OLLAMA_NUM_CTX = 8192
 OLLAMA_NUM_PREDICT = 768
@@ -57,10 +57,6 @@ ASSISTANT_NAME = "Khoj"
 ASSISTANT_PERSONA = "a calm, perceptive colleague who explains difficult material in plain language"
 RESPONSE_LANGUAGE = "auto"
 HINGLISH_SCRIPT = "roman"
-BACKEND_CALL_MODE = "http"
-BACKEND_SOURCE_DIR = str(BACKEND_ROOT)
-QA_API_URL = "http://127.0.0.1:8000"
-BROWSER_API_PATH = "/api"
 BROWSER_ALLOWED_ORIGINS = ("http://localhost:8501", "http://127.0.0.1:8501")
 API_HOST = "0.0.0.0"
 API_PORT = 8000
@@ -109,12 +105,11 @@ RERANK_CANDIDATES = 12
 RERANK_MAX_LENGTH = 1024
 VERSION_CANDIDATES = 16
 
-# Speech recognition. "auto" uses CUDA when available for Transformers.
-STT_ENGINE = "transformers"
-WHISPER_MODEL = "large-v3-turbo"
+# Speech recognition. The active local profile uses faster-whisper on CPU;
+# the commented Transformers profile can use CUDA on DGX after provisioning.
+# STT_ENGINE = "transformers"; WHISPER_MODEL = "large-v3-turbo"
 WHISPER_TRANSFORMERS_MODEL = "openai/whisper-large-v3-turbo"
-WHISPER_DEVICE = "auto"
-WHISPER_COMPUTE_TYPE = "float16"
+# WHISPER_DEVICE = "auto"; WHISPER_COMPUTE_TYPE = "float16"
 WHISPER_CPU_THREADS = 4
 WHISPER_WORKERS = 1
 WHISPER_BEAM_SIZE = 1

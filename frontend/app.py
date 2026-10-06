@@ -4,28 +4,30 @@ import sys
 import uuid
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import lru_cache
+from contextlib import closing
 from pathlib import Path
 from html import escape
 
 import markdown
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
 # Import the same configuration used by the backend, also in local Streamlit runs.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 import config
 from services.audio_chunks import join_audio_chunks
 from services.language_service import detect_language, response_language
 from services.speech_chunker import IncrementalSpeechSegments
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from helpers.request_models import ChatMessage, TTSRequest
+from services.qa_service import answer_question, stream_answer_events
+from services.tts_service import synthesize_speech
+from services.voice_interaction import begin_voice_interaction, cancel_interaction, transcribe_interaction
 from visualization import render_ai_visualization
 config.configure_runtime_environment()
 
 
-DEFAULT_API_URL = config.QA_API_URL
-BACKEND_CALL_MODE = config.BACKEND_CALL_MODE.strip().lower()
 DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(config.QA_TEMPERATURE)))
 DEFAULT_TTS_ENGINE = config.TTS_ENGINE.strip().lower()
 DEFAULT_TTS_VOICE = config.TTS_VOICE
@@ -47,9 +49,6 @@ def init_state() -> None:
         st.session_state.messages = []
     if "conversation_session_id" not in st.session_state:
         st.session_state.conversation_session_id = uuid.uuid4().hex
-    if "api_url" not in st.session_state:
-        st.session_state.api_url = DEFAULT_API_URL
-    if "top_k" not in st.session_state:
         st.session_state.top_k = config.QA_TOP_K
     if "temperature" not in st.session_state:
         st.session_state.temperature = DEFAULT_QA_TEMPERATURE
@@ -67,8 +66,10 @@ def init_state() -> None:
         st.session_state.tts_max_words = config.TTS_MAX_WORDS
     if "avatar_enabled" not in st.session_state:
         st.session_state.avatar_enabled = config.AVATAR_ENABLED
-    if "last_voice_query_id" not in st.session_state:
-        st.session_state.last_voice_query_id = ""
+    if "last_voice_event" not in st.session_state:
+        st.session_state.last_voice_event = ""
+    if "accepted_voice_request_id" not in st.session_state:
+        st.session_state.accepted_voice_request_id = ""
 
 
 def markdown_to_html(content: str) -> str:
@@ -130,8 +131,6 @@ def render_voice_query_component() -> dict | None:
         default=None,
         key="texmin_voice_query",
         height=92,
-        server_stt=True,
-        browser_api_path=config.BROWSER_API_PATH,
         no_speech_timeout_seconds=config.RECORDING_NO_SPEECH_TIMEOUT_SECONDS,
         max_recording_seconds=config.RECORDING_MAX_SECONDS,
         silence_ms=config.RECORDING_SILENCE_MS,
@@ -139,129 +138,72 @@ def render_voice_query_component() -> dict | None:
         speech_confirm_ms=config.RECORDING_SPEECH_CONFIRM_MS,
         stt_timeout_seconds=config.STT_REQUEST_TIMEOUT_SECONDS,
         session_id=st.session_state.conversation_session_id,
+        accepted_request_id=st.session_state.accepted_voice_request_id,
     )
-    if not value:
+    if not isinstance(value, dict):
         return None
-
-    if isinstance(value, str):
-        query_id = value
-        text = value
-        input_type = "text"
-    else:
-        input_type = "audio"
-        query_id = str(value.get("id", ""))
-        text = str(value.get("text", "")).strip()
-        audio_b64 = str(value.get("audio_b64", ""))
-        audio_mime = str(value.get("audio_mime", "audio/webm"))
-        if audio_b64 and query_id != st.session_state.last_voice_query_id:
-            input_type = "text"  # Legacy component did not begin a voice request.
-            text, transcription_error = ask_stt(audio_b64, audio_mime)
-            if transcription_error:
-                st.warning(transcription_error)
-
-    if not text or query_id == st.session_state.last_voice_query_id:
+    kind = str(value.get("kind", ""))
+    request_id = str(value.get("request_id", ""))
+    event_key = f"{kind}:{request_id}"
+    if not request_id or event_key == st.session_state.last_voice_event:
         return None
-
-    st.session_state.last_voice_query_id = query_id
-    return {"text": text, "request_id": query_id, "input_type": input_type}
-
-
-@lru_cache(maxsize=1)
-def _inprocess_backend() -> dict:
-    """Load the backend service layer without going through FastAPI/HTTP."""
-    backend_dir = APP_DIR.parent / "backend"
-    if not backend_dir.exists():
-        configured = config.BACKEND_SOURCE_DIR.strip()
-        backend_dir = Path(configured) if configured else backend_dir
-    backend_path = str(backend_dir.resolve())
-    if backend_path not in sys.path:
-        sys.path.insert(0, backend_path)
-
-    from helpers.request_models import ChatMessage, TTSRequest
-    from services.qa_service import answer_question, stream_answer_events
-    from services.stt_service import transcribe_audio
-    from services.tts_service import synthesize_speech
-
-    return {
-        "ChatMessage": ChatMessage,
-        "TTSRequest": TTSRequest,
-        "answer_question": answer_question,
-        "stream_answer_events": stream_answer_events,
-        "transcribe_audio": transcribe_audio,
-        "synthesize_speech": synthesize_speech,
-    }
-
-
-def _qa_events(url: str, payload: dict):
-    if BACKEND_CALL_MODE == "inprocess":
-        services = _inprocess_backend()
-        history = [services["ChatMessage"](**item) for item in payload["chat_history"]]
-        yield from services["stream_answer_events"](
-            question=payload["question"],
-            top_k=payload["top_k"],
-            temperature=payload["temperature"],
-            chat_history=history,
-            session_id=payload.get("session_id"),
-            request_id=payload.get("request_id"),
-            input_type=payload.get("input_type", "text"),
-        )
-        return
-
-    with requests.post(url, json=payload, timeout=180, stream=True) as response:
-        if not response.ok:
-            try:
-                detail = response.json().get("detail", response.text)
-            except ValueError:
-                detail = response.text
-            raise RuntimeError(f"API returned {response.status_code}: {detail}")
-        for line in response.iter_lines(decode_unicode=True, chunk_size=1):
-            if not line or not line.startswith("data:"):
-                continue
-            try:
-                yield json.loads(line.removeprefix("data:").strip())
-            except json.JSONDecodeError:
-                continue
-
-
-def ask_stt(audio_b64: str, audio_mime: str) -> tuple[str, str | None]:
-    url = st.session_state.api_url.rstrip("/") + "/stt/transcribe"
+    st.session_state.last_voice_event = event_key
+    session_id = st.session_state.conversation_session_id
+    if kind == "begin":
+        begin_voice_interaction(session_id, request_id)
+        st.session_state.accepted_voice_request_id = request_id
+        st.rerun()  # Deliver the acknowledgement before the browser records audio.
+    if kind == "cancel":
+        cancel_interaction(session_id, request_id)
+        if st.session_state.accepted_voice_request_id == request_id:
+            st.session_state.accepted_voice_request_id = ""
+        return None
+    if kind != "audio" or st.session_state.accepted_voice_request_id != request_id:
+        return None
+    worker_pool = None
     try:
-        audio = base64.b64decode(audio_b64, validate=True)
-    except (ValueError, TypeError):
-        return "", "The microphone recording was invalid. Please try again."
-
-    extension_by_mime = {
-        "audio/webm": ".webm",
-        "audio/ogg": ".ogg",
-        "audio/wav": ".wav",
-        "audio/mp4": ".m4a",
-    }
-    base_mime = audio_mime.split(";", 1)[0].lower()
-    extension = extension_by_mime.get(base_mime, ".webm")
-    if BACKEND_CALL_MODE == "inprocess":
-        try:
-            services = _inprocess_backend()
-            result = services["transcribe_audio"](audio, suffix=extension, language=None)
-            return str(result.get("text", "")).strip(), None
-        except Exception as exc:
-            return "", f"Offline speech recognition failed: {exc}"
-
-    try:
-        response = requests.post(
-            url,
-            files={"audio": (f"recording{extension}", audio, base_mime)},
-            data={"language": ""},
-            timeout=120,
+        audio = base64.b64decode(str(value.get("audio_b64", "")), validate=True)
+        worker_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="texmin-stt")
+        pending = worker_pool.submit(
+            transcribe_interaction, audio,
+            str(value.get("audio_mime", "audio/webm")), session_id, request_id,
         )
-    except requests.RequestException as exc:
-        return "", f"Offline speech recognition could not connect to {url}. {exc}"
-    if not response.ok:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
-        return "", f"Offline speech recognition failed: {detail}"
-    return str(response.json().get("text", "")).strip(), None
+        deadline = time.monotonic() + float(config.STT_REQUEST_TIMEOUT_SECONDS)
+        progress = st.empty()
+        while True:
+            try:
+                result = pending.result(timeout=0.1)
+                break
+            except TimeoutError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Speech recognition timed out.")
+                progress.empty()  # Let Streamlit process a newer text or voice query.
+        text = str(result.get("text", "")).strip()
+        if text:
+            return {"text": text, "request_id": request_id, "input_type": "audio"}
+    except Exception as exc:
+        cancel_interaction(session_id, request_id)
+        st.warning(f"Offline speech recognition failed: {exc}")
+    except BaseException:
+        cancel_interaction(session_id, request_id)
+        raise
+    finally:
+        if worker_pool is not None:
+            worker_pool.shutdown(wait=False, cancel_futures=True)
+    return None
+
+
+def _qa_events(payload: dict):
+    history = [ChatMessage(**item) for item in payload["chat_history"]]
+    return stream_answer_events(
+        question=payload["question"],
+        top_k=payload["top_k"],
+        temperature=payload["temperature"],
+        chat_history=history,
+        session_id=payload.get("session_id"),
+        request_id=payload.get("request_id"),
+        input_type=payload.get("input_type", "text"),
+    )
 
 
 def resume_voice_listener_without_audio() -> None:
@@ -304,43 +246,19 @@ def _chat_history_payload(exclude_latest_user: bool = False) -> list[dict]:
 
 
 def ask_api(question: str) -> tuple[str, list[dict], str | None]:
-    url = st.session_state.api_url.rstrip("/") + "/qa/ask"
-    payload = {
-        "question": question,
-        "top_k": st.session_state.top_k,
-        "temperature": st.session_state.temperature,
-        "chat_history": _chat_history_payload(exclude_latest_user=True),
-    }
-
-    if BACKEND_CALL_MODE == "inprocess":
-        try:
-            services = _inprocess_backend()
-            history = [services["ChatMessage"](**item) for item in payload["chat_history"]]
-            result = services["answer_question"](
-                question=question,
-                top_k=payload["top_k"],
-                temperature=payload["temperature"],
-                chat_history=history,
-            )
-            data = result.model_dump() if hasattr(result, "model_dump") else result.dict()
-            return data.get("answer", ""), data.get("sources", []), None
-        except Exception as exc:
-            return "", [], f"In-process QA failed: {exc}"
-
     try:
-        response = requests.post(url, json=payload, timeout=120)
-    except requests.RequestException as exc:
-        return "", [], f"Could not reach the FastAPI server at {url}. {exc}"
-
-    if not response.ok:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
-        return "", [], f"API returned {response.status_code}: {detail}"
-
-    data = response.json()
-    return data.get("answer", ""), data.get("sources", []), None
+        history = [ChatMessage(**item) for item in _chat_history_payload(exclude_latest_user=True)]
+        result = answer_question(
+            question=question,
+            top_k=st.session_state.top_k,
+            temperature=st.session_state.temperature,
+            chat_history=history,
+            session_id=st.session_state.conversation_session_id,
+        )
+        data = result.model_dump() if hasattr(result, "model_dump") else result.dict()
+        return data.get("answer", ""), data.get("sources", []), None
+    except Exception as exc:
+        return "", [], f"Question answering failed: {exc}"
 
 
 def render_streaming_message(container, content: str, status: str = "") -> None:
@@ -547,7 +465,6 @@ def ask_api_stream(
     request_id: str | None = None,
     input_type: str = "text",
 ) -> tuple[str, list[dict], str | None, bytes | None, str, str | None]:
-    url = st.session_state.api_url.rstrip("/") + "/qa/ask/stream"
     payload = {
         "question": question,
         "top_k": st.session_state.top_k,
@@ -575,6 +492,7 @@ def ask_api_stream(
     tts_executor: ThreadPoolExecutor | None = None
     tts_futures: dict[int, tuple[Future, str]] = {}
     next_audio_sequence = 0
+    tts_wait_placeholder = st.empty() if queue_id else None
     tts_config = _current_tts_config(question)
     tts_config["session_id"] = payload["session_id"]
     tts_config["request_id"] = payload["request_id"]
@@ -607,9 +525,16 @@ def ask_api_stream(
             if not block and not future.done():
                 break
             try:
-                segment_audio, segment_mime, segment_error = future.result(
-                    timeout=float(config.TTS_RESPONSE_TIMEOUT_SECONDS)
-                )
+                deadline = time.monotonic() + float(config.TTS_RESPONSE_TIMEOUT_SECONDS)
+                while True:
+                    try:
+                        segment_audio, segment_mime, segment_error = future.result(timeout=0.1)
+                        break
+                    except TimeoutError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        if tts_wait_placeholder is not None:
+                            tts_wait_placeholder.empty()
             except TimeoutError:
                 audio_error = "Speech generation timed out. Your text answer is available above."
                 future.cancel()
@@ -656,53 +581,53 @@ def ask_api_stream(
         publish_ai_activity(activity_line, activity_signal, "retrieving", "Retrieving")
         render_streaming_message(container, "", status)
         last_phase = "retrieving"
-        for event in _qa_events(url, payload):
-            flush_tts()
-            event_type = event.get("type")
-            if event_type == "status":
-                status = event.get("message") or status
-                phase = "retrieving" if "search" in status.lower() else "generating"
-                if phase != last_phase:
-                    publish_ai_activity(activity_line, activity_signal, phase, phase.capitalize())
-                    last_phase = phase
-                if not answer:
-                    render_streaming_message(container, "", status)
-            elif event_type == "token":
-                token = event.get("text", "")
-                if last_phase != "generating":
-                    publish_ai_activity(activity_line, activity_signal, "generating", "Generating")
-                    last_phase = "generating"
-                answer += token
-                for segment in speech_segments.push(token):
-                    submit_tts(segment)
-                render_streaming_message(container, answer, status)
-            elif event_type == "done":
-                done_received = True
-                answer = event.get("answer") or answer
-                sources = event.get("sources", [])
-                status = ""
-                render_streaming_message(container, answer, status)
-            elif event_type == "error":
-                if tts_executor is not None:
-                    tts_executor.shutdown(wait=False, cancel_futures=True)
-                if queue_id and queue_sender is not None:
-                    _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-                publish_ai_activity(activity_line, activity_signal, "error", "Something went wrong")
-                return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
-            elif event_type == "cancelled":
-                if tts_executor is not None:
-                    tts_executor.shutdown(wait=False, cancel_futures=True)
-                if queue_id and queue_sender is not None:
-                    _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-                publish_ai_activity(activity_line, activity_signal, "interrupted", "Interrupted")
-                return "", [], "__cancelled__", None, audio_mime, None
+        with closing(_qa_events(payload)) as events:
+            for event in events:
+                flush_tts()
+                event_type = event.get("type")
+                if event_type == "status":
+                    status = event.get("message") or status
+                    phase = "retrieving" if "search" in status.lower() else "generating"
+                    if phase != last_phase:
+                        publish_ai_activity(activity_line, activity_signal, phase, phase.capitalize())
+                        last_phase = phase
+                    if not answer:
+                        render_streaming_message(container, "", status)
+                elif event_type == "token":
+                    token = event.get("text", "")
+                    if last_phase != "generating":
+                        publish_ai_activity(activity_line, activity_signal, "generating", "Generating")
+                        last_phase = "generating"
+                    answer += token
+                    for segment in speech_segments.push(token):
+                        submit_tts(segment)
+                    render_streaming_message(container, answer, status)
+                elif event_type == "done":
+                    done_received = True
+                    answer = event.get("answer") or answer
+                    sources = event.get("sources", [])
+                    status = ""
+                    render_streaming_message(container, answer, status)
+                elif event_type == "error":
+                    if tts_executor is not None:
+                        tts_executor.shutdown(wait=False, cancel_futures=True)
+                    if queue_id and queue_sender is not None:
+                        _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
+                    publish_ai_activity(activity_line, activity_signal, "error", "Something went wrong")
+                    return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
+                elif event_type == "cancelled":
+                    if tts_executor is not None:
+                        tts_executor.shutdown(wait=False, cancel_futures=True)
+                    if queue_id and queue_sender is not None:
+                        _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
+                    publish_ai_activity(activity_line, activity_signal, "interrupted", "Interrupted")
+                    return "", [], "__cancelled__", None, audio_mime, None
     except Exception as exc:
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         if queue_id and queue_sender is not None:
             _send_avatar_queue_event(queue_sender, queue_id, queue_sequence, final=True)
-        transport = "in-process backend" if BACKEND_CALL_MODE == "inprocess" else url
-        return "", [], f"Could not use {transport}. {exc}", None, audio_mime, audio_error
+        return "", [], f"Question answering failed: {exc}", None, audio_mime, audio_error
     except BaseException:
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
@@ -725,7 +650,13 @@ def ask_api_stream(
     if queue_id and queue_sender is not None:
         for segment in speech_segments.finish():
             submit_tts(segment)
-        flush_tts(block=True)
+        try:
+            flush_tts(block=True)
+        except BaseException:
+            cancel_interaction(payload["session_id"], payload["request_id"])
+            if tts_executor is not None:
+                tts_executor.shutdown(wait=False, cancel_futures=True)
+            raise
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         _send_avatar_queue_event(
@@ -765,7 +696,6 @@ def _current_tts_config(question: str = "") -> dict:
         "rate": st.session_state.tts_rate.strip() or "+0%",
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
         "max_words": st.session_state.tts_max_words,
-        "api_url": st.session_state.api_url.rstrip("/"),
         "language": response_language(question),
     }
 
@@ -778,7 +708,6 @@ def _request_tts(text: str, tts_options: dict) -> tuple[bytes | None, str, str |
     if not voice_id:
         return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
 
-    url = tts_options["api_url"] + "/tts/speech"
     payload = {
         "text": text,
         "session_id": tts_options.get("session_id"),
@@ -793,29 +722,12 @@ def _request_tts(text: str, tts_options: dict) -> tuple[bytes | None, str, str |
         "max_words": tts_options["max_words"],
     }
 
-    if BACKEND_CALL_MODE == "inprocess":
-        try:
-            services = _inprocess_backend()
-            request = services["TTSRequest"](**payload)
-            audio, audio_mime = services["synthesize_speech"](request)
-            return audio, audio_mime, None
-        except Exception as exc:
-            return None, DEFAULT_AUDIO_MIME, f"Voice is unavailable: {exc}"
-
     try:
-        response = requests.post(url, json=payload, timeout=180)
-    except requests.RequestException as exc:
-        return None, DEFAULT_AUDIO_MIME, f"Voice could not connect to {url}. {exc}"
-
-    if not response.ok:
-        try:
-            detail = response.json().get("detail", response.text)
-        except ValueError:
-            detail = response.text
-        return None, DEFAULT_AUDIO_MIME, f"Voice is unavailable: {detail}"
-
-    audio_mime = response.headers.get("content-type", DEFAULT_AUDIO_MIME).split(";", 1)[0]
-    return response.content, audio_mime or DEFAULT_AUDIO_MIME, None
+        request = TTSRequest(**payload)
+        audio, audio_mime = synthesize_speech(request)
+        return audio, audio_mime, None
+    except Exception as exc:
+        return None, DEFAULT_AUDIO_MIME, f"Voice is unavailable: {exc}"
 
 
 def ask_tts(text: str) -> tuple[bytes | None, str, str | None]:

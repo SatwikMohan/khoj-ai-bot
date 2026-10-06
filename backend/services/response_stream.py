@@ -127,7 +127,7 @@ class CitationTextFilter:
 
 def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2.0,
                    request: ActiveRequest | None = None):
-    """Bridge a blocking model iterator to SSE with cancellation and backpressure."""
+    """Bridge a blocking model iterator to bounded events with cancellation."""
     events = queue.Queue(maxsize=64)
     cancelled = request.cancelled if request else threading.Event()
     finished = threading.Event()

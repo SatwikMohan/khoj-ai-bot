@@ -17,24 +17,18 @@ python -m pip install -r requirements.txt
 python train_engine.py --force-rebuild
 ```
 
-Run the combined application from the repository root:
+Run Streamlit directly, with the local Ollama service and provisioned models available:
 
 ```powershell
-python -m pip install -r backend/requirements.txt -r frontend/requirements.txt
-python frontend/run_combined.py
+cd frontend
+streamlit run app.py
 ```
 
-The interface uses two columns: the original offline GLTF avatar on the left and a
-scrollable conversation on the right. Text and voice input remain available beneath
-the conversation. Listening, retrieval, generation, playback, and interruption drive
-the avatar's available rig motion; there is no settings panel. Configure the avatar
-model, TTS, and API transport in backend/config.py.
-
-The default BACKEND_CALL_MODE value of http calls FastAPI using QA_API_URL.
-The combined deployment runs both services locally. For a separate frontend container, set
-QA_API_URL to a backend address reachable from that container and route the configured
-BROWSER_API_PATH to FastAPI for browser microphone requests. The frontend image includes
-only small shared voice helpers; model inference stays in the backend.
+The interface uses two columns: the offline GLTF avatar and a scrollable
+conversation. Text and microphone input run through the shared backend Python
+services in the Streamlit process. The microphone sends audio through the
+Streamlit component bridge; it does not call FastAPI. The retained FastAPI
+application in backend/main.py is optional for external clients.
 
 All application settings live in `backend/config.py`. For example:
 
@@ -66,7 +60,4 @@ Set `TTS_ENGINE = "piper"` and run `python scripts/provision_models.py --only-tt
 See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,
 offline setup and switching models. The pull commands above are examples; use
 the names selected in `backend/config.py`. Restart the process after edits; no
-`.env` is loaded. The combined image is the default deployment. To build the
-optional HTTP-only frontend image, use the repository root as build context:
-`docker build -f frontend/Dockerfile .`, and configure HTTP mode and QA_API_URL
-in the shared config before building it.
+`.env` is loaded. Both Dockerfiles include the complete backend service layer and start Streamlit directly.

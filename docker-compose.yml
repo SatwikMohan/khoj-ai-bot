@@ -97,9 +97,8 @@ services:
               capabilities: [gpu]
     ports:
       - "127.0.0.1:8501:8501"
-      - "127.0.0.1:8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read(); urllib.request.urlopen('http://127.0.0.1:8000/ready').read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health').read()"]
       interval: 30s
       timeout: 10s
       retries: 5

@@ -4,15 +4,11 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 import config
-from services.request_lifecycle import registry
 from services.stt_service import STTEngineError, transcribe_audio
+from services.voice_interaction import SUFFIXES, transcribe_interaction
 
 
 router = APIRouter(prefix="/stt", tags=["stt"])
-SUFFIXES = {
-    "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/wav": ".wav",
-    "audio/x-wav": ".wav", "audio/mp4": ".m4a", "audio/mpeg": ".mp3",
-}
 
 
 @router.post("/transcribe")
@@ -28,21 +24,14 @@ async def transcribe(
     suffix = Path(audio.filename or "").suffix.lower()
     if mime not in SUFFIXES or suffix != SUFFIXES[mime]:
         raise HTTPException(status_code=415, detail="Unsupported or mismatched microphone audio format.")
-    request = registry.current(session_id, request_id) if session_id and request_id else None
-    if session_id and (request is None or request.input_type != "audio"):
-        raise HTTPException(status_code=409, detail="This voice interaction was replaced.")
-    if request and not registry.set_status(request, "transcribing"):
-        raise HTTPException(status_code=409, detail="This voice interaction was replaced.")
     try:
         content = await audio.read(int(config.STT_MAX_AUDIO_BYTES) + 1)
-        result = await run_in_threadpool(
-            transcribe_audio, content, suffix, language or None,
-            request.cancelled if request else None,
-        )
-        if request and not registry.set_status(request, "transcribed"):
-            raise HTTPException(status_code=409, detail="This voice interaction was replaced.")
-        return result
+        if session_id and request_id:
+            return await run_in_threadpool(
+                transcribe_interaction, content, mime, session_id, request_id, language or None,
+            )
+        return await run_in_threadpool(transcribe_audio, content, suffix, language or None)
     except STTEngineError as exc:
-        if request and request.cancelled.is_set():
-            raise HTTPException(status_code=409, detail="This voice interaction was replaced.") from exc
+        if "replaced" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=422, detail=str(exc)) from exc
