@@ -16,6 +16,7 @@ from services.audio_chunks import join_speech_segments
 from services.speech_language import speech_phrases, normalize_speech_text
 from services.language_service import detect_language
 from services.tts_service import _markdown_to_spoken_text, _synthesize_piper_speech
+from services.request_lifecycle import registry
 
 
 def wav_sample(value: int, rate: int = 22050) -> bytes:
@@ -29,23 +30,18 @@ def wav_sample(value: int, rate: int = 22050) -> bytes:
 
 
 class LanguageAwareSpeechTests(unittest.TestCase):
-    def test_hinglish_preserves_english_phrase_and_transliterates_known_hindi(self):
-        phrases = speech_phrases(
-            "Yaar, mujhe kal office jaana hai. Can you remind me at 9 AM?", "hinglish"
-        )
-        self.assertEqual([voice for voice, _ in phrases], ["hi", "en", "hi", "en"])
-        self.assertEqual(phrases[-1][1], "Can you remind me at 9 AM?")
-        self.assertIn("मुझे कल", phrases[0][1])
+    def test_hinglish_keeps_one_speaker_and_original_words(self):
+        text = "Yaar, mujhe kal office jaana hai. Can you remind me at 9 AM?"
+        self.assertEqual(speech_phrases(text, "hinglish"), [("en", text)])
+        self.assertEqual(speech_phrases("The system works hai and here is the result.", "hinglish"),
+                         [("en", "The system works hai and here is the result.")])
 
     def test_short_roman_query_is_identified_as_hinglish(self):
         self.assertEqual(detect_language("Yaar, kal office jaana hai"), "hinglish")
 
-    def test_mixed_script_keeps_technical_english_together(self):
-        phrases = speech_phrases(
-            "मुझे आज एक Python project complete करना है। Can you help me?", "hi"
-        )
-        self.assertEqual(phrases[1], ("en", "Python project complete"))
-        self.assertEqual(phrases[-1], ("en", "Can you help me?"))
+    def test_hindi_with_english_terms_keeps_one_hindi_speaker(self):
+        text = "\u092e\u0941\u091d\u0947 \u0906\u091c Python project \u0915\u0930\u0928\u093e \u0939\u0948\u0964"
+        self.assertEqual(speech_phrases(text, "hi"), [("hi", text)])
 
     def test_truncated_hindi_chunk_ends_with_readable_hindi(self):
         spoken = _markdown_to_spoken_text("\u0928\u092e\u0938\u094d\u0924\u0947 \u0906\u092a \u0915\u0948\u0938\u0947 \u0939\u0948\u0902", 1)
@@ -76,7 +72,7 @@ class LanguageAwareSpeechTests(unittest.TestCase):
         values.frombytes(frames)
         self.assertLess(max(abs(b - a) for a, b in zip(values, values[1:])), 20000)
 
-    def test_mixed_piper_request_uses_both_configured_voices(self):
+    def test_streamed_piper_chunks_keep_one_model_for_request(self):
         with tempfile.TemporaryDirectory() as directory:
             for name in (config.PIPER_HINDI_VOICE, config.PIPER_ENGLISH_VOICE):
                 (Path(directory) / (name + ".onnx")).touch()
@@ -88,19 +84,24 @@ class LanguageAwareSpeechTests(unittest.TestCase):
                 def synthesize(self, text, length_scale, cancelled):
                     calls.append((self.path.name, text))
                     return wav_sample(2000)
-            with patch.object(config, "PIPER_MODEL_DIR", directory), patch(
-                "services.tts_service._piper_worker", side_effect=Worker
-            ):
-                audio, mime = _synthesize_piper_speech(TTSRequest(
-                    text="मुझे आज Python project करना है।", language="hi", response_format="wav"
-                ))
-            self.assertEqual(mime, "audio/wav")
-            self.assertTrue(audio.startswith(b"RIFF"))
-            self.assertEqual([name for name, _ in calls], [
-                config.PIPER_HINDI_VOICE + ".onnx",
-                config.PIPER_ENGLISH_VOICE + ".onnx",
-                config.PIPER_HINDI_VOICE + ".onnx",
-            ])
+            registry.begin("voice-lock-test", "voice-lock-request")
+            try:
+                with patch.object(config, "PIPER_MODEL_DIR", directory), patch(
+                    "services.tts_service._piper_worker", side_effect=Worker
+                ):
+                    for text in ("Yaar, mujhe kal office jaana hai.",
+                                 "Can you remind me at 9 AM?"):
+                        audio, mime = _synthesize_piper_speech(TTSRequest(
+                            text=text, language="hinglish", response_format="wav",
+                            session_id="voice-lock-test", request_id="voice-lock-request",
+                        ))
+                        self.assertEqual(mime, "audio/wav")
+                        self.assertTrue(audio.startswith(b"RIFF"))
+            finally:
+                registry.cancel("voice-lock-test", "voice-lock-request")
+            self.assertEqual([name for name, _ in calls],
+                             [config.PIPER_ENGLISH_VOICE + ".onnx"] * 2)
+            self.assertIn("mujhe kal", calls[0][1])
 
 
 if __name__ == "__main__":

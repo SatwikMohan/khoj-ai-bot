@@ -649,6 +649,8 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     phrases = speech_phrases(spoken_text, payload.language)
     if not phrases:
         raise TTSEngineError("There is no speakable text.")
+    if len(phrases) != 1:
+        raise TTSEngineError("Piper requires one speaker for each answer chunk.")
     jobs = []
     for language, phrase in phrases:
         path = _piper_path(language)
@@ -658,6 +660,9 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
                 "Run python scripts/provision_models.py --only-tts first."
             )
         jobs.append((path, phrase))
+    print(json.dumps({"event": "tts_speaker_selected", "request_id": payload.request_id,
+                      "language": payload.language or detect_language(payload.text),
+                      "voice_model": jobs[0][0].name}), flush=True)
     rate, _, _ = _prosody_settings(payload)
     speed = max(0.65, min(1.5, 1 + _parse_percent(rate) / 100))
     length_scale = 1 / speed

@@ -477,7 +477,7 @@ def ask_api_stream(
                     segment_audio,
                     segment,
                     segment_mime,
-                    language=detect_language(segment, fallback=tts_config["language"]),
+                    language=tts_config["language"],
                     voice_id=tts_config["voice_id"],
                 )
             next_audio_sequence += 1
@@ -619,7 +619,7 @@ def _request_tts(text: str, tts_options: dict, sequence: int | None = None) -> t
         "session_id": tts_options.get("session_id"),
         "request_id": tts_options.get("request_id"),
         "voice_id": voice_id,
-        "language": detect_language(text, fallback=tts_options["language"]),
+        "language": tts_options["language"],
         "tone": tts_options["tone"],
         "rate": tts_options["rate"],
         "pitch": tts_options["pitch"],
