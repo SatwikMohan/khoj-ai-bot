@@ -23,6 +23,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
 
 COPY backend /app/backend
 COPY frontend /app/frontend
+RUN PYTHONPATH=/app/backend:/app/frontend python -c "import config; from avatar_renderer import avatar_asset_manifest, import_map; avatar_asset_manifest(config.AVATAR_MODEL_FILE); import_map()"
 
 EXPOSE 8501
 

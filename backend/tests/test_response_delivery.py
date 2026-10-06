@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableGenerator
 
 from services.model_config import thinking_setting
-from services.qa_service import _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
+from services.qa_service import _select_answer_docs, _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
 from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
 from services.request_lifecycle import registry
 from services.speech_chunker import IncrementalSpeechSegments
@@ -44,6 +44,7 @@ class AnswerFilterTests(unittest.TestCase):
         self.assertEqual(cleaner.feed("Reference voltage and page size are fields.", final=True),
                          "Reference voltage and page size are fields.")
         self.assertEqual(CitationTextFilter(enabled=False).feed(raw, final=True), raw)
+        self.assertEqual(CitationTextFilter().feed("From Evidence 1, the limit is 100 kg [Evidence 1].", final=True), "The limit is 100 kg.")
 
     def test_first_speech_segment_is_ready_before_generation_ends(self):
         segmenter = IncrementalSpeechSegments()
@@ -112,6 +113,12 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertNotIn('private', text)
         self.assertEqual(events[-1]['sources'], [])
 
+    def test_answer_context_drops_distractors_but_keeps_version_comparisons(self):
+        docs = [Document(page_content=str(i), metadata={"source": f"source-{i}"}) for i in range(5)]
+        self.assertEqual(_select_answer_docs("What is a bucket wheel excavator?", docs, "document"), docs[:2])
+        self.assertEqual(_select_answer_docs("Compare the 2023 and 2024 rules", docs, "document"), docs)
+        self.assertEqual(_select_answer_docs("Explain mine safety", docs, "summary"), docs)
+
     def test_normal_context_hides_locations_but_explicit_request_can_use_them(self):
         docs = [Document(page_content="The storage limit is 100 kg.",
                          metadata={"source": "rules.pdf", "page": 4, "year": "2025"})]
@@ -157,6 +164,19 @@ class ResponseDeliveryTests(unittest.TestCase):
             events = list(stream_answer_events('What is the storage limit?'))
         self.assertEqual(events[-1]['type'], 'error')
         self.assertIn('connection refused', events[-1]['message'])
+
+    def test_retrieved_context_and_latest_question_reach_chat_messages(self):
+        captured = []
+        def generate(inputs):
+            for value in inputs:
+                captured.extend(value.messages if hasattr(value, "messages") else [value])
+            yield AIMessageChunk(content="The storage limit is 100 kg.")
+        with patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
+            events = list(stream_answer_events("What is the storage limit?"))
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual([message.type for message in captured], ["system", "human"])
+        self.assertIn("storage limit is 100 kg", captured[1].content)
+        self.assertIn("What is the storage limit?", captured[1].content)
 
     def test_non_streaming_endpoint_uses_same_answer(self):
         with patch('services.qa_service._llm', return_value=self.model([AIMessageChunk(content='100 kg [1].')])):

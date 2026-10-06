@@ -1,0 +1,112 @@
+{
+  "cases": 6,
+  "passed": 4,
+  "results": [
+    {
+      "id": "bwe_en",
+      "checks": {
+        "retrieval": true,
+        "context": true,
+        "answer_terms": true,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": true
+      },
+      "passed": true,
+      "sources": [
+        "raw_data_files/Q&As/BWE.docx",
+        "raw_data_files/Q&As/Shovel & Dumper.docx"
+      ],
+      "answer": "A Bucket Wheel Excavator (BWE) uses a rotating wheel with buckets to excavate material."
+    },
+    {
+      "id": "underground_en",
+      "checks": {
+        "retrieval": true,
+        "context": true,
+        "answer_terms": true,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": true
+      },
+      "passed": true,
+      "sources": [
+        "raw_data_files/Q&As/UG Mines .docx",
+        "raw_data_files/Q&As/Safety Modules.docx"
+      ],
+      "answer": "A continuous miner is a mechanized underground mining machine used to cut, gather and transfer coal continuously. Its main purpose is to mechanically extract coal from the working face."
+    },
+    {
+      "id": "dragline_en",
+      "checks": {
+        "retrieval": true,
+        "context": true,
+        "answer_terms": true,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": true
+      },
+      "passed": true,
+      "sources": [
+        "raw_data_files/Q&As/Dragline.docx",
+        "raw_data_files/Q&As/BWE.docx"
+      ],
+      "answer": "Draglines are used to remove and place large volumes of overburden, which is the soil and rock lying above a mineral deposit, in an open-cast mine."
+    },
+    {
+      "id": "critical_minerals_en",
+      "checks": {
+        "retrieval": true,
+        "context": true,
+        "answer_terms": true,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": true
+      },
+      "passed": true,
+      "sources": [
+        "raw_data_files/Critical Minerals/19_1751370840.pdf",
+        "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+        "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+        "raw_data_files/Critical Minerals/19_1751370840.pdf",
+        "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf"
+      ],
+      "answer": "The Ministry of Mines listed thirty critical minerals for India in December 2023."
+    },
+    {
+      "id": "safety_hi_cross",
+      "checks": {
+        "retrieval": false,
+        "context": false,
+        "answer_terms": true,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": false
+      },
+      "passed": false,
+      "sources": [
+        "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+        "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf"
+      ],
+      "answer": "खनन में भारी मशीनों और विस्फोटकों के आसपास सुरक्षा महत्वपूर्ण है क्योंकि यह सुनिश्चित करता है कि कार्यस्थल पर कोई भी खतरा या दुर्घटना से बचा जा सके। भारत में खनन उद्योग में सुरक्षा को लेकर विशेष ध्यान दिया जा रहा है, खासकर जब यह भारी मशीनों और विस्फोटकों के आसपास होता है।"
+    },
+    {
+      "id": "bwe_hinglish",
+      "checks": {
+        "retrieval": true,
+        "context": false,
+        "answer_terms": false,
+        "forbidden_terms": true,
+        "language": true,
+        "labelled_facts_in_evidence": false
+      },
+      "passed": false,
+      "sources": [
+        "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+        "raw_data_files/Q&As/BWE.docx"
+      ],
+      "answer": "BWE ka main fayda yeh hai ki yeh ground conditions aur material characteristics par kam depend karta hai, jisse kaam karna asaan hota hai."
+    }
+  ],
+  "limitation": "Term and language checks do not prove full factual entailment or natural speech quality."
+}

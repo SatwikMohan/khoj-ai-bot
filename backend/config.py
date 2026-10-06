@@ -33,6 +33,8 @@ QA_RESPONSE_TIMEOUT_SECONDS = 180
 QA_WARMUP_ON_STARTUP = False
 QA_TEMPERATURE = 0.3
 QA_TOP_K = 5
+QA_ANSWER_CONTEXT_DOCS = 2  # Focus routine answers; version comparisons keep all retrieved passages.
+QA_DIAGNOSTICS_ENABLED = False  # Includes question, evidence and final prompt in server logs.
 # None selects model-specific embedding prefixes automatically; "" disables them.
 EMBED_QUERY_PREFIX = None
 EMBED_DOCUMENT_PREFIX = None
@@ -212,7 +214,7 @@ def validate_config() -> None:
         raise ValueError("Streaming speech chunk sizes and concurrency must be positive and ordered.")
     if not 0 <= INDEX_MIN_RECALL_AT_5 <= 1:
         raise ValueError("INDEX_MIN_RECALL_AT_5 must be between zero and one.")
-    if min(QA_TOP_K, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
+    if min(QA_TOP_K, QA_ANSWER_CONTEXT_DOCS, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
         raise ValueError("Retrieval limits must be positive.")
     if PIPER_DEVICE not in {"cpu", "cuda"}:
         raise ValueError("PIPER_DEVICE must be cpu or cuda.")

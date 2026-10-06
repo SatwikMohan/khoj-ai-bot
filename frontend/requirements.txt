@@ -1,2 +1,2 @@
-streamlit
+streamlit==1.62.0
 markdown

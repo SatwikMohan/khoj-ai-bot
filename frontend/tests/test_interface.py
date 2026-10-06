@@ -1,6 +1,7 @@
 """Frontend structure and streamed chat smoke tests."""
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +12,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "frontend"))
 import config
 from visualization import render_ai_visualization
-from avatar_renderer import render_script
+from avatar_renderer import render_script, avatar_asset_manifest
 
 
 class InterfaceTests(unittest.TestCase):
@@ -83,18 +84,42 @@ class InterfaceTests(unittest.TestCase):
         with patch.object(config, "AVATAR_MODEL_FILE", "assets/missing-avatar.gltf"):
             import_map, script = render_script()
         self.assertEqual(import_map, "{}")
-        self.assertIn("Avatar renderer unavailable", script)
+        self.assertIn("3D avatar unavailable", script)
         self.assertIn("modelStatus", script)
+
+    def test_avatar_resource_filename_case_is_exact(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model = Path(folder) / "Scene.gltf"
+            model.write_text('{"asset":{"version":"2.0"}}', encoding="utf-8")
+            with self.assertRaises(FileNotFoundError):
+                avatar_asset_manifest(str(Path(folder) / "scene.gltf"))
+
+    def test_avatar_rejects_git_lfs_pointer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model = Path(folder) / "scene.gltf"
+            model.write_text("version https://git-lfs.github.com/spec/v1\\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Git LFS pointer"):
+                avatar_asset_manifest(str(model))
+
+    def test_avatar_model_and_every_external_resource_exist(self):
+        path, model, resources = avatar_asset_manifest(config.AVATAR_MODEL_FILE)
+        self.assertEqual(path.name, "scene.gltf")
+        self.assertTrue(model.get("meshes"))
+        self.assertGreater(len(resources), 1)
+        self.assertTrue(all(item.stat().st_size > 0 for item in resources))
 
     def test_visualization_is_local_and_supports_audio_queue(self):
         with patch("visualization.components.html") as render:
-            render_ai_visualization(queue_id="test-queue", thinking=True)
+            render_ai_visualization(queue_id="test-queue", request_id="test-request", session_id="test-session", thinking=True)
         html = render.call_args.args[0]
         self.assertIn("texmin:avatar-queue", html)
+        self.assertIn("texmin_audio_owner:", html)
+        self.assertIn("playback_ended", html)
+        self.assertIn("item.requestId !== settings.requestId", html)
         self.assertIn("texmin_ai_activity", html)
         self.assertIn("texmin_voice_interrupt_at", html)
         self.assertNotIn("https://unpkg.com/three", html)
-        self.assertIn("male04 face rigged", html)
+        self.assertIn("Invincible - Debbie Grayson", html)
         self.assertIn('id="avatarScene"', html)
         self.assertIn("data:model/gltf+json;base64,", html)
         self.assertIn("data:text/javascript;base64,", html)
@@ -103,4 +128,3 @@ class InterfaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

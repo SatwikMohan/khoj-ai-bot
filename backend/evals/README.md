@@ -32,3 +32,22 @@ against the active index when their embedding profile matches:
 
 The active collection remains available until successful promotion. Review the
 retrieval output and source coverage before adding labels or changing models.
+
+## Direct answer checks
+
+`answer_quality_cases.jsonl` contains labelled English, Hindi and Hinglish questions from the current corpus. `evaluate_answer_quality.py` calls the backend without Streamlit, checks which sources reach the answer context, then checks required answer terms, language and whether those labelled terms occur in the evidence. These checks cannot prove full factual entailment or voice quality.
+
+For the configured DGX models and promoted index:
+
+```bash
+PYTHONPATH=backend python backend/evals/evaluate_answer_quality.py --output backend/evals/dgx_answer_quality.json
+```
+
+On this Windows test machine, the installed models and active index use the older local profile. To evaluate that profile without changing `backend/config.py`:
+
+```powershell
+$env:PYTHONPATH = 'backend;frontend'
+.\.venv\Scripts\python.exe backend/evals/evaluate_answer_quality.py --chat-model llama3.2:latest --embed-model nomic-embed-text --embed-dimensions 768 --output backend/evals/local_answer_quality.json
+```
+
+The local profile is not a proxy for the DGX `bge-m3` and Llama 3.1 8B configuration. Build and promote a compatible index on the DGX before running the first command.

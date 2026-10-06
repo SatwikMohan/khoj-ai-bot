@@ -10,7 +10,7 @@ The asset contains a skin and jaw bone but **zero animation clips and zero mouth
 
 A missing model or vendored module now shows an error in the avatar panel instead of leaving its loading label indefinitely.
 
-The model is `male04 face rigged` by photon under CC BY 4.0; the UI includes linked attribution and `frontend/assets/license.txt` retains the full credit. Three.js 0.160.1 is MIT licensed; its text is in `frontend/assets/THREE_LICENSE.txt`.
+Correction (6 October 2026): the tracked `scene.gltf` asset is `Invincible - Debbie Grayson` by ASideOfChidori under CC BY 4.0, as recorded in `frontend/assets/license.txt`. The earlier male04 attribution was incorrect; the UI credit has been corrected. Three.js 0.160.1 is MIT licensed; its text is in `frontend/assets/THREE_LICENSE.txt`.
 
 ## Speech pipeline
 

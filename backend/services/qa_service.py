@@ -24,7 +24,7 @@ from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
 from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
 from services.request_lifecycle import registry
-from services.versioning import document_identity, select_documents, version_metadata
+from services.versioning import document_identity, select_documents, version_metadata, YEAR, VERSION, LATEST, HISTORICAL
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -582,6 +582,15 @@ def _wants_source_locations(question: str) -> bool:
     ))
 
 
+def _select_answer_docs(question: str, docs: list, query_type: str) -> list:
+    """Keep simple answers focused while preserving evidence for version questions."""
+    if query_type == "summary" or YEAR.search(question) or VERSION.search(question) or LATEST.search(question) or HISTORICAL.search(question) or re.search(
+        r"\b(?:compare|comparison|difference|between|across|versus|vs\.?|both)\b", question, re.I
+    ):
+        return docs
+    return docs[:min(len(docs), int(config.QA_ANSWER_CONTEXT_DOCS))]
+
+
 def _format_context(docs, *, include_locations: bool = False) -> str:
     max_chars = int(config.CONTEXT_MAX_CHARS)
     used_chars = 0
@@ -600,7 +609,7 @@ def _format_context(docs, *, include_locations: bool = False) -> str:
             header = f"[Document {index}: {source}{folder_label}{page_label}{year_label}]\n"
         else:
             # Preserve version scope without teaching the model retrieval labels.
-            header = f"{', '.join(labels)}\n" if labels else ""
+            header = f"[Evidence {index}{year_label}]\n"
         remaining_chars = min(max_chars - used_chars - len(header), max(0, max_chars // max(1, len(docs)) - len(header)))
         if remaining_chars <= 0:
             break
@@ -1088,14 +1097,30 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
 
     yield {"type": "status", "message": "Preparing an answer from the retrieved passages"}
     include_locations = _wants_source_locations(question)
-    chain = _prompt_for_query(query_type, include_locations=include_locations) | _llm(temperature)
+    answer_docs = _select_answer_docs(question, docs, query_type)
+    prompt = _prompt_for_query(query_type, include_locations=include_locations)
+    chain = prompt | _llm(temperature)
     inputs = {
-        "context": _format_context(docs, include_locations=include_locations),
+        "context": _format_context(answer_docs, include_locations=include_locations),
         "chat_history": _format_chat_history(chat_history),
         "question": question,
         "language_instruction": language_instruction(language),
         "thinking_instruction": _thinking_instruction(),
     }
+    if config.QA_DIAGNOSTICS_ENABLED:
+        formatted = prompt.format_messages(**inputs)
+        print(json.dumps({
+            "event": "qa_pipeline_trace", "request_id": request.request_id if request else None,
+            "question": question, "retrieval_query": retrieval_query, "language": language,
+            "model": config.OLLAMA_CHAT_MODEL, "embedding_model": config.OLLAMA_EMBED_MODEL,
+            "temperature": temperature, "num_ctx": config.OLLAMA_NUM_CTX,
+            "num_predict": config.OLLAMA_NUM_PREDICT, "thinking": config.OLLAMA_THINK,
+            "retrieved": [{"metadata": doc.metadata, "text": _clean_content(doc.page_content)}
+                          for doc in docs],
+            "used_documents": len(answer_docs),
+            "context": inputs["context"],
+            "messages": [{"role": message.type, "content": message.content} for message in formatted],
+        }, ensure_ascii=True, default=str), flush=True)
     filter_text = AnswerTextFilter()
     citation_filter = CitationTextFilter(enabled=not include_locations)
     answer_parts = []
@@ -1149,12 +1174,16 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
         "generation": round((time.perf_counter() - generation_started_at) * 1000, 1),
         "total": round((time.perf_counter() - started_at) * 1000, 1),
     }
+    if config.QA_DIAGNOSTICS_ENABLED:
+        print(json.dumps({"event": "qa_answer_trace", "request_id": request.request_id if request else None,
+                          "answer": answer, "response_metadata": metadata},
+                         ensure_ascii=True, default=str), flush=True)
     print(json.dumps({
         "event": "qa_stream_completed", "model": config.OLLAMA_CHAT_MODEL,
         "done_reason": metadata.get("done_reason"), **timings,
     }), flush=True)
     yield {
         "type": "done", "answer": answer,
-        "sources": _source_dicts(_source_chunks(docs)) if include_locations else [],
+        "sources": _source_dicts(_source_chunks(answer_docs)) if include_locations else [],
         "language": language, "query_type": query_type, "timings_ms": timings,
     }

@@ -48,7 +48,7 @@ class CitationTextFilter:
 
     _PREFIX = re.compile(
         r"(?i)\b(?:from|according to|as (?:stated|mentioned) in)\s+"
-        r"(?:the\s+)?(?:reference|source|document)\s*#?\d+"
+        r"(?:the\s+)?(?:reference|source|document|evidence)\s*#?\d+"
         r"(?:\s*,?\s*page\s*\d+)?\s*[,;:]?\s*"
     )
     _CONTEXT = re.compile(
@@ -61,11 +61,11 @@ class CitationTextFilter:
         r"(?:\s+of\s+(?:the\s+)?document)?)"
     )
     _NUMBERED = re.compile(
-        r"(?i)[ \t]+(?:\[\s*\d+(?:\s*,\s*\d+)*\s*\]|\(reference\s+\d+\))"
+        r"(?i)[ \t]+(?:\[\s*\d+(?:\s*,\s*\d+)*\s*\]|\[\s*evidence\s+\d+\s*\]|\(reference\s+\d+\))"
         r"(?=\s|[.,;:!?\u0964]|$)"
     )
     _REFERENCE_SUBJECT = re.compile(
-        r"(?i)\b(?:reference|document|source|chunk)\s*#?\d+\s*"
+        r"(?i)\b(?:reference|document|source|chunk|evidence)\s*#?\d+\s*"
         r"(?:[,;:]|(?:states?|says?|shows?|mentions?|contains?|indicates?)\s+(?:that\s+)?)\s*"
     )
     _PAGE_SUBJECT = re.compile(
