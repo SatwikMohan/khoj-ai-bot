@@ -142,11 +142,19 @@ RECORDING_SILENCE_MS = 1100
 RECORDING_SPEECH_CONFIRM_MS = 150
 STT_REQUEST_TIMEOUT_SECONDS = 90
 
-# Reference-free offline speech.
-TTS_ENGINE = "piper"
+# The DGX uses one Indian bilingual speaker. Piper remains the lightweight
+# Windows development voice; its English model uses US phonemization.
+TTS_ENGINE = "veena" if RUNNING_IN_DOCKER else "piper"
+VEENA_MODEL_ID = "maya-research/Veena"
+VEENA_MODEL_REVISION = "8b770f9e69e6b35ef320d4cd70a99a4ab6dd022f"
+VEENA_MODEL_DIR = str(MODEL_ROOT / "veena")
+VEENA_CODEC_ID = "hubertsiuzdak/snac_24khz"
+VEENA_CODEC_REVISION = "d73ad176a12188fcf4f360ba3bf2c2fbbe8f58ec"
+VEENA_CODEC_DIR = str(MODEL_ROOT / "snac_24khz")
+VEENA_SPEAKER = "kavya"
 PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
 PIPER_INDIAN_ENGLISH_VOICE = "en_IN-spicor-english"
-PIPER_ENGLISH_VOICE = PIPER_INDIAN_ENGLISH_VOICE  # Selected after local listening comparison.
+PIPER_ENGLISH_VOICE = PIPER_INDIAN_ENGLISH_VOICE  # Windows fallback; its config uses en-us phonemization.
 # Third-party voice is absent from Piper's registry. Provision with pinned file hashes.
 PIPER_CUSTOM_VOICE_SOURCES = {
     "en_IN-spicor-english": {
@@ -161,19 +169,19 @@ PIPER_DEVICE = "cpu"  # "cuda" requires a compatible ONNX Runtime GPU build on t
 PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
 TTS_PRELOAD_VOICES = True
 TTS_FALLBACK_ENGINES = ""  # Avoid a different speaker after a Piper failure.
-TTS_TIMEOUT_SECONDS = 45
+TTS_TIMEOUT_SECONDS = 120 if TTS_ENGINE == "veena" else 45
 TTS_RESPONSE_TIMEOUT_SECONDS = 120
 TTS_FAILURE_THRESHOLD = 2
 TTS_FAILURE_COOLDOWN_SECONDS = 60
 TTS_MIN_AUDIO_BYTES = 1024
-TTS_SAMPLE_RATE = 22050
+TTS_SAMPLE_RATE = 24000 if TTS_ENGINE == "veena" else 22050
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH_BYTES = 2
 TTS_STREAM_MIN_CHARS = 60
 TTS_STREAM_MAX_CHARS = 320
 TTS_STREAM_CONCURRENCY = 2
 QA_STREAM_HEARTBEAT_SECONDS = 0.35
-TTS_TONE = "warm"  # Piper maps presets to speed; its current voices do not support emotion control.
+TTS_TONE = "warm"  # Veena's speaker is fixed; Piper maps tone presets to speed.
 TTS_RATE = "+0%"
 TTS_PITCH = "+0Hz"
 TTS_VOICE = "configured"

@@ -61,63 +61,61 @@ request cancellation discards its result and closes its stream where supported.
 
 ## Offline speech
 
-The default is Piper CPU speech, using local `.onnx` and `.onnx.json` files:
+The Docker deployment on the NVIDIA DGX uses [Veena](https://huggingface.co/maya-research/Veena)
+with its built-in `kavya` speaker for English, Hindi, and Hinglish. One model
+speaks every chunk, so language changes cannot switch speaker identity.
+Veena generates 24 kHz WAV through the local
+[SNAC 24 kHz codec](https://huggingface.co/hubertsiuzdak/snac_24khz).
+Both model revisions are pinned in `backend/config.py`; the weights are cached
+in the persistent `/models` volume during `backend-model-init`. Runtime speech
+uses local files and requires the DGX CUDA GPU. The Veena checkpoint is about
+7.6 GB; allow space for its cache and the rest of the assistant's models.
+
+Windows development keeps the small Piper voices. Its `en_IN-spicor-english`
+checkpoint uses **US English phonemization**, despite the `en_IN` name. The
+Windows voice therefore cannot be used to judge the DGX Indian accent. Piper
+also uses separate Hindi and English speakers; the previous single-speaker
+routing keeps one speaker per answer chunk, but its accent and expression
+remain limited.
+
+The active selection is in `backend/config.py`:
 
 ```python
-TTS_ENGINE = "piper"
-PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
-PIPER_ENGLISH_VOICE = "en_IN-spicor-english"
-PIPER_DEVICE = "cpu"
+TTS_ENGINE = "veena" if RUNNING_IN_DOCKER else "piper"
+VEENA_SPEAKER = "kavya"
 TTS_FALLBACK_ENGINES = ""
-TTS_TIMEOUT_SECONDS = 45
-RESPONSE_LANGUAGE = "auto"
-HINGLISH_SCRIPT = "roman"
 ```
 
-Speech-only phrase routing transliterates a curated set of Romanized Hindi
-words and sends English technical terms to the English phonemizer. Displayed
-chat text remains unchanged. The Hindi and English voices are separate speakers.
-The selected English default is the Indian English `en_IN-spicor-english`.
-Its repository labels the checkpoint AGPL-3.0; review the terms for deployment.
-`scripts/provision_models.py --only-tts` downloads this third-party model
-and JSON with pinned SHA256 verification. Stage the files under
-`backend/models/piper` locally or `/models/piper` in Docker for offline use.
-Comparison clips are under `backend/evals/voice_samples`.
-The espeak-ng fallback is less natural but works offline when installed.
-Set `TTS_FALLBACK_ENGINES = "espeak"` to enable that optional fallback. Selected engines appear in
-the `tts_completed` log event. Reference recordings, transcripts and gated HF
-access are no longer used by the default speech stack.
+The empty fallback list prevents a failed generation from changing to a
+second speaker. A voice error leaves the written answer visible. The service
+loads the Veena model at startup and terminates its worker on cancellation or
+timeout. `backend/services/veena_worker.py` keeps model weights in memory after
+warmup. Model audio quality, latency, and Roman-script Hinglish pronunciation
+still require a listening test on the DGX; local backend tests validate routing
+and WAV handling without loading the large model.
 
-Locally, voices default to `backend/models/piper`. In Docker, `config.py` selects
-`PIPER_MODEL_DIR = "/models/piper"` in the persistent `ai_models` volume.
-Set `PIPER_MODEL_DIR` explicitly only if you use a different local directory.
-Voice values may also be absolute paths to compatible Piper ONNX models.
-PIPER_DEVICE defaults to CPU; CUDA requires an ARM64-compatible ONNX Runtime GPU
-installation in the Spark container. Both active Hindi and English models are
-provisioned and checked. The query text selects
-the answer language automatically. `langid` handles longer Latin-script queries
-offline; script and Hinglish rules handle shorter ones. Ambiguous short queries
-fall back to English. `PIPER_ADDITIONAL_VOICES` maps other ISO language codes to
-locally installed Piper voices. Other languages require a configured Piper voice, or an installed `espeak-ng` voice when the fallback is enabled; `espeak-ng --voices` lists them. If no voice supports the language,
-the text answer remains visible and speech returns a clear error.
-
-Provision once with internet access, or copy the model files from a connected
-machine. Runtime synthesis never downloads anything:
+Provision the configured voice and verify its cached files:
 
 ```bash
-cd backend
-python scripts/provision_models.py --only-tts
-python scripts/provision_models.py --only-tts --offline
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --offline
 ```
 
-The offline command actually synthesizes Hindi and English WAVs and checks their
-audio content. Full provisioning (without `--only-tts`) also downloads the selected
-Whisper and optional reranker assets. Piper worker processes are terminated if
-they exceed the speech timeout. An audio failure leaves the text answer visible.
+After the app starts on the DGX, generate four clips for an accent and
+pronunciation listening check. The Roman Hinglish clip matches the app's current
+reply script; the mixed-script clip shows whether Devanagari improves Hindi
+pronunciation without changing speaker identity:
 
-Piper API: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/API_PYTHON.md
+```bash
+docker compose exec app python /app/backend/evals/veena_smoke.py
+docker cp texmin-app:/app/backend/evals/voice_samples/veena_smoke ./veena-smoke
+```
 
-Hindi voice: https://huggingface.co/rhasspy/piper-voices/tree/main/hi/hi_IN/pratham/medium
+For local Piper testing, run `python backend/scripts/provision_models.py
+--only-tts` from the project root. To stage Veena on another connected machine,
+pass `--engine veena`; copy both `backend/models/veena` and
+`backend/models/snac_24khz` to the DGX model volume. The offline command checks
+that model files are present; the application startup performs CUDA synthesis.
 
 ## DGX deployment
 
@@ -267,55 +265,29 @@ English and Hindi OCR language data. The browser records speech locally and send
 audio to the configured Whisper backend, rather than using a browser vendor's
 online transcription service.
 
-## Piper download fails with “No address associated with hostname”
+## Voice model download fails
 
-This is DNS resolution failure, not a missing HF token. The configured Piper
-voices are public, and their downloader does not use HF_TOKEN. A redirect to
-Hugging Face's file-storage host can fail even when `huggingface.co` resolves.
-The configured public Whisper and reranker models also do not require gated
-access. Revoke any token previously pasted into chat; never move it into config.
+Veena and SNAC are public Hugging Face models and need no gated-model token.
+If downloading on the DGX fails, compare host and container DNS/proxy access to
+`huggingface.co` and the redirect host named in the error. Do not disable TLS
+checks to work around network errors.
 
-On the DGX, compare the host and container download paths (HEAD only, no model
-download). The failing hostname in curl's error is the one to investigate:
+To stage the weights from a connected machine with the backend dependencies
+installed:
 
 ```bash
-curl -fIL --connect-timeout 10 --max-time 30 'https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx?download=true'
-docker compose run --rm --no-deps backend-model-init curl -fIL --connect-timeout 10 --max-time 30 'https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx?download=true'
+python backend/scripts/provision_models.py --only-tts --engine veena
 ```
 
-If only the container fails, check Docker's DNS/proxy configuration. Use a DNS
-server reachable and approved on your network; do not blindly replace corporate
-DNS or disable TLS checks. If both fail, correct the host/network configuration
-or stage the voices from an internet-connected machine. The workspace cannot
-repair the DGX network automatically.
-
-On a connected machine with the project dependencies installed:
+Copy `backend/models/veena` and `backend/models/snac_24khz` into a directory
+named `voice-stage` on the DGX. Import them into the persistent model volume and
+verify without network access:
 
 ```bash
-python backend/scripts/provision_models.py --only-tts
-```
-
-Copy the resulting `backend/models/piper` directory (the selected Hindi and
-Indian English `.onnx` and adjacent `.onnx.json` files) into the project
-directory on the DGX as `piper-voices`. Import and verify them without internet:
-
-```bash
-docker compose run --rm --no-deps -v "$PWD/piper-voices:/voice-import:ro" backend-model-init sh -c 'mkdir -p /models/piper && cp /voice-import/*.onnx /voice-import/*.onnx.json /models/piper/'
+docker compose run --rm --no-deps -v "$PWD/voice-stage:/voice-stage:ro" backend-model-init sh -c 'mkdir -p /models/veena /models/snac_24khz && cp -a /voice-stage/veena/. /models/veena/ && cp -a /voice-stage/snac_24khz/. /models/snac_24khz/'
 docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --offline
 ```
 
-This intentionally replaces matching voice files in the model cache; it leaves
-Ollama models and document vectors alone. Whisper/reranker must also be cached
-before fully offline operation. Once DNS works, resume:
-
-```bash
-docker compose up -d --force-recreate backend-model-init index-init app gateway
-docker compose logs --tail=100 -f backend-model-init index-init app ollama
-```
-
-If all models and the index are already prepared, use the offline startup command
-above instead; full provisioning can still contact Hugging Face for metadata.
-
-Use Compose service name `ollama`, not container name `texmin-ollama`, for logs.
-See [Docker DNS documentation](https://docs.docker.com/engine/network/#dns-services)
-and the [public Piper voice files](https://huggingface.co/rhasspy/piper-voices/tree/main/hi/hi_IN/pratham/medium).
+Whisper and reranker assets must also be cached for fully offline startup. Use
+Compose service name `ollama` for logs. See the
+[Docker DNS documentation](https://docs.docker.com/engine/network/#dns-services).

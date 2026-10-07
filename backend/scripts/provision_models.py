@@ -85,11 +85,11 @@ def _provision_custom_voice(path: Path, source: dict[str, str], offline: bool) -
         _download_pinned_file(destination, url, expected)
 
 
-def provision_tts(offline: bool = False) -> None:
+def provision_tts(offline: bool = False, engine_override: str | None = None) -> None:
     from helpers.request_models import TTSRequest
     from services.tts_service import _piper_path, _synthesize_with_engine, _validate_audio
 
-    engine = config.TTS_ENGINE.strip().lower()
+    engine = (engine_override or config.TTS_ENGINE).strip().lower()
     if engine == "auto":
         engine = "piper"
     if engine == "piper":
@@ -111,6 +111,30 @@ def provision_tts(offline: bool = False) -> None:
             audio, media = tts_service._synthesize_piper_speech(TTSRequest(text=text, language=language, response_format="wav"))
             _validate_audio(audio, media)
             print(f"Piper {language} offline synthesis passed.", flush=True)
+    elif engine == "veena":
+        from huggingface_hub import snapshot_download
+
+        assets = (
+            (config.VEENA_MODEL_ID, config.VEENA_MODEL_REVISION, config.VEENA_MODEL_DIR),
+            (config.VEENA_CODEC_ID, config.VEENA_CODEC_REVISION, config.VEENA_CODEC_DIR),
+        )
+        for model_id, revision, destination in assets:
+            print(f"Provisioning offline speech asset: {model_id}@{revision}", flush=True)
+            model_path = Path(destination)
+            if not offline:
+                snapshot_download(
+                    repo_id=model_id, revision=revision, local_dir=destination,
+                    allow_patterns=["*.json", "*.jinja", "*.safetensors", "*.bin"],
+                )
+            required = (
+                ("config.json", "tokenizer.json", "model.safetensors.index.json",
+                 "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
+                if model_id == config.VEENA_MODEL_ID else ("config.json", "pytorch_model.bin")
+            )
+            missing = [name for name in required if not (model_path / name).is_file()]
+            if missing:
+                raise RuntimeError(f"Missing speech model files in {destination}: {', '.join(missing)}")
+        print("Veena and SNAC assets are cached; CUDA synthesis is verified when the app starts.", flush=True)
     elif engine == "espeak":
         audio, media = _synthesize_with_engine(engine, TTSRequest(text="नमस्ते। आपका स्वागत है।"))
         _validate_audio(audio, media)
@@ -134,12 +158,13 @@ def provision_reranker() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download configured offline assets and verify speech.")
     parser.add_argument("--only-tts", action="store_true")
+    parser.add_argument("--engine", choices=("piper", "veena"), help="Override the configured speech engine for provisioning.")
     parser.add_argument("--offline", action="store_true", help="Verify cached TTS assets without downloading.")
     args = parser.parse_args()
     if args.offline and not args.only_tts:
         parser.error("--offline currently requires --only-tts")
     config.configure_runtime_environment(offline=args.offline)
-    provision_tts(offline=args.offline)
+    provision_tts(offline=args.offline, engine_override=args.engine)
     if not args.only_tts:
         provision_whisper()
         provision_reranker()

@@ -236,6 +236,8 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
 def _synthesize_with_engine(engine_name: str, payload: TTSRequest) -> tuple[bytes, str]:
     if engine_name == "piper":
         return _synthesize_piper_speech(payload)
+    if engine_name == "veena":
+        return _synthesize_veena_speech(payload)
     if engine_name == "espeak":
         return _synthesize_espeak_speech(payload)
     if engine_name in {"local", "offline", "pyttsx3"}:
@@ -309,7 +311,25 @@ def tts_runtime_status() -> dict:
         status["voices"] = [str(path) for path in paths]
         status["device"] = config.PIPER_DEVICE
         status["cross_language_speaker_consistency"] = False
-        status["english_voice_accent"] = "Indian" if config.PIPER_ENGLISH_VOICE.startswith("en_IN-") else "not Indian (configured " + config.PIPER_ENGLISH_VOICE + ")"
+        status["english_voice_accent"] = "US phonemization" if config.PIPER_ENGLISH_VOICE == "en_IN-spicor-english" else "depends on configured model"
+    elif engine == "veena":
+        model = Path(config.VEENA_MODEL_DIR)
+        codec = Path(config.VEENA_CODEC_DIR)
+        if (not all((model / name).is_file() for name in (
+                    "config.json", "tokenizer.json", "model.safetensors.index.json",
+                    "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"))
+                or not all((codec / name).is_file() for name in ("config.json", "pytorch_model.bin"))):
+            status.update(status="unavailable", error="Veena or SNAC model files are missing. Run scripts/provision_models.py --only-tts.")
+        else:
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    status.update(status="unavailable", error="Veena requires a CUDA GPU.")
+            except ImportError:
+                status.update(status="unavailable", error="PyTorch is unavailable for Veena.")
+        status["voice"] = config.VEENA_SPEAKER
+        status["device"] = "cuda"
+        status["cross_language_speaker_consistency"] = True
     elif engine == "espeak":
         if not shutil.which("espeak-ng"):
             status.update(status="unavailable", error="Install espeak-ng for the offline fallback.")
@@ -330,6 +350,8 @@ def warm_up_tts() -> None:
     status = tts_runtime_status()
     if status["status"] != "ready":
         raise TTSEngineError(status.get("error", "TTS warm-up failed."))
+    if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() == "veena":
+        _veena_worker().synthesize("\u0928\u092e\u0938\u094d\u0924\u0947. Hello.", 1.0, None)
     if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}:
         for language, sample in (("english", "Voice ready."), ("hindi", "\u0906\u0935\u093e\u091c\u093c \u0924\u0948\u092f\u093e\u0930 \u0939\u0948\u0964")):
             _piper_worker(_piper_path(language)).synthesize(sample, 1.0, None)
@@ -544,8 +566,14 @@ def _piper_path(language: str) -> Path:
 class PersistentPiperWorker:
     """One cached voice model; a cancelled job terminates its subprocess."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, script: str = "piper_worker.py",
+                 args: tuple[str, ...] | None = None, label: str = "Piper",
+                 timeout: float | None = None):
         self.path = path
+        self.script = script
+        self.args = (config.PIPER_DEVICE,) if args is None else args
+        self.label = label
+        self.timeout = timeout
         self.lock = threading.Lock()
         self.process = None
 
@@ -566,7 +594,7 @@ class PersistentPiperWorker:
         while length:
             part = stream.read(length)
             if not part:
-                raise TTSEngineError("Piper worker stopped before sending audio.")
+                raise TTSEngineError("Speech worker stopped before sending audio.")
             parts.append(part)
             length -= len(part)
         return b"".join(parts)
@@ -574,20 +602,21 @@ class PersistentPiperWorker:
     def synthesize(self, text: str, length_scale: float, cancelled: threading.Event | None) -> bytes:
         while not self.lock.acquire(timeout=float(config.REQUEST_CANCELLATION_POLL_SECONDS)):
             if cancelled is not None and cancelled.is_set():
-                raise TTSEngineError("Piper speech generation was cancelled.")
+                raise TTSEngineError(f"{self.label} speech generation was cancelled.")
         try:
             if cancelled is not None and cancelled.is_set():
-                raise TTSEngineError("Piper speech generation was cancelled.")
+                raise TTSEngineError(f"{self.label} speech generation was cancelled.")
             if self.process is None or self.process.poll() is not None:
                 self.close()
                 self.process = subprocess.Popen(
-                    [sys.executable, str(PROJECT_ROOT / "services" / "piper_worker.py"), "--persistent", str(self.path.resolve()), config.PIPER_DEVICE],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    [sys.executable, str(PROJECT_ROOT / "services" / self.script), "--persistent", str(self.path.resolve()), *self.args],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=None if self.label == "Veena" else subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
             process = self.process
             stopped = threading.Event()
-            deadline = time.monotonic() + float(config.TTS_TIMEOUT_SECONDS)
+            deadline = time.monotonic() + float(self.timeout or config.TTS_TIMEOUT_SECONDS)
             timed_out = threading.Event()
             def watch():
                 while not stopped.wait(float(config.REQUEST_CANCELLATION_POLL_SECONDS)):
@@ -606,20 +635,20 @@ class PersistentPiperWorker:
                 header = self._read_exact(process.stdout, 8)
                 length = struct.unpack("<Q", header)[0]
                 if length > 40 * 1024 * 1024:
-                    raise TTSEngineError("Piper worker returned an oversized audio chunk.")
+                    raise TTSEngineError(f"{self.label} worker returned an oversized audio chunk.")
                 payload = self._read_exact(process.stdout, length)
                 if not payload or payload[0] != 1:
-                    raise TTSEngineError(payload[1:].decode("utf-8", errors="replace") or "Piper synthesis failed.")
+                    raise TTSEngineError(payload[1:].decode("utf-8", errors="replace") or f"{self.label} synthesis failed.")
                 if cancelled is not None and cancelled.is_set():
-                    raise TTSEngineError("Piper speech generation was cancelled.")
+                    raise TTSEngineError(f"{self.label} speech generation was cancelled.")
                 return payload[1:]
             except Exception as exc:
                 self.close()
                 if timed_out.is_set():
-                    raise TTSEngineError("Piper speech generation timed out; its worker was stopped.") from exc
+                    raise TTSEngineError(f"{self.label} speech generation timed out; its worker was stopped.") from exc
                 if isinstance(exc, TTSEngineError):
                     raise
-                raise TTSEngineError(f"Piper worker failed: {exc}") from exc
+                raise TTSEngineError(f"{self.label} worker failed: {exc}") from exc
             finally:
                 stopped.set()
         finally:
@@ -632,6 +661,44 @@ def _piper_worker(path: Path) -> PersistentPiperWorker:
         if key not in PIPER_WORKERS:
             PIPER_WORKERS[key] = PersistentPiperWorker(path)
         return PIPER_WORKERS[key]
+
+
+def _veena_worker() -> PersistentPiperWorker:
+    key = "veena:" + str(Path(config.VEENA_MODEL_DIR).resolve())
+    with PIPER_WORKERS_LOCK:
+        if key not in PIPER_WORKERS:
+            PIPER_WORKERS[key] = PersistentPiperWorker(
+                Path(config.VEENA_MODEL_DIR), script="veena_worker.py",
+                args=(str(Path(config.VEENA_CODEC_DIR).resolve()), config.VEENA_SPEAKER),
+                label="Veena", timeout=float(config.TTS_TIMEOUT_SECONDS),
+            )
+        return PIPER_WORKERS[key]
+
+
+def _synthesize_veena_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    if not spoken_text:
+        raise TTSEngineError("There is no speakable text.")
+    spoken_text = normalize_speech_text(spoken_text, payload.language)
+    request = None
+    if payload.session_id and payload.request_id:
+        request = registry.current(payload.session_id, payload.request_id)
+        if request is None:
+            raise TTSEngineError("This speech request was cancelled.")
+    print(json.dumps({"event": "tts_speaker_selected", "request_id": payload.request_id,
+                      "language": payload.language or detect_language(payload.text),
+                      "voice_model": config.VEENA_MODEL_ID,
+                      "speaker": config.VEENA_SPEAKER}), flush=True)
+    clip = _veena_worker().synthesize(
+        spoken_text, 1.0, request.cancelled if request is not None else None
+    )
+    try:
+        audio = join_speech_segments([clip], int(config.TTS_SAMPLE_RATE))
+    except (ValueError, wave.Error, EOFError) as exc:
+        raise TTSEngineError(f"Veena returned incompatible WAV audio: {exc}") from exc
+    if not audio:
+        raise TTSEngineError("Veena returned no speech audio.")
+    return audio, "audio/wav"
 
 
 @atexit.register
