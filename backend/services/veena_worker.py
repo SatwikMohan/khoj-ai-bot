@@ -9,6 +9,7 @@ import io
 import json
 import struct
 import sys
+import time
 
 
 START_OF_SPEECH = 128257
@@ -46,6 +47,7 @@ def split_audio_tokens(tokens: list[int]) -> list[list[int]]:
 
 
 def load_voice(model_dir: str, codec_dir: str):
+    started = time.perf_counter()
     with contextlib.redirect_stdout(sys.stderr):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -58,7 +60,17 @@ def load_voice(model_dir: str, codec_dir: str):
             torch_dtype=torch.bfloat16, device_map="auto",
         ).eval()
         tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-        codec = SNAC.from_pretrained(codec_dir, local_files_only=True).eval()
+        # SNAC loads on CPU by default, even when the speech model uses CUDA.
+        # Preserve codec precision; only move its persistent weights.
+        codec = SNAC.from_pretrained(codec_dir, local_files_only=True).eval().to("cuda")
+        device_map = getattr(model, "hf_device_map", {}) or {}
+        print(json.dumps({
+            "event": "veena_runtime_ready",
+            "load_ms": round((time.perf_counter() - started) * 1000, 1),
+            "model_device": str(model.device),
+            "codec_device": str(next(codec.parameters()).device),
+            "model_devices": sorted({str(value) for value in device_map.values()}),
+        }), flush=True)
     return torch, model, tokenizer, codec
 
 
@@ -71,6 +83,7 @@ def synthesize(text: str, speaker: str, runtime) -> bytes:
         START_OF_HUMAN, *prompt, END_OF_HUMAN, START_OF_AI, START_OF_SPEECH,
     ]], device=model.device)
     max_tokens = min(4096, max(700, len(text) * 14))
+    generation_started = time.perf_counter()
     with torch.inference_mode(), contextlib.redirect_stdout(sys.stderr):
         output = model.generate(
             input_ids, max_new_tokens=max_tokens, do_sample=True,
@@ -78,12 +91,24 @@ def synthesize(text: str, speaker: str, runtime) -> bytes:
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
             eos_token_id=[END_OF_SPEECH, END_OF_AI], use_cache=True,
         )
+        # Copying tokens to a Python list waits for GPU generation to finish.
         token_ids = output[0, input_ids.shape[-1]:].tolist()
+        generation_ms = (time.perf_counter() - generation_started) * 1000
+        decode_started = time.perf_counter()
         layers = split_audio_tokens(token_ids)
         codec_device = next(codec.parameters()).device
         codes = [torch.tensor(layer, dtype=torch.int32, device=codec_device).unsqueeze(0)
                  for layer in layers]
         samples = codec.decode(codes).squeeze().clamp(-1, 1).cpu().numpy()
+        decode_ms = (time.perf_counter() - decode_started) * 1000
+        print(json.dumps({
+            "event": "veena_synthesis_stages",
+            "generation_ms": round(generation_ms, 1),
+            "decode_ms": round(decode_ms, 1),
+            "generated_tokens": len(token_ids),
+            "audio_duration_s": round(len(samples) / SAMPLE_RATE, 3),
+            "codec_device": str(codec_device),
+        }), flush=True)
     import soundfile as sf
     buffer = io.BytesIO()
     sf.write(buffer, samples, SAMPLE_RATE, format="WAV", subtype="PCM_16")

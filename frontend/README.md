@@ -77,3 +77,18 @@ Normal responses show only the conversational answer, without document names,
 page numbers, or source panels. Source metadata remains internal; explicitly
 asking for sources or page locations enables supported locations in the answer.
 Conversation history still lasts only for the current Streamlit session.
+
+Slow speech synthesis does not block text streaming. Active synthesis jobs and
+deferred speech segments have separate bounded queues. The UI marks text as
+"Answer complete" as soon as generation ends, shows "preparing speech" while
+synthesis remains pending, and uses actual playback events for speaking state.
+A full deferred queue reports omitted speech rather than blocking text indefinitely.
+TTS timeouts discard deferred work and keep the text answer visible.
+
+Veena's persistent SNAC decoder now runs on CUDA, retaining its original precision.
+Worker logs include `veena_runtime_ready` (load time and device placement) and
+`veena_synthesis_stages` (token generation and decoding times). These diagnostics
+go to stderr so they cannot corrupt the binary audio protocol on stdout.
+The DGX sample supplied on 2026-10-11 took 3.22 seconds for QA and 24.88 seconds
+for synthesis of 6.45 seconds of speech before this change. Re-measure on the DGX;
+local mocked tests do not establish a GPU speedup.

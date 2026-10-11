@@ -134,6 +134,7 @@ function createTexminAudioManager(settings) {
     lastEndedAt = performance.now();
     lastQueueProgressAt = lastEndedAt;
     busy = false; audio.removeAttribute("src");
+    mark("pending");
     playNext();
   });
   return {current,stop};

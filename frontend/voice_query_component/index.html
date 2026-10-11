@@ -232,12 +232,17 @@
       }
       if (turn.requestId !== requestId) requestId = turn.requestId;
       if (turn.state === "transcribing" || turn.state === "submitted") {
+        const playback = readState(audioKey());
+        if (playback?.requestId === turn.requestId && playback.state === "playing") {
+          show("SPEAKING", "Speaking the answer...");
+          return;
+        }
         if (phase !== "TRANSCRIBING" && phase !== "THINKING")
           show(turn.state === "transcribing" ? "TRANSCRIBING" : "THINKING",
                turn.state === "transcribing" ? "Recognizing speech..." : "Preparing the answer...");
         const activity = readState("texmin_ai_activity");
         if (activity && Date.now() - activity.at < 120000 &&
-            ["retrieving", "generating"].includes(activity.phase)) {
+            ["retrieving", "generating", "synthesizing"].includes(activity.phase)) {
           phase = "THINKING";
           statusText.textContent = activity.label;
         }
@@ -253,8 +258,9 @@
           !["completed", "stopped"].includes(audio.state))) {
         const message = audio?.state === "playing" ? "Speaking the answer..." :
           "Waiting for spoken answer...";
-        if (phase !== "SPEAKING" || statusText.textContent !== message)
-          show("SPEAKING", message);
+        const next = audio?.state === "playing" ? "SPEAKING" : "THINKING";
+        if (phase !== next || statusText.textContent !== message)
+          show(next, message);
         return;
       }
       resumedRequestId = turn.requestId;

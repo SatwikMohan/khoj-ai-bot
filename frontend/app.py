@@ -6,6 +6,7 @@ import sys
 import threading
 import uuid
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -446,9 +447,10 @@ def ask_api_stream(
     tts_config["session_id"] = payload["session_id"]
     tts_config["request_id"] = payload["request_id"]
     spoken_words = 0
+    pending_speech = deque()
     last_audio_delivered_at = None
     def submit_tts(segment: str) -> None:
-        nonlocal queue_sequence, tts_executor, spoken_words
+        nonlocal spoken_words, audio_error
         current_request = registry.current(payload["session_id"], payload["request_id"])
         if (not queue_id or not tts_config["enabled"] or not segment.strip()
                 or current_request is None or current_request.speech_cancelled.is_set()):
@@ -459,12 +461,25 @@ def ask_api_stream(
         words = segment.split()
         segment = " ".join(words[:available_words])
         spoken_words += min(len(words), available_words)
-        if len(tts_futures) >= int(config.TTS_MAX_PENDING_JOBS):
-            flush_tts(block=True)
-            current_request = registry.current(payload["session_id"], payload["request_id"])
-            if (current_request is None or current_request.speech_cancelled.is_set()
-                    or not tts_config["enabled"]):
+        # Keep consuming the answer stream even when synthesis is slower.
+        # Deferred text is bounded separately from active synthesis jobs.
+        if len(pending_speech) >= int(config.TTS_MAX_QUEUED_SEGMENTS):
+            audio_error = "Speech could not keep up. Some speech was omitted; read the complete text answer."
+            tts_config["enabled"] = False
+            return
+        pending_speech.append(segment)
+        drain_speech()
+
+    def drain_speech() -> None:
+        while pending_speech and len(tts_futures) < int(config.TTS_MAX_PENDING_JOBS):
+            current = registry.current(payload["session_id"], payload["request_id"])
+            if current is None or current.speech_cancelled.is_set():
+                pending_speech.clear()
                 return
+            enqueue_tts(pending_speech.popleft())
+
+    def enqueue_tts(segment: str) -> None:
+        nonlocal queue_sequence, tts_executor
         if tts_executor is None:
             tts_executor = ThreadPoolExecutor(max_workers=int(config.TTS_STREAM_CONCURRENCY), thread_name_prefix="texmin-tts")
         sequence = queue_sequence
@@ -525,6 +540,7 @@ def ask_api_stream(
                 for skipped_sequence in range(next_audio_sequence, queue_sequence):
                     _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, skipped_sequence)
                 tts_futures.clear()
+                pending_speech.clear()
                 next_audio_sequence = queue_sequence
                 break
             except Exception as exc:
@@ -577,6 +593,7 @@ def ask_api_stream(
                 for segment in speech_segments.flush_due():
                     submit_tts(segment)
                 flush_tts()
+                drain_speech()
                 event_type = event.get("type")
                 if event_type == "status":
                     status = event.get("message") or status
@@ -598,12 +615,13 @@ def ask_api_stream(
                                           "request_id": payload["request_id"],
                                           "elapsed_ms": round((time.perf_counter() - response_started_at) * 1000, 1)}),
                               flush=True)
+                    render_streaming_message(container, answer, "")
                     for segment in speech_segments.push(token):
                         submit_tts(segment)
-                    render_streaming_message(container, answer, status)
                 elif event_type == "replace":
                     answer = event.get("text", "")
                     speech_segments = IncrementalSpeechSegments()
+                    pending_speech.clear()
                     if queue_id:
                         # A late language switch invalidates previously queued
                         # speech. Keep the corrected text and stop that queue.
@@ -626,6 +644,11 @@ def ask_api_stream(
                     sources = event.get("sources", [])
                     status = ""
                     render_streaming_message(container, answer, status)
+                    publish_ai_activity(
+                        activity_line, activity_signal,
+                        "synthesizing" if queue_id else "idle",
+                        "Answer complete - preparing speech" if queue_id else "Answer complete",
+                    )
                 elif event_type == "error":
                     # Keep text and already delivered clips. Skip pending speech
                     # so the browser can finish its ordered queue without waiting
@@ -674,7 +697,9 @@ def ask_api_stream(
         for segment in speech_segments.finish():
             submit_tts(segment)
         try:
-            flush_tts(block=True)
+            while tts_futures or pending_speech:
+                drain_speech()
+                flush_tts(block=True)
         except BaseException:
             cancel_interaction(payload["session_id"], payload["request_id"])
             if tts_executor is not None:
@@ -694,9 +719,9 @@ def ask_api_stream(
         audio_bytes = None
 
     if not queue_id:
-        publish_ai_activity(activity_line, activity_signal, "idle", "Ready")
+        publish_ai_activity(activity_line, activity_signal, "idle", "Answer complete")
     else:
-        activity_line.empty()
+        activity_line.markdown('<div class="activity-line">Answer complete</div>', unsafe_allow_html=True)
     return answer.strip(), sources, None, audio_bytes, audio_mime, audio_error
 
 

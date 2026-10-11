@@ -6,7 +6,9 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from contextlib import redirect_stdout, redirect_stderr
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -17,7 +19,7 @@ from scripts.provision_models import provision_tts
 from services.tts_service import _synthesize_veena_speech
 from services.veena_worker import (
     AUDIO_OFFSET, CODEBOOK_SIZE, END_OF_SPEECH, START_OF_SPEECH,
-    split_audio_tokens,
+    split_audio_tokens, load_voice,
 )
 
 
@@ -32,6 +34,32 @@ def wav_sample() -> bytes:
 
 
 class VeenaVoiceTests(unittest.TestCase):
+    def test_codec_uses_gpu_and_diagnostics_preserve_binary_stdout(self):
+        model = Mock(device="cuda:0", hf_device_map={"": 0})
+        model.eval.return_value = model
+        codec = Mock()
+        codec.eval.return_value = codec
+        codec.to.return_value = codec
+        codec.parameters.return_value = iter([SimpleNamespace(device="cuda:0")])
+        model_loader = Mock(return_value=model)
+        codec_loader = Mock(return_value=codec)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        modules = {
+            "torch": SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True), bfloat16="bf16"),
+            "transformers": SimpleNamespace(
+                AutoModelForCausalLM=SimpleNamespace(from_pretrained=model_loader),
+                AutoTokenizer=SimpleNamespace(from_pretrained=Mock())),
+            "snac": SimpleNamespace(SNAC=SimpleNamespace(from_pretrained=codec_loader)),
+        }
+        with patch.dict(sys.modules, modules), redirect_stdout(stdout), redirect_stderr(stderr):
+            runtime = load_voice("local-model", "local-codec")
+        codec.to.assert_called_once_with("cuda")
+        codec_loader.assert_called_once_with("local-codec", local_files_only=True)
+        self.assertIs(runtime[-1], codec)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn('"codec_device": "cuda:0"', stderr.getvalue())
+        self.assertIn("veena_runtime_ready", stderr.getvalue())
+
     def test_interleaved_audio_codes_are_validated_and_grouped(self):
         frame = [AUDIO_OFFSET + i * CODEBOOK_SIZE + i for i in range(7)]
         self.assertEqual(

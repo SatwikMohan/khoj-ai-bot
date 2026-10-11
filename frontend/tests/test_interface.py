@@ -259,6 +259,48 @@ class InterfaceTests(unittest.TestCase):
         self.assertEqual(render.call_args.kwargs["height"], 620)
 
 
+    def test_slow_speech_does_not_block_text_completion(self):
+        from services.request_lifecycle import registry
+        release = threading.Event()
+        started = threading.Event()
+        timed_out = threading.Event()
+        session = []
+
+        def fake_stream(**kwargs):
+            session.append(kwargs["session_id"])
+            registry.begin(kwargs["session_id"], kwargs["request_id"])
+            for index in range(3):
+                yield {"type": "token", "text":
+                       f"Sentence {index} explains the ventilation inspection and the equipment checks before work. "}
+                if index == 0:
+                    self.assertTrue(started.wait(2))
+            self.assertFalse(timed_out.is_set(), "Text streaming waited for speech synthesis")
+            yield {"type": "done", "answer": "The complete answer is now available.", "sources": []}
+            release.set()
+
+        def slow_speech(_request):
+            started.set()
+            if not release.wait(3):
+                timed_out.set()
+            return b"", "audio/wav"
+
+        try:
+            with patch.multiple(config, TTS_ENABLED=True, TTS_PRELOAD_VOICES=False,
+                                AVATAR_ENABLED=False, TTS_MAX_PENDING_JOBS=1), patch(
+                "services.qa_service.stream_answer_events", side_effect=fake_stream
+            ), patch("services.tts_service.synthesize_speech", side_effect=slow_speech):
+                app = AppTest.from_file(str(ROOT / "frontend" / "app.py"), default_timeout=10).run()
+                app.chat_input[0].set_value("Explain ventilation").run()
+                self.assertFalse(app.exception)
+                self.assertFalse(timed_out.is_set())
+                self.assertTrue(any("Answer complete" in str(item.value) for item in app.markdown))
+                self.assertTrue(any("The complete answer is now available." in str(item.value)
+                                    for item in app.markdown))
+        finally:
+            release.set()
+            for session_id in session:
+                registry.cancel(session_id)
+
     def test_tts_timeout_stops_queued_synthesis_but_preserves_text(self):
         from services.request_lifecycle import registry
 

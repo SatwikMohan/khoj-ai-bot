@@ -54,7 +54,7 @@ function phase(value,label){
  if(playing&&value!=="speaking")return;
  visual.dataset.state=value;
  statusText.textContent=label||({idle:"Ready",listening:"Listening",transcribing:"Transcribing",
- retrieving:"Retrieving",generating:"Generating",speaking:"Speaking",
+ retrieving:"Retrieving",generating:"Writing answer",synthesizing:"Preparing speech",speaking:"Speaking",
  interrupted:"Interrupted",error:"Something went wrong"}[value]||"Ready");
 }
 function speaking(on){
@@ -77,7 +77,7 @@ audio.addEventListener("play",()=>{
  playing=true;speaking(true);phase("speaking");
 });
 audio.addEventListener("pause",()=>{if(!audio.ended){playing=false;speaking(false);phase("idle")}});
-audio.addEventListener("ended",()=>{playing=false;speaking(false)});
+audio.addEventListener("ended",()=>{playing=false;speaking(false);lastActivity=0;sync()});
 function sync(){
  interrupt();if(playing||interrupted)return;
  let value;try{value=JSON.parse(localStorage.getItem(activityKey)||"null")}catch(_){value=null}
