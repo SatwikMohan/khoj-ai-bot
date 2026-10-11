@@ -103,7 +103,7 @@ class ResponseDeliveryTests(unittest.TestCase):
             AIMessageChunk(content='', additional_kwargs={'reasoning_content': 'private'}),
             AIMessageChunk(content='<thi'), AIMessageChunk(content='nk>private</think>'),
             AIMessageChunk(content='According to the document, '),
-            AIMessageChunk(content='the storage limit is 100 kg.'),
+            AIMessageChunk(content='the storage limit is 100 kg.', response_metadata={'load_duration': 123456}),
         ])
         with patch('services.qa_service._llm', return_value=model):
             events = list(stream_answer_events('What is the storage limit?'))
@@ -111,7 +111,8 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(text, events[-1]['answer'])
         self.assertIn('100 kg', text)
         self.assertNotIn('private', text)
-        self.assertEqual(events[-1]['sources'], [])
+        self.assertEqual(events[-1]['sources'][0]['source'], 'rules.pdf')
+        self.assertEqual(events[-1]['model_metrics']['load_duration'], 123456)
 
     def test_answer_context_drops_distractors_but_keeps_version_comparisons(self):
         docs = [Document(page_content=str(i), metadata={"source": f"source-{i}"}) for i in range(5)]

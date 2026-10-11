@@ -24,7 +24,8 @@ from services.language_service import response_language
 from services.speech_chunker import IncrementalSpeechSegments
 from services.request_lifecycle import registry
 from helpers.request_models import ChatMessage, TTSRequest
-from services.qa_service import answer_question, stream_answer_events
+from services.qa_service import answer_question, stream_answer_events, warm_up_qa_engine
+from services.stt_service import warm_up_stt
 from services.tts_service import synthesize_speech, warm_up_tts
 from services.voice_interaction import begin_voice_interaction, cancel_interaction, transcribe_interaction
 from visualization import render_ai_visualization
@@ -33,16 +34,24 @@ config.configure_runtime_environment()
 
 
 @st.cache_resource(show_spinner=False)
-def _start_speech_warmup():
+def _start_model_warmup():
     def warm():
-        started = time.perf_counter()
-        try:
-            warm_up_tts()
-            print(json.dumps({"event": "tts_warmup_completed",
-                              "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}), flush=True)
-        except Exception as exc:
-            print(json.dumps({"event": "tts_warmup_failed", "error": str(exc)[:400]}), flush=True)
-    worker = threading.Thread(target=warm, name="texmin-tts-warmup", daemon=True)
+        for name, enabled, callback in (
+            ("tts", config.TTS_ENABLED and config.TTS_PRELOAD_VOICES, warm_up_tts),
+            ("stt", config.STT_WARMUP_ON_STARTUP, warm_up_stt),
+            ("qa", config.QA_WARMUP_ON_STARTUP, warm_up_qa_engine),
+        ):
+            if not enabled:
+                continue
+            started = time.perf_counter()
+            try:
+                callback()
+                print(json.dumps({"event": name + "_warmup_completed",
+                                  "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}), flush=True)
+            except Exception as exc:
+                print(json.dumps({"event": name + "_warmup_failed",
+                                  "error_type": type(exc).__name__}), flush=True)
+    worker = threading.Thread(target=warm, name="texmin-model-warmup", daemon=True)
     worker.start()
     return worker
 
@@ -60,8 +69,8 @@ voice_query_component = components.declare_component(
 
 
 st.set_page_config(page_title="AI", page_icon="\u2726", layout="wide", initial_sidebar_state="collapsed")
-if config.TTS_ENABLED and config.TTS_PRELOAD_VOICES:
-    _start_speech_warmup()
+if (config.TTS_ENABLED and config.TTS_PRELOAD_VOICES) or config.STT_WARMUP_ON_STARTUP or config.QA_WARMUP_ON_STARTUP:
+    _start_model_warmup()
 st.markdown(f"<style>{(APP_DIR / 'theme.css').read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
@@ -132,13 +141,14 @@ def render_message(message: dict) -> None:
     if role == "assistant" and audio_error:
         st.markdown(f'<div class="audio-note">{escape(audio_error)}</div>', unsafe_allow_html=True)
 
-
 def render_voice_query_component() -> dict | None:
     value = voice_query_component(
         default=None,
         key="texmin_voice_query",
         height=120,
-        max_recording_seconds=config.RECORDING_MAX_SECONDS,
+        # Leave room for recorder stop/event delivery before the decoder limit.
+        max_recording_seconds=min(config.RECORDING_MAX_SECONDS, config.WHISPER_MAX_AUDIO_SECONDS - 1),
+        no_speech_timeout_seconds=config.RECORDING_NO_SPEECH_TIMEOUT_SECONDS,
         silence_ms=config.RECORDING_SILENCE_MS,
         recording_buffer_ms=config.RECORDING_BUFFER_MS,
         speech_confirm_ms=config.RECORDING_SPEECH_CONFIRM_MS,

@@ -327,8 +327,13 @@
         console.info(JSON.stringify({event:"voice_utterance_ended",request_id:requestId,
           silence_ms:now - lastSpeechAt}));
         finishRecording(id);
-      } else if (speechAt && now - speechAt >= (settings.max_recording_seconds || 30) * 1000) {
+      } else if (speechAt && now - startedAt >= (settings.max_recording_seconds || 30) * 1000) {
         finishRecording(id);
+      } else if (!speechAt && now - startedAt >= Math.min(
+          settings.no_speech_timeout_seconds || 10,
+          settings.max_recording_seconds || 30) * 1000) {
+        // Start a fresh container; never discard its header or intermediate packets.
+        beginRecording(requestId);
       }
     }
     async function beginRecording(reuseId = "") {
@@ -387,7 +392,6 @@
         recorder.ondataavailable = event => {
           if (id !== generation || !event.data?.size) return;
           chunks.push(event.data);
-          if (!speechAt && chunks.length > 4) chunks.shift();
         };
         recorder.onerror = () => {if (id === generation) cancel("Recording failed. Retry.", "NO_AUDIO");};
         recorder.start(settings.recording_buffer_ms || 250);

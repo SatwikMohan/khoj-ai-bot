@@ -1352,14 +1352,15 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
         "eval_count": metadata.get("eval_count"),
         "prompt_eval_duration_ns": metadata.get("prompt_eval_duration"),
         "eval_duration_ns": metadata.get("eval_duration"),
+        "load_duration_ns": metadata.get("load_duration"),
         **timings,
     }), flush=True)
     yield {
         "type": "done", "answer": answer,
-        "sources": _source_dicts(_source_chunks(answer_docs)) if include_locations else [],
+        "sources": _source_dicts(_source_chunks(answer_docs)),
         "language": language, "query_type": query_type, "timings_ms": timings,
         "context_chars": len(context_text),
         "model_metrics": {key: metadata.get(key) for key in (
             "prompt_eval_count", "eval_count", "prompt_eval_duration",
-            "eval_duration", "total_duration") if metadata.get(key) is not None},
+            "eval_duration", "total_duration", "load_duration") if metadata.get(key) is not None},
     }

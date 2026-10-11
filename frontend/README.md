@@ -1,21 +1,13 @@
 # AI interface
 
-Install Ollama and pull the local models first:
+Prepare dependencies and the models selected in `backend/config.py` before
+offline deployment. See [deployment preparation](../DEPLOYMENT.md).
+Runtime startup does not download models.
 
-```powershell
-irm https://ollama.com/install.ps1 | iex
-ollama pull llama3.2:latest
-ollama pull nomic-embed-text
-ollama list
-```
-
-Install Python dependencies and rebuild the local vector database after changing embedding models:
-
-```powershell
-cd ../backend
-python -m pip install -r requirements.txt
-python train_engine.py --force-rebuild
-```
+Preserve an existing compatible index. When changing embedding models, use
+`python train_engine.py` to build a candidate, evaluate it, then explicitly
+promote it with `python train_engine.py --promote-candidate`. Do not force-rebuild
+or delete the active index as a routine setup step.
 
 Run Streamlit directly, with the local Ollama service and provisioned models available:
 
@@ -68,3 +60,20 @@ See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX setting
 offline setup and switching models. The pull commands above are examples; use
 the names selected in `backend/config.py`. Restart the process after edits; no
 `.env` is loaded. Both Dockerfiles include the complete backend service layer and start Streamlit directly.
+
+The Streamlit process now starts each configured model warm-up once in a
+background thread: TTS when enabled and preloading is enabled, STT when
+`STT_WARMUP_ON_STARTUP` is true, and QA when `QA_WARMUP_ON_STARTUP` is true.
+A warm-up failure does not prevent the remaining components from warming.
+QA warm-up remains disabled by default; change it only after verifying local
+model/index compatibility and the combined memory budget.
+
+Recordings retain their complete media container. During silence, capture starts
+a fresh container at `RECORDING_NO_SPEECH_TIMEOUT_SECONDS` without submitting a
+question. Total capture is capped by the smaller recording/Whisper limit, with
+one second reserved for recorder finalization.
+
+Normal responses show only the conversational answer, without document names,
+page numbers, or source panels. Source metadata remains internal; explicitly
+asking for sources or page locations enables supported locations in the answer.
+Conversation history still lasts only for the current Streamlit session.

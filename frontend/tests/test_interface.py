@@ -17,6 +17,53 @@ from avatar_renderer import render_script, avatar_asset_manifest
 
 
 class InterfaceTests(unittest.TestCase):
+    def setUp(self):
+        # Tests never load real models; startup behavior is tested explicitly.
+        self.startup_flags = patch.multiple(config, STT_WARMUP_ON_STARTUP=False, QA_WARMUP_ON_STARTUP=False)
+        self.startup_flags.start()
+        self.addCleanup(self.startup_flags.stop)
+
+    def test_normal_answers_hide_source_metadata_after_stream_and_rerun(self):
+        def fake_stream(**kwargs):
+            yield {"type": "token", "text": "A supported answer."}
+            yield {"type": "done", "answer": "A supported answer.", "sources": [
+                {"source": "C:/private/manual.pdf", "page": 4, "preview": "Evidence text."},
+                {"source": "notes.txt", "page": None, "preview": "No page metadata."},
+            ]}
+        with patch.multiple(config, TTS_ENABLED=False, AVATAR_ENABLED=False), patch(
+            "services.qa_service.stream_answer_events", side_effect=fake_stream
+        ):
+            app = AppTest.from_file(str(ROOT / "frontend" / "app.py"), default_timeout=10).run()
+            app.chat_input[0].set_value("Explain the manual").run()
+            for rerun in (False, True):
+                if rerun:
+                    app.run()
+                self.assertFalse(app.exception)
+                text = " ".join(str(item.value) for item in app.text)
+                self.assertNotIn("manual.pdf", text)
+                self.assertNotIn("Page 5", text)
+                self.assertNotIn("Page unavailable", text)
+                self.assertNotIn("Evidence text.", text)
+                self.assertNotIn("C:/private", text)
+                self.assertEqual(len(app.expander), 0)
+                self.assertTrue(any("A supported answer." in str(item.value) for item in app.markdown))
+
+    def test_all_enabled_warmups_run_once_despite_failure(self):
+        import streamlit as st
+        st.cache_resource.clear()
+        finished = threading.Event()
+        with patch.multiple(config, TTS_ENABLED=True, TTS_PRELOAD_VOICES=True, AVATAR_ENABLED=False,
+                            STT_WARMUP_ON_STARTUP=True, QA_WARMUP_ON_STARTUP=True), patch(
+            "services.tts_service.warm_up_tts", side_effect=RuntimeError("unavailable")
+        ) as tts, patch("services.stt_service.warm_up_stt") as stt, patch(
+            "services.qa_service.warm_up_qa_engine", side_effect=finished.set
+        ) as qa:
+            app = AppTest.from_file(str(ROOT / "frontend" / "app.py"), default_timeout=10).run()
+            self.assertTrue(finished.wait(3))
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertEqual((tts.call_count, stt.call_count, qa.call_count), (1, 1, 1))
+
     def test_two_column_chat_without_settings_and_streamed_reply(self):
         def fake_stream(**kwargs):
             self.assertEqual(kwargs["question"], "What is the limit?")

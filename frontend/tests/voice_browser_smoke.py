@@ -15,7 +15,7 @@ MOCKS = r"""
 <script>
 const events = [];
 let begins = 0, audios = 0, earlyBegin = false, earlyAudio = false;
-let speaking = false, speechEndAt = 0;
+let speaking = false, speechEndAt = 0, completeHeaders = true, recorderStarts = 0;
 const result = document.createElement("output");
 result.id = "result";
 document.addEventListener("DOMContentLoaded", () => document.body.appendChild(result));
@@ -28,7 +28,9 @@ class FakeRecorder {
   constructor() {this.mimeType="audio/webm";this.state="inactive";}
   start() {
     this.state="recording";
-    this.timer=setInterval(()=>this.ondataavailable?.({data:new Blob(["data"])}),50);
+    recorderStarts++;
+    this.ondataavailable?.({data:new Blob(["HEADER"])});
+    this.timer=setInterval(()=>this.ondataavailable?.({data:new Blob(["data"])}),10);
   }
   stop() {
     if(this.state==="inactive") return;
@@ -38,6 +40,13 @@ class FakeRecorder {
   }
 }
 window.MediaRecorder=FakeRecorder;
+const NativeBlob = window.Blob;
+window.Blob = class extends NativeBlob {
+  constructor(parts, options) {
+    super(parts, options);
+    this.hasHeader = parts[0] === "HEADER" || parts[0]?.hasHeader === true;
+  }
+};
 class FakeAudioContext {
   async resume() {}
   async close() {}
@@ -49,7 +58,11 @@ class FakeAudioContext {
 }
 window.AudioContext=FakeAudioContext;
 window.FileReader=class {
-  readAsDataURL(){this.result="data:audio/webm;base64,ZGF0YQ==";setTimeout(()=>this.onload?.(),0);}
+  readAsDataURL(blob){
+    completeHeaders = completeHeaders && blob.hasHeader;
+    this.result="data:audio/webm;base64,ZGF0YQ==";
+    setTimeout(()=>this.onload?.(),0);
+  }
 };
 function render(accepted="") {
   window.postMessage({type:"streamlit:render",args:{
@@ -112,9 +125,9 @@ setTimeout(()=>{
 },5100);
 setTimeout(()=>{
   const text="begins="+begins+" audios="+audios+" early="+earlyBegin+" earlyAudio="+earlyAudio+
-    " cancels="+events.filter(x=>x==="cancel").length+
+    " headers="+completeHeaders+" recorderStarts="+recorderStarts+" cancels="+events.filter(x=>x==="cancel").length+
     " label="+document.getElementById("micLabel").textContent;
-  result.dataset.pass=String(begins===4&&audios===3&&!earlyBegin&&!earlyAudio&&
+  result.dataset.pass=String(begins===4&&audios===3&&completeHeaders&&!earlyBegin&&!earlyAudio&&
     events.filter(x=>x==="cancel").length===0&&
     document.getElementById("micLabel").textContent==="Start conversation");
   result.textContent=text;
@@ -127,8 +140,14 @@ def main():
     browser = EDGE if EDGE.exists() else shutil.which("msedge")
     if not browser:
         raise SystemExit("Microsoft Edge is unavailable")
-    for mode in ("typed_interrupt", "stalled_turn"):
+    for mode in ("typed_interrupt", "stalled_turn", "silent_restart"):
         mocks = MOCKS
+        if mode == "silent_restart":
+            mocks = mocks.replace("if(begins<=3)", "if(false)")
+            mocks = mocks.replace("speech_confirm_ms:100,silence_ms:300,",
+                                  "speech_confirm_ms:100,silence_ms:300,no_speech_timeout_seconds:0.5,")
+            mocks = mocks.replace("begins===4&&audios===3&&completeHeaders",
+                                  "begins===1&&audios===0&&recorderStarts>=3")
         if mode == "stalled_turn":
             start = mocks.index("setTimeout(()=>{\n  const at=Date.now();")
             end = mocks.index("setTimeout(()=>{\n  const text=", start)
