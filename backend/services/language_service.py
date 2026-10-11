@@ -22,7 +22,14 @@ ROMAN_HINDI = {
     "namaste", "nahi", "mera", "meri", "hoga", "karo", "samjhao",
     "chahiye", "mein", "se", "ka", "ki", "ke", "yaar", "kal",
     "jaana", "jana", "karna", "aaj", "aur", "ko", "yaad", "dilao",
+    "yeh", "ye", "woh", "voh", "iska", "iski", "iske", "isme",
+    "unhe", "unko", "agar", "lekin", "isliye", "kyunki", "liye",
+    "sawaal", "jawab", "sahi", "galat", "zaroori", "zaruri",
+    "hota", "hoti", "hote", "hogi", "honge", "karta", "karti",
+    "rakha", "rakhi", "rakhe", "gaya", "gayi", "gaye", "diya",
+    "dikhata", "dikhati", "batata", "batati", "samajh", "sakte",
 }
+ROMAN_HINDI_STRONG = ROMAN_HINDI - {"ka", "ki", "ke", "se", "ko", "mein", "aur", "kal"}
 ENGLISH_CLUES = {"the", "and", "is", "are", "what", "which", "with", "from", "this", "that", "their", "into", "before", "after"}
 SHORT_LANGUAGE_WORDS = {
     "hola": "es", "gracias": "es", "bonjour": "fr", "merci": "fr",
@@ -87,9 +94,11 @@ def response_language(question: str) -> str:
 def language_instruction(code: str) -> str:
     if code == "hinglish":
         return (
-            "Reply in natural Roman-script Hinglish with consistent Hindi spellings and standard "
-            "English technical terms. Do not switch to Devanagari unless the message does. "
-            "Keep product names, code, acronyms and identifiers exactly as written."
+            "Reply in natural Roman-script Hinglish: use conversational Hindi sentence structure "
+            "written in Latin letters, with English technical terms where useful. For example, "
+            "'Yeh rule safety ke liye hai' or 'Iska matlab daily inspection zaroori hai.' "
+            "A fully English explanation is not Hinglish. Do not switch to Devanagari unless "
+            "the message does. Keep product names, code, acronyms and identifiers exactly as written."
         )
     if code == "hi":
         return (
@@ -161,7 +170,8 @@ def answer_language_matches(text: str, expected: str) -> bool:
     if expected == "hinglish":
         words = re.findall(r"[a-zA-Z]+", body.lower())
         hindi = sum(word in ROMAN_HINDI for word in words)
-        return devanagari / len(letters) < 0.18 and hindi >= 2
+        strong_hindi = sum(word in ROMAN_HINDI_STRONG for word in words)
+        return devanagari / len(letters) < 0.18 and (hindi >= 2 or strong_hindi >= 1)
     if len(letters) >= 35:
         classifier = _classifier()
         if classifier:

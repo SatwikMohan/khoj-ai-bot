@@ -44,12 +44,41 @@ class LanguageContractTests(unittest.TestCase):
             "\u092d\u0902\u0921\u093e\u0930\u0923 \u0915\u0940 \u0938\u0940\u092e\u093e 100 kg \u0939\u0948\u0964", "hi"))
         self.assertFalse(answer_language_matches("The storage limit is 100 kg.", "hinglish"))
         self.assertTrue(answer_language_matches("Storage limit kya hai? Mujhe batao.", "hinglish"))
+        self.assertTrue(answer_language_matches("Storage limit 100 kg rakhi gayi.", "hinglish"))
+        self.assertFalse(answer_language_matches("The storage limit was set at 100 kg.", "hinglish"))
 
     def test_hinglish_shortcuts_preserve_roman_script(self):
         self.assertTrue(answer_language_matches(
             _general_response("aap kaise ho").answer, "hinglish"))
         self.assertTrue(answer_language_matches(
             _not_enough_context_response("CMR ka rule kya hai?").answer, "hinglish"))
+
+    def test_hinglish_retry_uses_draft_and_accepts_natural_phrasing(self):
+        prompts = []
+
+        def generate(inputs):
+            prompts.append(str(list(inputs)))
+            if len(prompts) == 1:
+                yield AIMessageChunk(content="The storage limit is 100 kg.")
+            else:
+                yield AIMessageChunk(content="Storage limit 100 kg rakhi gayi.")
+
+        model = RunnableGenerator(generate)
+        with patch.multiple(config, RESPONSE_LANGUAGE="auto", QA_RESPONSE_TIMEOUT_SECONDS=5), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context",
+            return_value=[Document(page_content="The storage limit is 100 kg.",
+                                   metadata={"source": "rules.pdf"})]
+        ), patch("services.qa_service._llm", return_value=model):
+            events = list(stream_answer_events("Storage limit kya hai?"))
+
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("The storage limit is 100 kg.", prompts[1])
+        self.assertIn("Storage limit kya hai?", prompts[1])
+        self.assertNotIn("error", [event["type"] for event in events])
+        self.assertEqual(events[-1]["language"], "hinglish")
+        self.assertEqual(events[-1]["answer"], "Storage limit 100 kg rakhi gayi.")
 
     def test_wrong_language_draft_is_replaced_once(self):
         calls = []
