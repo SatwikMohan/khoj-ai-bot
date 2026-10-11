@@ -22,10 +22,12 @@ class ActiveRequest:
     cancel_reason: str | None = None
     error: dict[str, str] | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
+    speech_cancelled: threading.Event = field(default_factory=threading.Event)
     worker: threading.Thread | None = None
 
     def stop(self, reason: str = "replaced") -> None:
         self.cancelled.set()
+        self.speech_cancelled.set()
         self.cancel_reason = reason
         self.updated_at = time.time()
         self.finished_at = self.updated_at

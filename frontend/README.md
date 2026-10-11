@@ -27,8 +27,15 @@ streamlit run app.py
 The interface uses two columns: the offline GLTF avatar and a scrollable
 conversation. Text and microphone input run through the shared backend Python
 services in the Streamlit process. The microphone sends audio through the
-Streamlit component bridge; it does not call FastAPI. The retained FastAPI
-application in backend/main.py is optional for external clients.
+Streamlit component bridge; it does not call FastAPI. Start conversation once
+to grant microphone permission. The browser meter confirms speech and ends
+the utterance after the configured silence interval; offline STT then submits
+the finalized question automatically. The microphone is released while the
+answer plays and starts listening again after the ordered audio queue finishes.
+End conversation stops capture and playback. Typed chat remains available.
+This is a half-duplex flow: speech during answer playback is not transcribed.
+The retained FastAPI application in backend/main.py is optional for external
+clients.
 
 All application settings live in `backend/config.py`. For example:
 

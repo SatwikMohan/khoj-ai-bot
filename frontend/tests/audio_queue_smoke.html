@@ -32,8 +32,16 @@ const third = createTexminAudioManager({sessionId:"smoke",requestId:"third",queu
 send("third","q3",0,"E");
 setTimeout(() => {
   const failed = stopped.includes("playback_failed");
-  const ok = ordered && overflow && failed;
-  result.textContent = ok ? "PASS" : JSON.stringify({ordered,overflow,failed,plays,stopped});
+  createTexminAudioManager({sessionId:"smoke",requestId:"fourth",queueId:"q4",maxQueuedSegments:3});
+  window.dispatchEvent(new MessageEvent("message", {data:{
+    type:"texmin:avatar-queue",requestId:"fourth",queueId:"q4",final:true,finalSequence:0
+  }}));
+  first.stop("replaced");
+  second.stop("replaced");
+  const state = JSON.parse(localStorage.getItem("texmin_voice_audio_state:smoke") || "null");
+  const completed = state?.requestId === "fourth" && state.state === "completed";
+  const ok = ordered && overflow && failed && completed;
+  result.textContent = ok ? "PASS" : JSON.stringify({ordered,overflow,failed,completed,plays,stopped});
   result.dataset.pass = String(ok);
 }, 100);
 </script>

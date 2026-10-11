@@ -17,8 +17,12 @@ $env:PYTHONPATH = 'backend'
 ```
 
 The ingestion comparison times extraction and chunking on one DOCX. It does not
-measure full index construction. The voice benchmark reports first playable
-audio bytes, not first audible browser playback. To compare another embedding
+measure full index construction. The voice benchmark now records all generated
+speech chunks, queue wait, synthesis duration, RTF, and simulated median/p95
+playback starvation gaps. The simulation assumes immediate browser scheduling;
+use the browser `playback_completed` console event for actual inter-clip gaps.
+It reports first generated audio bytes, not first audible browser playback.
+To compare another embedding
 model, install it separately, set its name and dimensions in `backend/config.py`,
 build a candidate index, and evaluate it before promotion. The configured
 promotion command checks index count, dimension, OCR availability, and recall@5

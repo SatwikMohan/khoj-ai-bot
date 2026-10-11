@@ -192,9 +192,14 @@ async def _generate_segmented_audio(
     return b"".join(audio_chunks)
 
 
+def _speech_request_stopped(payload: TTSRequest) -> bool:
+    request = registry.current(payload.session_id or "", payload.request_id or "")
+    return request is None or request.speech_cancelled.is_set()
+
+
 def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     _load_environment()
-    if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+    if payload.session_id and payload.request_id and _speech_request_stopped(payload):
         raise TTSEngineError("This speech request was replaced by a newer query.")
     response_format = payload.response_format.lower()
     if response_format not in SUPPORTED_FORMATS:
@@ -226,7 +231,7 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
     errors = []
     for candidate in dict.fromkeys(engines):
-        if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+        if payload.session_id and payload.request_id and _speech_request_stopped(payload):
             raise TTSEngineError("This speech request was cancelled.")
         if _voice_circuit_open(candidate):
             errors.append(f"{candidate}: temporarily disabled after repeated failures")
@@ -235,14 +240,14 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
             if candidate in {"edge", "edge-tts"} and config.OFFLINE_MODE:
                 raise TTSEngineError("Edge TTS requires internet; use piper or espeak offline.")
             audio, media_type = _synthesize_with_engine(candidate, payload)
-            if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+            if payload.session_id and payload.request_id and _speech_request_stopped(payload):
                 raise TTSEngineError("This speech request was cancelled.")
             _validate_audio(audio, media_type)
             _record_voice_success(candidate)
             print(json.dumps({"event": "tts_completed", "engine": candidate}), flush=True)
             return audio, media_type
         except Exception as exc:
-            if payload.session_id and payload.request_id and registry.current(payload.session_id, payload.request_id) is None:
+            if payload.session_id and payload.request_id and _speech_request_stopped(payload):
                 raise TTSEngineError("This speech request was cancelled.") from exc
             _record_voice_failure(candidate)
             errors.append(f"{candidate}: {exc}")
@@ -635,6 +640,8 @@ class PersistentPiperWorker:
                     stderr=None if self.label == "Veena" else subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
+                print(json.dumps({"event": "tts_worker_started", "engine": self.label,
+                                  "model": self.path.name, "pid": self.process.pid}), flush=True)
             process = self.process
             stopped = threading.Event()
             deadline = time.monotonic() + float(self.timeout or config.TTS_TIMEOUT_SECONDS)
@@ -704,14 +711,14 @@ def _synthesize_veena_speech(payload: TTSRequest) -> tuple[bytes, str]:
     request = None
     if payload.session_id and payload.request_id:
         request = registry.current(payload.session_id, payload.request_id)
-        if request is None:
+        if request is None or request.speech_cancelled.is_set():
             raise TTSEngineError("This speech request was cancelled.")
     print(json.dumps({"event": "tts_speaker_selected", "request_id": payload.request_id,
                       "language": payload.language or detect_language(payload.text),
                       "voice_model": config.VEENA_MODEL_ID,
                       "speaker": config.VEENA_SPEAKER}), flush=True)
     clip = _veena_worker().synthesize(
-        spoken_text, 1.0, request.cancelled if request is not None else None
+        spoken_text, 1.0, request.speech_cancelled if request is not None else None
     )
     try:
         audio = join_speech_segments([clip], int(config.TTS_SAMPLE_RATE))
@@ -763,7 +770,7 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     request = None
     if payload.session_id and payload.request_id:
         request = registry.current(payload.session_id, payload.request_id)
-        if request is None:
+        if request is None or request.speech_cancelled.is_set():
             raise TTSEngineError("This speech request was cancelled.")
 
     # Retain the isolated single-clip path for simple calls. Mixed-language
@@ -793,10 +800,10 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
 
     clips = []
     for path, phrase in jobs:
-        if request is not None and request.cancelled.is_set():
+        if request is not None and request.speech_cancelled.is_set():
             raise TTSEngineError("This speech request was cancelled.")
         clips.append(_piper_worker(path).synthesize(
-            phrase, length_scale, request.cancelled if request is not None else None
+            phrase, length_scale, request.speech_cancelled if request is not None else None
         ))
     try:
         combined = join_speech_segments(clips, int(config.TTS_SAMPLE_RATE))

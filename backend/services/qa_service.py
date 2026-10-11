@@ -23,7 +23,7 @@ from services.lexical_service import lexical_search
 from services.language_service import answer_language_matches, resolve_language_context, response_language, language_instruction
 from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
-from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
+from services.response_stream import AnswerTextFilter, CitationTextFilter, StreamProgress, bounded_events
 from services.request_lifecycle import registry
 from services.versioning import document_identity, select_documents, version_metadata, YEAR, VERSION, LATEST, HISTORICAL
 
@@ -1040,11 +1040,24 @@ def stream_answer_events(
             return
     else:
         request = registry.begin(session_id or f"anonymous-{request_id or __import__('uuid').uuid4().hex}", request_id)
+    progress = StreamProgress()
+    print(json.dumps({"event": "qa_request_accepted", "request_id": request.request_id,
+                      "session_id": request.session_id, "input_type": input_type}), flush=True)
     yield from bounded_events(
-        lambda: _stream_answer_events(question, top_k, temperature, chat_history, request),
+        lambda: _stream_answer_events(question, top_k, temperature, chat_history, request, progress),
         timeout_seconds=max(1, config.QA_RESPONSE_TIMEOUT_SECONDS),
         heartbeat_seconds=config.QA_STREAM_HEARTBEAT_SECONDS,
         request=request,
+        progress=progress,
+        stage_timeouts={
+            "admission": float(config.QA_WORKER_QUEUE_TIMEOUT_SECONDS),
+            "retrieval": float(config.RETRIEVAL_TIMEOUT_SECONDS),
+            "model_init": float(config.MODEL_INIT_TIMEOUT_SECONDS),
+            "first_token": float(config.LLM_FIRST_TOKEN_TIMEOUT_SECONDS),
+            "inter_token": float(config.LLM_INTER_TOKEN_TIMEOUT_SECONDS),
+            "total_generation": float(config.LLM_TOTAL_GENERATION_TIMEOUT_SECONDS),
+            "finalizing": float(config.MODEL_INIT_TIMEOUT_SECONDS),
+        },
     )
 
 
@@ -1061,11 +1074,13 @@ def _feedback_retrieval_query(question: str, history) -> str:
     return _history_aware_query(question, history)
 
 
-def _stream_answer_events(question, top_k, temperature, chat_history, request=None):
+def _stream_answer_events(question, top_k, temperature, chat_history, request=None, progress=None):
     def active():
         return request is None or registry.is_current(request)
 
     started_at = time.perf_counter()
+    if progress:
+        progress.mark("retrieval")
     language_context = resolve_language_context(
         question, transcript=question if request and request.input_type == "audio" else None
     )
@@ -1118,11 +1133,29 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     yield {"type": "status", "message": "Preparing an answer from the retrieved passages"}
     include_locations = _wants_source_locations(question)
     answer_docs = _select_answer_docs(question, docs, query_type)
+    prompt_started_at = time.perf_counter()
     prompt = _prompt_for_query(query_type, include_locations=include_locations)
+    print(json.dumps({"event": "qa_prompt_template_ready",
+                      "request_id": request.request_id if request else None,
+                      "elapsed_ms": round((time.perf_counter() - prompt_started_at) * 1000, 1)}),
+          flush=True)
+    context_started_at = time.perf_counter()
+    context_text = _format_context(answer_docs, include_locations=include_locations)
+    history_text = _format_chat_history(chat_history)
+    print(json.dumps({"event": "qa_context_ready", "request_id": request.request_id if request else None,
+                      "used_documents": len(answer_docs), "context_chars": len(context_text),
+                      "history_chars": len(history_text),
+                      "elapsed_ms": round((time.perf_counter() - context_started_at) * 1000, 1)}), flush=True)
+    if progress:
+        progress.mark("model_init")
+    model_started_at = time.perf_counter()
     chain = prompt | _llm(temperature)
+    print(json.dumps({"event": "qa_model_client_ready", "request_id": request.request_id if request else None,
+                      "model": config.OLLAMA_CHAT_MODEL,
+                      "elapsed_ms": round((time.perf_counter() - model_started_at) * 1000, 1)}), flush=True)
     inputs = {
-        "context": _format_context(answer_docs, include_locations=include_locations),
-        "chat_history": _format_chat_history(chat_history),
+        "context": context_text,
+        "chat_history": history_text,
         "question": question,
         "language_instruction": language_instruction(language),
         "thinking_instruction": _thinking_instruction(),
@@ -1150,9 +1183,34 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     pending_tokens = []
     language_gate_open = False
     early_language_mismatch = False
+    if progress:
+        progress.mark("first_token")
+    print(json.dumps({"event": "qa_llm_request_started", "request_id": request.request_id if request else None,
+                      "model": config.OLLAMA_CHAT_MODEL, "num_ctx": config.OLLAMA_NUM_CTX,
+                      "num_predict": config.OLLAMA_NUM_PREDICT}), flush=True)
+    raw_chunks = 0
+    first_raw_token_ms = None
+    last_raw_at = None
+    max_raw_gap_ms = 0.0
     chunks = chain.stream(inputs)
     try:
         for chunk in chunks:
+            now = time.perf_counter()
+            raw_chunks += 1
+            has_output = bool(chunk.content) or bool(
+                (getattr(chunk, "additional_kwargs", {}) or {}).get("reasoning_content")
+            )
+            if has_output:
+                if progress:
+                    progress.advance()
+                if first_raw_token_ms is None:
+                    first_raw_token_ms = round((now - generation_started_at) * 1000, 1)
+                    print(json.dumps({"event": "qa_first_model_chunk",
+                                      "request_id": request.request_id if request else None,
+                                      "elapsed_ms": first_raw_token_ms}), flush=True)
+                if last_raw_at is not None:
+                    max_raw_gap_ms = max(max_raw_gap_ms, (now - last_raw_at) * 1000)
+                last_raw_at = now
             if not active():
                 return
             # Ollama keeps reasoning_content separate from answer content. Never
@@ -1197,6 +1255,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     finally:
         chunks.close()
 
+    if progress:
+        progress.mark("finalizing")
     answer = "".join(answer_parts).strip()
     if not active():
         return
@@ -1221,9 +1281,14 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
         retry_filter = AnswerTextFilter()
         retry_citations = CitationTextFilter(enabled=not include_locations)
         retry_parts = []
+        if progress:
+            progress.mark("first_token")
         retry_stream = chain.stream(retry_inputs)
         try:
             for chunk in retry_stream:
+                if progress and (chunk.content or
+                                 (getattr(chunk, "additional_kwargs", {}) or {}).get("reasoning_content")):
+                    progress.advance()
                 if not active():
                     return
                 content = chunk.content
@@ -1238,6 +1303,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                 retry_parts.append(tail)
         finally:
             retry_stream.close()
+        if progress:
+            progress.mark("finalizing")
         corrected = "".join(retry_parts).strip()
         if not active():
             return
@@ -1261,6 +1328,9 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
         "first_token": first_token_ms or 0.0,
+        "first_model_chunk": first_raw_token_ms,
+        "max_model_chunk_gap": round(max_raw_gap_ms, 1),
+        "model_chunks": raw_chunks,
         "generation": round((time.perf_counter() - generation_started_at) * 1000, 1),
         "total": round((time.perf_counter() - started_at) * 1000, 1),
     }
@@ -1271,10 +1341,19 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     print(json.dumps({
         "event": "qa_stream_completed", "request_id": request.request_id if request else None,
         "model": config.OLLAMA_CHAT_MODEL, "language": language,
-        "done_reason": metadata.get("done_reason"), **timings,
+        "done_reason": metadata.get("done_reason"),
+        "prompt_eval_count": metadata.get("prompt_eval_count"),
+        "eval_count": metadata.get("eval_count"),
+        "prompt_eval_duration_ns": metadata.get("prompt_eval_duration"),
+        "eval_duration_ns": metadata.get("eval_duration"),
+        **timings,
     }), flush=True)
     yield {
         "type": "done", "answer": answer,
         "sources": _source_dicts(_source_chunks(answer_docs)) if include_locations else [],
         "language": language, "query_type": query_type, "timings_ms": timings,
+        "context_chars": len(context_text),
+        "model_metrics": {key: metadata.get(key) for key in (
+            "prompt_eval_count", "eval_count", "prompt_eval_duration",
+            "eval_duration", "total_duration") if metadata.get(key) is not None},
     }

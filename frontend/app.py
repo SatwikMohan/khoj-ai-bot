@@ -1,6 +1,9 @@
 import base64
+import io
+import wave
 import json
 import sys
+import threading
 import uuid
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -22,11 +25,26 @@ from services.speech_chunker import IncrementalSpeechSegments
 from services.request_lifecycle import registry
 from helpers.request_models import ChatMessage, TTSRequest
 from services.qa_service import answer_question, stream_answer_events
-from services.tts_service import synthesize_speech
+from services.tts_service import synthesize_speech, warm_up_tts
 from services.voice_interaction import begin_voice_interaction, cancel_interaction, transcribe_interaction
 from visualization import render_ai_visualization
 from audio_manager import audio_manager_script
 config.configure_runtime_environment()
+
+
+@st.cache_resource(show_spinner=False)
+def _start_speech_warmup():
+    def warm():
+        started = time.perf_counter()
+        try:
+            warm_up_tts()
+            print(json.dumps({"event": "tts_warmup_completed",
+                              "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}), flush=True)
+        except Exception as exc:
+            print(json.dumps({"event": "tts_warmup_failed", "error": str(exc)[:400]}), flush=True)
+    worker = threading.Thread(target=warm, name="texmin-tts-warmup", daemon=True)
+    worker.start()
+    return worker
 
 
 DEFAULT_QA_TEMPERATURE = max(0.0, min(1.0, float(config.QA_TEMPERATURE)))
@@ -42,6 +60,8 @@ voice_query_component = components.declare_component(
 
 
 st.set_page_config(page_title="AI", page_icon="\u2726", layout="wide", initial_sidebar_state="collapsed")
+if config.TTS_ENABLED and config.TTS_PRELOAD_VOICES:
+    _start_speech_warmup()
 st.markdown(f"<style>{(APP_DIR / 'theme.css').read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
@@ -67,12 +87,10 @@ def init_state() -> None:
         st.session_state.tts_max_words = config.TTS_MAX_WORDS
     if "avatar_enabled" not in st.session_state:
         st.session_state.avatar_enabled = config.AVATAR_ENABLED
-    if "last_voice_event" not in st.session_state:
-        st.session_state.last_voice_event = ""
+    if "processed_voice_events" not in st.session_state:
+        st.session_state.processed_voice_events = []
     if "accepted_voice_request_id" not in st.session_state:
         st.session_state.accepted_voice_request_id = ""
-    if "pending_voice" not in st.session_state:
-        st.session_state.pending_voice = None
     if "voice_error" not in st.session_state:
         st.session_state.voice_error = None
 
@@ -120,15 +138,13 @@ def render_voice_query_component() -> dict | None:
         default=None,
         key="texmin_voice_query",
         height=120,
-        no_speech_timeout_seconds=config.RECORDING_NO_SPEECH_TIMEOUT_SECONDS,
         max_recording_seconds=config.RECORDING_MAX_SECONDS,
         silence_ms=config.RECORDING_SILENCE_MS,
         recording_buffer_ms=config.RECORDING_BUFFER_MS,
         speech_confirm_ms=config.RECORDING_SPEECH_CONFIRM_MS,
-        stt_timeout_seconds=config.STT_REQUEST_TIMEOUT_SECONDS,
+        voice_turn_watchdog_seconds=config.VOICE_TURN_WATCHDOG_SECONDS,
         session_id=st.session_state.conversation_session_id,
         accepted_request_id=st.session_state.accepted_voice_request_id,
-        review_request_id=(st.session_state.pending_voice or {}).get("request_id", ""),
         voice_error_request_id=(st.session_state.voice_error or {}).get("request_id", ""),
         voice_error=(st.session_state.voice_error or {}).get("message", ""),
     )
@@ -137,13 +153,16 @@ def render_voice_query_component() -> dict | None:
     kind = str(value.get("kind", ""))
     request_id = str(value.get("request_id", ""))
     event_key = f"{kind}:{request_id}"
-    if not request_id or event_key == st.session_state.last_voice_event:
+    if (kind not in {"begin", "audio", "cancel"} or not request_id
+            or len(request_id) > 128
+            or event_key in st.session_state.processed_voice_events):
         return None
-    st.session_state.last_voice_event = event_key
+    st.session_state.processed_voice_events = (
+        st.session_state.processed_voice_events + [event_key]
+    )[-32:]
     session_id = st.session_state.conversation_session_id
     if kind == "begin":
         begin_voice_interaction(session_id, request_id)
-        st.session_state.pending_voice = None
         st.session_state.voice_error = None
         st.session_state.accepted_voice_request_id = request_id
         st.rerun()  # Deliver the acknowledgement before the browser records audio.
@@ -174,19 +193,18 @@ def render_voice_query_component() -> dict | None:
                 progress.empty()  # Let Streamlit process a newer text or voice query.
         text = str(result.get("text", "")).strip()
         if text and registry.current(session_id, request_id) is not None:
-            st.session_state.pending_voice = {
+            st.session_state.accepted_voice_request_id = ""
+            st.session_state.voice_error = None
+            return {
                 "text": text, "request_id": request_id, "input_type": "audio",
                 "language": result.get("language", ""),
             }
-            st.session_state.voice_transcript_review = text
-            st.session_state.voice_error = None
-            return None
         raise ValueError("Speech recognition returned no usable transcript.")
     except Exception as exc:
         cancel_interaction(session_id, request_id)
         st.session_state.accepted_voice_request_id = ""
         st.session_state.voice_error = {"request_id": request_id, "message": str(exc)}
-        st.warning(f"Offline speech recognition failed: {exc}. Check the microphone and retry.")
+        st.rerun()  # Deliver the error to the component; no answer or audio is active.
     except BaseException:
         cancel_interaction(session_id, request_id)
         raise
@@ -361,6 +379,7 @@ def render_audio_queue_player(queue_id: str, request_id: str, session_id: str) -
           document.addEventListener("texmin:audio-stopped", event => {{
             const reason = event.detail.reason;
             if (reason === "queue_limit") document.getElementById("speechStatus").textContent = "Speech stopped: playback queue full. Text answer remains available.";
+            if (reason === "queue_stalled") document.getElementById("speechStatus").textContent = "Speech stopped: an audio chunk did not arrive.";
             if (reason === "playback_failed") document.getElementById("speechStatus").textContent = "Speech playback failed. Check browser audio settings.";
           }});
           function interrupt() {{
@@ -383,6 +402,7 @@ def ask_api_stream(
     activity_signal=None,
     request_id: str | None = None,
     input_type: str = "text",
+    speak: bool = True,
 ) -> tuple[str, list[dict], str | None, bytes | None, str, str | None]:
     payload = {
         "question": question,
@@ -396,6 +416,7 @@ def ask_api_stream(
     answer = ""
     sources = []
     status = ""
+    first_visible_logged = False
     first_audio = None
     speech_segments = IncrementalSpeechSegments()
     first_audio_started_at = None
@@ -404,20 +425,23 @@ def ask_api_stream(
     audio_error = None
     done_received = False
     queue_sequence = 0
-    queue_id = uuid.uuid4().hex if avatar_container is not None and st.session_state.tts_enabled else None
+    queue_id = uuid.uuid4().hex if avatar_container is not None and st.session_state.tts_enabled and speak else None
     st.session_state.audio_queue_active = bool(queue_id)
     queue_sender = st.container() if queue_id else None
     tts_executor: ThreadPoolExecutor | None = None
-    tts_futures: dict[int, tuple[Future, str]] = {}
+    tts_futures: dict[int, tuple[Future, str, float]] = {}
     next_audio_sequence = 0
     tts_wait_placeholder = st.empty() if queue_id else None
     tts_config = _current_tts_config(question)
     tts_config["session_id"] = payload["session_id"]
     tts_config["request_id"] = payload["request_id"]
     spoken_words = 0
+    last_audio_delivered_at = None
     def submit_tts(segment: str) -> None:
         nonlocal queue_sequence, tts_executor, spoken_words
-        if not queue_id or not tts_config["enabled"] or not segment.strip() or registry.current(payload["session_id"], payload["request_id"]) is None:
+        current_request = registry.current(payload["session_id"], payload["request_id"])
+        if (not queue_id or not tts_config["enabled"] or not segment.strip()
+                or current_request is None or current_request.speech_cancelled.is_set()):
             return
         available_words = max(0, int(tts_config["max_words"]) - spoken_words)
         if not available_words:
@@ -425,29 +449,51 @@ def ask_api_stream(
         words = segment.split()
         segment = " ".join(words[:available_words])
         spoken_words += min(len(words), available_words)
-        if len(tts_futures) >= int(config.TTS_STREAM_CONCURRENCY) * 2:
+        if len(tts_futures) >= int(config.TTS_MAX_PENDING_JOBS):
             flush_tts(block=True)
+            current_request = registry.current(payload["session_id"], payload["request_id"])
+            if (current_request is None or current_request.speech_cancelled.is_set()
+                    or not tts_config["enabled"]):
+                return
         if tts_executor is None:
             tts_executor = ThreadPoolExecutor(max_workers=int(config.TTS_STREAM_CONCURRENCY), thread_name_prefix="texmin-tts")
         sequence = queue_sequence
         queue_sequence += 1
-        tts_futures[sequence] = (tts_executor.submit(_request_tts, segment, tts_config, sequence), segment)
+        if sequence == 0:
+            print(json.dumps({"event": "qa_first_speech_segment",
+                              "request_id": payload["request_id"],
+                              "elapsed_ms": round((time.perf_counter() - response_started_at) * 1000, 1),
+                              "text_chars": len(segment)}), flush=True)
+        submitted_at = time.monotonic()
+        tts_futures[sequence] = (
+            tts_executor.submit(_request_tts, segment, tts_config, sequence, submitted_at),
+            segment, submitted_at,
+        )
+        print(json.dumps({"event": "tts_chunk_queued", "request_id": payload["request_id"],
+                          "sequence": sequence, "queue_depth": len(tts_futures),
+                          "text_chars": len(segment)}), flush=True)
+
+    def finish_audio_queue_after_abort() -> None:
+        if queue_id and queue_sender is not None:
+            for skipped_sequence in range(next_audio_sequence, queue_sequence):
+                _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, skipped_sequence)
+            _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, queue_sequence, final=True)
 
     def flush_tts(block: bool = False) -> None:
-        nonlocal next_audio_sequence, audio_error, audio_mime, first_audio, first_audio_started_at
+        nonlocal next_audio_sequence, audio_error, audio_mime, first_audio, first_audio_started_at, last_audio_delivered_at
         if queue_sender is None:
             return
         if registry.current(payload["session_id"], payload["request_id"]) is None:
-            for future, _ in tts_futures.values():
+            for future, _, _ in tts_futures.values():
                 future.cancel()
             tts_futures.clear()
             return
         while next_audio_sequence in tts_futures:
-            future, segment = tts_futures[next_audio_sequence]
+            future, segment, submitted_at = tts_futures[next_audio_sequence]
             if not block and not future.done():
                 break
             try:
-                deadline = time.monotonic() + float(config.TTS_RESPONSE_TIMEOUT_SECONDS)
+                deadline = submitted_at + float(config.TTS_RESPONSE_TIMEOUT_SECONDS)
                 while True:
                     try:
                         segment_audio, segment_mime, segment_error = future.result(timeout=0.1)
@@ -459,6 +505,12 @@ def ask_api_stream(
                             tts_wait_placeholder.empty()
             except TimeoutError:
                 audio_error = "Speech generation timed out. Your text answer is available above."
+                tts_config["enabled"] = False
+                current_request = registry.current(payload["session_id"], payload["request_id"])
+                if current_request is not None:
+                    current_request.speech_cancelled.set()
+                print(json.dumps({"event": "tts_chunk_timeout", "request_id": payload["request_id"],
+                                  "sequence": next_audio_sequence}), flush=True)
                 future.cancel()
                 for skipped_sequence in range(next_audio_sequence, queue_sequence):
                     _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, skipped_sequence)
@@ -477,6 +529,13 @@ def ask_api_stream(
                     first_audio_started_at = round((time.perf_counter() - response_started_at) * 1000, 1)
                     print(json.dumps({"event": "voice_first_audio_ready", "request_id": payload["request_id"], "first_audio_ms": first_audio_started_at}), flush=True)
                 audio_mime = segment_mime
+                delivered_at = time.monotonic()
+                print(json.dumps({"event": "audio_chunk_delivered", "request_id": payload["request_id"],
+                                  "sequence": next_audio_sequence,
+                                  "gap_ms": round((delivered_at - last_audio_delivered_at) * 1000, 1)
+                                  if last_audio_delivered_at is not None else None,
+                                  "queue_depth": len(tts_futures)}), flush=True)
+                last_audio_delivered_at = delivered_at
                 _send_avatar_queue_event(
                     queue_sender,
                     payload["request_id"],
@@ -505,6 +564,8 @@ def ask_api_stream(
         last_phase = ""
         with closing(_qa_events(payload)) as events:
             for event in events:
+                for segment in speech_segments.flush_due():
+                    submit_tts(segment)
                 flush_tts()
                 event_type = event.get("type")
                 if event_type == "status":
@@ -521,6 +582,12 @@ def ask_api_stream(
                         publish_ai_activity(activity_line, activity_signal, "generating", "Generating")
                         last_phase = "generating"
                     answer += token
+                    if token and not first_visible_logged:
+                        first_visible_logged = True
+                        print(json.dumps({"event": "qa_first_visible_text",
+                                          "request_id": payload["request_id"],
+                                          "elapsed_ms": round((time.perf_counter() - response_started_at) * 1000, 1)}),
+                              flush=True)
                     for segment in speech_segments.push(token):
                         submit_tts(segment)
                     render_streaming_message(container, answer, status)
@@ -531,7 +598,10 @@ def ask_api_stream(
                         # A late language switch invalidates previously queued
                         # speech. Keep the corrected text and stop that queue.
                         tts_config["enabled"] = False
-                        for future, _ in tts_futures.values():
+                        current_request = registry.current(payload["session_id"], payload["request_id"])
+                        if current_request is not None:
+                            current_request.speech_cancelled.set()
+                        for future, _, _ in tts_futures.values():
                             future.cancel()
                         tts_futures.clear()
                         st.iframe(
@@ -547,28 +617,32 @@ def ask_api_stream(
                     status = ""
                     render_streaming_message(container, answer, status)
                 elif event_type == "error":
+                    # Keep text and already delivered clips. Skip pending speech
+                    # so the browser can finish its ordered queue without waiting
+                    # forever for a cancelled sequence.
                     cancel_interaction(payload["session_id"], payload["request_id"])
+                    for future, _, _ in tts_futures.values():
+                        future.cancel()
+                    tts_futures.clear()
                     if tts_executor is not None:
                         tts_executor.shutdown(wait=False, cancel_futures=True)
-                    if queue_id and queue_sender is not None:
-                        _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, queue_sequence, final=True)
-                    publish_ai_activity(activity_line, activity_signal, "error", "Something went wrong")
-                    return "", [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
+                    finish_audio_queue_after_abort()
+                    publish_ai_activity(activity_line, activity_signal, "error", "Generation stopped early")
+                    return answer, [], event.get("message", "Streaming failed."), None, audio_mime, audio_error
                 elif event_type == "cancelled":
                     if tts_executor is not None:
                         tts_executor.shutdown(wait=False, cancel_futures=True)
-                    if queue_id and queue_sender is not None:
-                        _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, queue_sequence, final=True)
+                    finish_audio_queue_after_abort()
                     publish_ai_activity(activity_line, activity_signal, "interrupted", "Interrupted")
                     return "", [], "__cancelled__", None, audio_mime, None
     except Exception as exc:
         cancel_interaction(payload["session_id"], payload["request_id"])
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
-        if queue_id and queue_sender is not None:
-            _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, queue_sequence, final=True)
-        return "", [], f"Question answering failed: {exc}", None, audio_mime, audio_error
+        finish_audio_queue_after_abort()
+        return answer, [], f"Question answering failed: {exc}", None, audio_mime, audio_error
     except BaseException:
+        cancel_interaction(payload["session_id"], payload["request_id"])
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         raise
@@ -576,10 +650,9 @@ def ask_api_stream(
     if not done_received or not answer.strip():
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
-        if queue_id and queue_sender is not None:
-            _send_avatar_queue_event(queue_sender, payload["request_id"], queue_id, queue_sequence, final=True)
+        finish_audio_queue_after_abort()
         return (
-            "",
+            answer,
             [],
             "The answer stream ended without a complete response. Check the app and Ollama logs.",
             None,
@@ -631,7 +704,7 @@ def _current_tts_config(question: str = "") -> dict:
     }
 
 
-def _request_tts(text: str, tts_options: dict, sequence: int | None = None) -> tuple[bytes | None, str, str | None]:
+def _request_tts(text: str, tts_options: dict, sequence: int | None = None, submitted_at: float | None = None) -> tuple[bytes | None, str, str | None]:
     if not tts_options["enabled"]:
         return None, DEFAULT_AUDIO_MIME, None
 
@@ -655,14 +728,25 @@ def _request_tts(text: str, tts_options: dict, sequence: int | None = None) -> t
 
     try:
         started = time.perf_counter()
+        queue_wait_ms = round((time.monotonic() - submitted_at) * 1000, 1) if submitted_at is not None else None
         print(json.dumps({"event": "tts_chunk_started", "request_id": payload["request_id"],
                           "sequence": sequence, "language": payload["language"],
-                          "voice_id": voice_id}), flush=True)
+                          "voice_id": voice_id, "queue_wait_ms": queue_wait_ms}), flush=True)
         request = TTSRequest(**payload)
         audio, audio_mime = synthesize_speech(request)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        audio_duration_s = None
+        if audio_mime == "audio/wav":
+            try:
+                with wave.open(io.BytesIO(audio), "rb") as clip:
+                    audio_duration_s = round(clip.getnframes() / clip.getframerate(), 3)
+            except (wave.Error, EOFError, ZeroDivisionError):
+                pass
         print(json.dumps({"event": "tts_chunk_completed", "request_id": payload["request_id"],
                           "sequence": sequence, "bytes": len(audio),
-                          "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}), flush=True)
+                          "elapsed_ms": elapsed_ms, "audio_duration_s": audio_duration_s,
+                          "rtf": round(elapsed_ms / 1000 / audio_duration_s, 3)
+                          if audio_duration_s else None}), flush=True)
         return audio, audio_mime, None
     except Exception as exc:
         print(json.dumps({"event": "tts_chunk_failed", "request_id": payload["request_id"],
@@ -704,27 +788,7 @@ with right_col:
     voice_component_query = render_voice_query_component()
     if st.session_state.voice_error:
         st.error("Microphone transcription failed: " + st.session_state.voice_error["message"]
-                 + " Check the device, then use Record question again.")
-    pending_voice = st.session_state.pending_voice
-    if pending_voice:
-        st.markdown("**Review transcription**")
-        reviewed_text = st.text_area(
-            "Edit the recognized question", key="voice_transcript_review",
-        )
-        submit_voice, retry_voice = st.columns(2)
-        if submit_voice.button("Send question", key="submit_voice", disabled=not reviewed_text.strip()):
-            if registry.current(st.session_state.conversation_session_id, pending_voice["request_id"]):
-                voice_component_query = {
-                    "text": reviewed_text.strip(), "request_id": pending_voice["request_id"],
-                    "input_type": "audio",
-                }
-            st.session_state.pending_voice = None
-            st.session_state.accepted_voice_request_id = ""
-        if retry_voice.button("Discard and record again", key="retry_voice"):
-            cancel_interaction(st.session_state.conversation_session_id, pending_voice["request_id"])
-            st.session_state.pending_voice = None
-            st.session_state.accepted_voice_request_id = ""
-            st.rerun()
+                 + " Check the device, then start the conversation again.")
     st.session_state.tts_enabled = st.toggle(
         "Speak answers", value=st.session_state.tts_enabled, key="speech_toggle"
     )
@@ -734,7 +798,14 @@ with right_col:
             height=1,
         )
     typed_question = st.chat_input("Ask anything...")
-question = typed_question or (voice_component_query or {}).get("text") or voice_query_param
+    retry_question = None
+    if st.session_state.messages and st.session_state.messages[-1].get("incomplete"):
+        if st.button("Retry incomplete answer (text only)", key="retry_incomplete_answer"):
+            retry_question = next(
+                (str(item.get("content", "")) for item in reversed(st.session_state.messages[:-1])
+                 if item.get("role") == "user"), None
+            )
+question = typed_question or (voice_component_query or {}).get("text") or voice_query_param or retry_question
 
 if not question and st.session_state.avatar_enabled:
     with avatar_stream_container:
@@ -745,9 +816,6 @@ if question:
         # A rerun interrupted its previous answer; omit that unfinished turn.
         st.session_state.messages.pop()
     if typed_question:
-        if st.session_state.pending_voice:
-            cancel_interaction(st.session_state.conversation_session_id, st.session_state.pending_voice["request_id"])
-            st.session_state.pending_voice = None
         st.iframe(
             '<script>window.localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
             height=1,
@@ -766,6 +834,21 @@ if question:
             activity_signal=activity_signal,
             request_id=voice_component_query["request_id"] if voice_component_query and not typed_question else None,
             input_type=voice_component_query["input_type"] if voice_component_query and not typed_question else "text",
+            speak=not bool(retry_question),
+        )
+
+    if voice_component_query and not typed_question:
+        # Signal completion without a rerun, which would replace the playing avatar.
+        turn_state = json.dumps({
+            "requestId": voice_component_query["request_id"],
+            "state": "finished" if error != "__cancelled__" else "cancelled",
+            "awaitAudio": bool(st.session_state.audio_queue_active),
+            "at": int(time.time() * 1000),
+        }).replace("</", "<\\/")
+        turn_key = json.dumps("texmin_voice_turn:" + st.session_state.conversation_session_id)
+        st.iframe(
+            f"<script>localStorage.setItem({turn_key}, JSON.stringify({turn_state}));</script>",
+            height=1,
         )
 
     if error == "__cancelled__":
@@ -773,15 +856,18 @@ if question:
             st.session_state.messages.pop()
         stream_container.empty()
     elif error:
-        stream_container.error(error)
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": error,
-                "sources": [],
-                "error": True,
-            }
-        )
+        if answer.strip():
+            render_streaming_message(stream_container, answer, "Incomplete: " + error)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": answer, "sources": [],
+                 "error": True, "incomplete": True, "audio_error": audio_error}
+            )
+            st.error(error)
+        else:
+            stream_container.error(error)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": error, "sources": [], "error": True}
+            )
     else:
         if audio_error:
             st.warning(audio_error)

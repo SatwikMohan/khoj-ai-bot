@@ -142,8 +142,9 @@
     let settings = {}, sessionId = "", phase = "IDLE", generation = 0;
     let requestId = "", stream = null, recorder = null, chunks = [];
     let context = null, analyser = null, samples = null, timer = 0;
-    let startedAt = 0, speechAt = 0, noiseFloor = 0.005, beginAck = null;
-    let ownInterruptAt = 0;
+    let startedAt = 0, speechAt = 0, speechCandidateAt = 0, lastSpeechAt = 0;
+    let noiseFloor = 0.005, beginAck = null, enabled = false, restoredSession = "";
+    let ownInterruptAt = 0, resumedRequestId = "";
 
     function send(type, data) {
       window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
@@ -151,25 +152,33 @@
     function sendValue(value) {
       send("streamlit:setComponentValue", {value, dataType: "json"});
     }
+    function modeKey() {return "texmin_voice_enabled:" + sessionId;}
+    function turnKey() {return "texmin_voice_turn:" + sessionId;}
+    function audioKey() {return "texmin_voice_audio_state:" + sessionId;}
+    function readState(key) {
+      try {return JSON.parse(localStorage.getItem(key) || "null");} catch (_) {return null;}
+    }
+    function writeTurn(state) {
+      if (sessionId) localStorage.setItem(turnKey(), JSON.stringify({
+        requestId, state, at: Date.now()
+      }));
+    }
     function show(next, message) {
       phase = next;
-      label.textContent = ({
-        IDLE:"Record question", REQUESTING_PERMISSION:"Cancel", READY:"Record question",
-        RECORDING:"Stop recording", PROCESSING_AUDIO:"Cancel", TRANSCRIBING:"Cancel",
-        TRANSCRIPT_REVIEW:"Record again", PERMISSION_DENIED:"Retry microphone",
-        NO_DEVICE:"Retry microphone", NO_AUDIO:"Record again",
-        TRANSCRIPTION_FAILED:"Record again", CANCELLED:"Record question"
-      })[next] || "Record question";
+      label.textContent = enabled ? "End conversation" : "Start conversation";
       button.setAttribute("aria-label", label.textContent);
-      button.classList.toggle("listening", next === "RECORDING");
-      button.classList.toggle("waiting", next === "TRANSCRIBING" || next === "PROCESSING_AUDIO");
+      button.classList.toggle("listening", next === "LISTENING" || next === "RECORDING");
+      button.classList.toggle("waiting", ["TRANSCRIBING", "THINKING", "SPEAKING"].includes(next));
       statusText.textContent = message;
-      try {
-        localStorage.setItem("texmin_ai_activity", JSON.stringify({
-          phase: next === "RECORDING" ? "listening" : next === "TRANSCRIBING" ? "transcribing" : "idle",
-          label: next, at: Date.now()
-        }));
-      } catch (_) {}
+      if (["LISTENING", "RECORDING", "TRANSCRIBING", "IDLE"].includes(next)) {
+        try {
+          localStorage.setItem("texmin_ai_activity", JSON.stringify({
+            phase: next === "LISTENING" || next === "RECORDING" ? "listening" :
+              next === "TRANSCRIBING" ? "transcribing" : "idle",
+            label: message, at: Date.now()
+          }));
+        } catch (_) {}
+      }
     }
     function stopCapture() {
       if (timer) clearInterval(timer);
@@ -186,13 +195,73 @@
       context = null; analyser = null; samples = null; chunks = [];
       painter.clearRect(0, 0, canvas.width, canvas.height);
     }
-    function cancel(message = "Recording cancelled.", state = "CANCELLED") {
+    function cancel(message = "Conversation ended.", state = "IDLE",
+                    notifyServer = true, interruptPlayback = true) {
       generation++;
+      enabled = false;
+      if (sessionId) localStorage.removeItem(modeKey());
       if (beginAck) { beginAck.resolve(false); beginAck = null; }
-      if (requestId) sendValue({kind:"cancel", request_id:requestId});
+      if (notifyServer && requestId) sendValue({kind:"cancel", request_id:requestId});
+      if (interruptPlayback) {
+        ownInterruptAt = Date.now();
+        localStorage.setItem(interruptKey, String(ownInterruptAt));
+      }
       requestId = "";
+      if (sessionId) localStorage.removeItem(turnKey());
       stopCapture();
       show(state, message);
+    }
+    function syncTurn() {
+      if (!enabled || !sessionId) return;
+      const turn = readState(turnKey());
+      if (!turn || !turn.requestId) {
+        if (phase === "THINKING") beginRecording();
+        return;
+      }
+      if (!["listening", "recording"].includes(turn.state) &&
+          Date.now() - Number(turn.at || 0) > (settings.voice_turn_watchdog_seconds || 900) * 1000) {
+        cancel("Voice turn stalled. Start the conversation again.", "TRANSCRIPTION_FAILED");
+        return;
+      }
+      if (turn.state === "requesting" || turn.state === "listening" || turn.state === "recording") {
+        if (settings.accepted_request_id === turn.requestId &&
+            !["REQUESTING_PERMISSION", "LISTENING", "RECORDING"].includes(phase)) {
+          beginRecording(turn.requestId);
+        }
+        return;
+      }
+      if (turn.requestId !== requestId) requestId = turn.requestId;
+      if (turn.state === "transcribing" || turn.state === "submitted") {
+        if (phase !== "TRANSCRIBING" && phase !== "THINKING")
+          show(turn.state === "transcribing" ? "TRANSCRIBING" : "THINKING",
+               turn.state === "transcribing" ? "Recognizing speech..." : "Preparing the answer...");
+        const activity = readState("texmin_ai_activity");
+        if (activity && Date.now() - activity.at < 120000 &&
+            ["retrieving", "generating"].includes(activity.phase)) {
+          phase = "THINKING";
+          statusText.textContent = activity.label;
+        }
+        return;
+      }
+      if (turn.state === "cancelled") {
+        cancel("Answer interrupted. Start a new conversation.", "CANCELLED", false, false);
+        return;
+      }
+      if (turn.state !== "finished" || turn.requestId === resumedRequestId) return;
+      const audio = readState(audioKey());
+      if (turn.awaitAudio && (!audio || audio.requestId !== turn.requestId ||
+          !["completed", "stopped"].includes(audio.state))) {
+        const message = audio?.state === "playing" ? "Speaking the answer..." :
+          "Waiting for spoken answer...";
+        if (phase !== "SPEAKING" || statusText.textContent !== message)
+          show("SPEAKING", message);
+        return;
+      }
+      resumedRequestId = turn.requestId;
+      console.info(JSON.stringify({event:"voice_listening_resumed", request_id:turn.requestId,
+        elapsed_after_answer_ms:Date.now() - turn.at}));
+      requestId = "";
+      beginRecording();
     }
     function waitForAck(id) {
       return new Promise(resolve => {
@@ -207,23 +276,25 @@
       if (event.data?.type !== "streamlit:render") return;
       settings = event.data.args || {};
       sessionId = settings.session_id || "";
+      if (sessionId && restoredSession !== sessionId) {
+        restoredSession = sessionId;
+        enabled = localStorage.getItem(modeKey()) === "true";
+        if (enabled) show("THINKING", "Restoring conversation...");
+      }
       if (beginAck && settings.accepted_request_id === beginAck.id) {
         const pending = beginAck; beginAck = null; pending.resolve(true);
       }
-      if (settings.review_request_id && settings.review_request_id === requestId) {
-        requestId = "";
-        show("TRANSCRIPT_REVIEW", "Transcript ready below. Review or edit it.");
-      } else if (settings.voice_error_request_id === requestId) {
-        requestId = "";
-        show("TRANSCRIPTION_FAILED", settings.voice_error || "Transcription failed. Record again.");
-      }
+      if (settings.voice_error_request_id === requestId) {
+        cancel(settings.voice_error || "Transcription failed. Check the microphone and retry.",
+               "TRANSCRIPTION_FAILED", false, false);
+      } else syncTurn();
       send("streamlit:setFrameHeight", {height: 120});
     });
     send("streamlit:componentReady", {apiVersion: 1});
     send("streamlit:setFrameHeight", {height: 120});
 
     function meterTick(id) {
-      if (id !== generation || phase !== "RECORDING" || !analyser) return;
+      if (id !== generation || !["LISTENING", "RECORDING"].includes(phase) || !analyser) return;
       analyser.getByteTimeDomainData(samples);
       let squared = 0;
       for (const value of samples) squared += ((value - 128) / 128) ** 2;
@@ -235,32 +306,51 @@
         const height = Math.max(3, Math.min(70, 4 + level * 450));
         painter.fillRect(i * 9.3, (76 - height) / 2, 6, height);
       }
-      if (level > Math.max(0.018, noiseFloor * 2.5 + 0.006)) speechAt = now;
-      else if (!speechAt) noiseFloor = noiseFloor * 0.96 + level * 0.04;
-      statusText.textContent = `Recording ${Math.floor((now - startedAt) / 1000)}s. Tap to stop.`;
-      if (!speechAt && now - startedAt >= (settings.no_speech_timeout_seconds || 10) * 1000) {
-        cancel("No speech detected. Check the input device and try again.", "NO_AUDIO");
-      } else if (now - startedAt >= (settings.max_recording_seconds || 30) * 1000) {
+      const active = level > Math.max(0.018, noiseFloor * 2.5 + 0.006);
+      if (active) {
+        if (!speechCandidateAt) speechCandidateAt = now;
+        if (speechAt || now - speechCandidateAt >= (settings.speech_confirm_ms || 150)) {
+          if (!speechAt) {
+            speechAt = now;
+            show("RECORDING", "Speech detected. Listening until you finish...");
+            writeTurn("recording");
+            console.info(JSON.stringify({event:"voice_first_speech",request_id:requestId,
+              elapsed_from_listening_ms:now - startedAt}));
+          }
+          lastSpeechAt = now;
+        }
+      } else {
+        speechCandidateAt = 0;
+        if (!speechAt) noiseFloor = noiseFloor * 0.96 + level * 0.04;
+      }
+      if (speechAt && now - lastSpeechAt >= (settings.silence_ms || 1100)) {
+        console.info(JSON.stringify({event:"voice_utterance_ended",request_id:requestId,
+          silence_ms:now - lastSpeechAt}));
+        finishRecording(id);
+      } else if (speechAt && now - speechAt >= (settings.max_recording_seconds || 30) * 1000) {
         finishRecording(id);
       }
     }
-    async function beginRecording() {
-      if (!sessionId) {show("TRANSCRIPTION_FAILED", "Conversation is not ready. Retry."); return;}
+    async function beginRecording(reuseId = "") {
+      if (!enabled || !sessionId) {cancel("Conversation is not ready. Retry.", "TRANSCRIPTION_FAILED"); return;}
       if (!window.isSecureContext) {
-        show("PERMISSION_DENIED", "Microphone access requires HTTPS or localhost. Open the secure app URL.");
+        cancel("Microphone access requires HTTPS or localhost. Open the secure app URL.", "PERMISSION_DENIED");
         return;
       }
       if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-        show("NO_DEVICE", "This browser cannot record audio. Use a current browser.");
+        cancel("This browser cannot record audio. Use a current browser.", "NO_DEVICE");
         return;
       }
       const id = ++generation;
       stopCapture();
-      requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
-      ownInterruptAt = Date.now();
-      localStorage.setItem(interruptKey, String(ownInterruptAt));
-      const acknowledged = waitForAck(requestId);
-      sendValue({kind:"begin", request_id:requestId});
+      requestId = reuseId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+      const acknowledged = reuseId ? Promise.resolve(true) : waitForAck(requestId);
+      if (!reuseId) {
+        ownInterruptAt = Date.now();
+        localStorage.setItem(interruptKey, String(ownInterruptAt));
+        writeTurn("requesting");
+        sendValue({kind:"begin", request_id:requestId});
+      }
       show("REQUESTING_PERMISSION", "Requesting microphone permission...");
       try {
         if (!await acknowledged) {
@@ -276,7 +366,7 @@
         const track = stream.getAudioTracks()[0];
         if (!track) throw new DOMException("No audio input track", "NotFoundError");
         track.onended = () => {
-          if (id === generation && phase === "RECORDING")
+          if (id === generation && ["LISTENING", "RECORDING"].includes(phase))
             cancel("Microphone disconnected. Reconnect it and retry.", "NO_DEVICE");
         };
         preview.textContent = track.label ? `Input: ${track.label}` : "Microphone input ready";
@@ -294,11 +384,18 @@
           throw new Error("This browser's recording format is unsupported.");
         }
         chunks = [];
-        recorder.ondataavailable = event => {if (id === generation && event.data?.size) chunks.push(event.data);};
+        recorder.ondataavailable = event => {
+          if (id !== generation || !event.data?.size) return;
+          chunks.push(event.data);
+          if (!speechAt && chunks.length > 4) chunks.shift();
+        };
         recorder.onerror = () => {if (id === generation) cancel("Recording failed. Retry.", "NO_AUDIO");};
         recorder.start(settings.recording_buffer_ms || 250);
-        startedAt = Date.now(); speechAt = 0; noiseFloor = 0.005;
-        show("RECORDING", "Recording 0s. Tap to stop.");
+        startedAt = Date.now(); speechAt = 0; speechCandidateAt = 0;
+        lastSpeechAt = 0; noiseFloor = 0.005;
+        show("LISTENING", "Listening for your question...");
+        writeTurn("listening");
+        console.info(JSON.stringify({event:"voice_listening_started",request_id:requestId}));
         timer = setInterval(() => meterTick(id), 100);
       } catch (error) {
         if (id !== generation) return;
@@ -323,11 +420,14 @@
       active.stop();
       await stopped;
       if (id !== generation) return;
-      const duration = (Date.now() - startedAt) / 1000;
+      const duration = speechAt ? (Date.now() - speechAt) / 1000 : 0;
       const blob = new Blob(chunks, {type:active.mimeType});
       stopCapture();
       if (!blob.size || duration < 0.35 || !speechAt) {
-        cancel("No usable speech was recorded. Speak closer and retry.", "NO_AUDIO"); return;
+        // The next begin supersedes this request; keep the voice session active.
+        requestId = "";
+        beginRecording();
+        return;
       }
       try {
         const dataUrl = await new Promise((resolve, reject) => {
@@ -337,7 +437,10 @@
           reader.readAsDataURL(blob);
         });
         if (id !== generation) return;
-        show("TRANSCRIBING", "Transcribing locally. You can cancel and retry.");
+        show("TRANSCRIBING", "Recognizing speech...");
+        writeTurn("transcribing");
+        console.info(JSON.stringify({event:"voice_transcript_requested",request_id:requestId,
+          audio_duration_s:Math.round(duration * 1000) / 1000}));
         sendValue({kind:"audio", request_id:requestId, audio_mime:active.mimeType,
           audio_b64:String(dataUrl).split(",")[1] || "", duration_seconds:duration});
       } catch (error) {
@@ -345,21 +448,24 @@
       }
     }
     button.addEventListener("click", () => {
-      if (phase === "RECORDING") finishRecording(generation);
-      else if (["REQUESTING_PERMISSION", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) cancel();
-      else beginRecording();
-    });
-    window.addEventListener("keydown", event => {
-      if (event.key === "Escape" && ["REQUESTING_PERMISSION", "RECORDING", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) cancel();
-    });
-    window.addEventListener("storage", event => {
-      if (event.key === interruptKey && Number(event.newValue || 0) > ownInterruptAt &&
-          ["REQUESTING_PERMISSION", "RECORDING", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) {
-        cancel("Interrupted by a newer query.");
+      if (enabled) cancel();
+      else {
+        enabled = true;
+        localStorage.setItem(modeKey(), "true");
+        beginRecording();
       }
     });
+    window.addEventListener("keydown", event => {
+      if (event.key === "Escape" && enabled) cancel();
+    });
+    window.addEventListener("storage", event => {
+      if (event.key === interruptKey && Number(event.newValue || 0) > ownInterruptAt && enabled) {
+        cancel("Interrupted by a newer query.", "CANCELLED", false, false);
+      } else if (event.key === turnKey() || event.key === audioKey()) syncTurn();
+    });
+    window.setInterval(syncTurn, 250);
     window.addEventListener("beforeunload", stopCapture);
-    show("IDLE", "Tap to record with this browser's microphone.");
+    show("IDLE", "Start once, then speak naturally.");
   </script>
 </body>
 </html>

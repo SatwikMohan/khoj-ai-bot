@@ -85,7 +85,7 @@ function sync(){
  else if(!value||Date.now()-value.at>=120000)phase("idle");
 }
 window.addEventListener("storage",sync);setInterval(sync,250);
-document.addEventListener("texmin:audio-stopped",event=>{interrupted=true;playing=false;speaking(false);const reason=event.detail.reason;phase(reason==="queue_limit"||reason==="playback_failed"?"error":"interrupted",reason==="queue_limit"?"Speech stopped: playback queue full":reason==="playback_failed"?"Speech playback failed":"Interrupted")});
+document.addEventListener("texmin:audio-stopped",event=>{interrupted=true;playing=false;speaking(false);const reason=event.detail.reason;phase(reason==="queue_limit"||reason==="queue_stalled"||reason==="playback_failed"?"error":"interrupted",reason==="queue_limit"?"Speech stopped: playback queue full":reason==="queue_stalled"?"Speech stopped: audio queue stalled":reason==="playback_failed"?"Speech playback failed":"Interrupted")});
 document.addEventListener("texmin:audio-queued",()=>{visual.dataset.hasAudio="true"});
 document.addEventListener("texmin:audio-completed",()=>{playing=false;speaking(false);phase("idle")});
 document.addEventListener("texmin:audio-play-failed",()=>{playing=false;speaking(false);phase("idle")});

@@ -30,6 +30,14 @@ OLLAMA_REQUEST_TIMEOUT_SECONDS = 120
 OLLAMA_THINK = "false"
 QA_REASONING_ENABLED = False
 QA_RESPONSE_TIMEOUT_SECONDS = 180
+# Legacy limit for direct bounded_events callers. QA uses stage clocks below.
+RETRIEVAL_TIMEOUT_SECONDS = 120
+MODEL_INIT_TIMEOUT_SECONDS = 30
+LLM_FIRST_TOKEN_TIMEOUT_SECONDS = 120
+LLM_INTER_TOKEN_TIMEOUT_SECONDS = 45
+LLM_TOTAL_GENERATION_TIMEOUT_SECONDS = 600
+QA_WORKER_QUEUE_TIMEOUT_SECONDS = 30
+QA_MAX_ACTIVE_WORKERS = 4
 QA_WARMUP_ON_STARTUP = False
 QA_TEMPERATURE = 0.3
 QA_TOP_K = 5
@@ -141,6 +149,7 @@ RECORDING_MAX_SECONDS = 30
 RECORDING_SILENCE_MS = 1100
 RECORDING_SPEECH_CONFIRM_MS = 150
 STT_REQUEST_TIMEOUT_SECONDS = 90
+VOICE_TURN_WATCHDOG_SECONDS = 900  # Browser recovery if a turn never receives completion.
 
 # The DGX uses one Indian bilingual speaker. Piper remains the lightweight
 # Windows development voice; its English model uses US phonemization.
@@ -179,8 +188,11 @@ TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH_BYTES = 2
 TTS_STREAM_MIN_CHARS = 60
 TTS_STREAM_MAX_CHARS = 320
-TTS_STREAM_CONCURRENCY = 2
+TTS_STREAM_MAX_BUFFER_SECONDS = 1.5
+TTS_STREAM_CONCURRENCY = 1  # One persistent voice worker serializes synthesis.
+TTS_MAX_PENDING_JOBS = 4
 TTS_MAX_QUEUED_SEGMENTS = 24
+AUDIO_QUEUE_TIMEOUT_SECONDS = 30
 QA_STREAM_HEARTBEAT_SECONDS = 0.35
 TTS_TONE = "warm"  # Veena's speaker is fixed; Piper maps tone presets to speed.
 TTS_RATE = "+0%"
@@ -215,16 +227,21 @@ def validate_config() -> None:
         raise ValueError("CHUNK_OVERLAP must be smaller than positive CHUNK_SIZE.")
     if OLLAMA_EMBED_DIMENSIONS <= 0 or EMBEDDING_BATCH_SIZE <= 0 or INGESTION_WORKERS <= 0:
         raise ValueError("Embedding dimensions, batch size and ingestion workers must be positive.")
-    if STT_AUDIO_SAMPLE_RATE != 16000 or RECORDING_BUFFER_MS <= 0 or REQUEST_CANCELLATION_POLL_SECONDS <= 0:
+    if STT_AUDIO_SAMPLE_RATE != 16000 or RECORDING_BUFFER_MS <= 0 or REQUEST_CANCELLATION_POLL_SECONDS <= 0 or VOICE_TURN_WATCHDOG_SECONDS <= 0:
         raise ValueError("Whisper input must be 16 kHz and recording/cancellation intervals positive.")
     if min(TTS_SAMPLE_RATE, TTS_CHANNELS, TTS_SAMPLE_WIDTH_BYTES) <= 0:
         raise ValueError("TTS audio format settings must be positive.")
-    if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0 or TTS_MAX_QUEUED_SEGMENTS <= 0:
+    if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0 or TTS_MAX_QUEUED_SEGMENTS <= 0 or TTS_MAX_PENDING_JOBS <= 0 or TTS_STREAM_MAX_BUFFER_SECONDS <= 0 or AUDIO_QUEUE_TIMEOUT_SECONDS <= 0:
         raise ValueError("Streaming speech chunk sizes and concurrency must be positive and ordered.")
     if not 0 <= INDEX_MIN_RECALL_AT_5 <= 1:
         raise ValueError("INDEX_MIN_RECALL_AT_5 must be between zero and one.")
     if min(QA_TOP_K, QA_ANSWER_CONTEXT_DOCS, RETRIEVAL_FETCH_K, CONTEXT_MAX_CHARS, VERSION_CANDIDATES) <= 0:
         raise ValueError("Retrieval limits must be positive.")
+    if min(RETRIEVAL_TIMEOUT_SECONDS, MODEL_INIT_TIMEOUT_SECONDS,
+           LLM_FIRST_TOKEN_TIMEOUT_SECONDS, LLM_INTER_TOKEN_TIMEOUT_SECONDS,
+           LLM_TOTAL_GENERATION_TIMEOUT_SECONDS, QA_WORKER_QUEUE_TIMEOUT_SECONDS,
+           QA_MAX_ACTIVE_WORKERS) <= 0:
+        raise ValueError("QA stage timeouts and worker capacity must be positive.")
     if PIPER_DEVICE not in {"cpu", "cuda"}:
         raise ValueError("PIPER_DEVICE must be cpu or cuda.")
     if OFFLINE_MODE and TTS_ENGINE.strip().lower() in {"edge", "edge-tts"}:
