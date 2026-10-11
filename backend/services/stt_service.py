@@ -1,5 +1,6 @@
 import config
 import os
+import re
 import tempfile
 import threading
 import time
@@ -306,4 +307,8 @@ def _transcribe_transformers(model_state: dict, audio, language: str | None, can
     if cancelled is not None and cancelled.is_set():
         raise STTEngineError("This voice interaction was replaced.")
     text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-    return text, language or "auto", 0.0, len(audio) / 16000.0
+    raw = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    match = re.search(r"<\|([a-z]{2})\|>", raw)
+    # Transformers does not expose a calibrated language probability here.
+    detected = language or (match.group(1) if match else "unknown")
+    return text, detected, 0.0, len(audio) / 16000.0

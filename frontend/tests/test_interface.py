@@ -59,6 +59,7 @@ class InterfaceTests(unittest.TestCase):
         def fake_stream(**kwargs):
             self.assertEqual(kwargs["input_type"], "audio")
             self.assertEqual(kwargs["request_id"], request_id)
+            self.assertEqual(kwargs["question"], "Edited voice question")
             yield {"type": "token", "text": "Voice answer."}
             yield {"type": "done", "answer": "Voice answer.", "sources": []}
 
@@ -74,6 +75,12 @@ class InterfaceTests(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(seen[:2], ["", request_id])
             self.assertEqual(transcribe.call_count, 1)
+            self.assertEqual(stream.call_count, 0)
+            self.assertEqual(app.text_area[0].value, "Voice question")
+            with patch("services.qa_service.stream_answer_events", side_effect=fake_stream) as stream:
+                app.text_area[0].set_value("Edited voice question").run()
+                app.button(key="submit_voice").click().run()
+            self.assertFalse(app.exception)
             self.assertEqual(stream.call_count, 1)
             self.assertTrue(any("Voice answer." in str(item.value) for item in app.markdown))
         finally:
@@ -109,7 +116,7 @@ class InterfaceTests(unittest.TestCase):
         self.assertTrue(all(item.stat().st_size > 0 for item in resources))
 
     def test_visualization_is_local_and_supports_audio_queue(self):
-        with patch("visualization.components.html") as render:
+        with patch("visualization.st.iframe") as render:
             render_ai_visualization(queue_id="test-queue", request_id="test-request", session_id="test-session", thinking=True)
         html = render.call_args.args[0]
         self.assertIn("texmin:avatar-queue", html)

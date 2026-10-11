@@ -72,36 +72,14 @@ class LanguageAwareSpeechTests(unittest.TestCase):
         values.frombytes(frames)
         self.assertLess(max(abs(b - a) for a, b in zip(values, values[1:])), 20000)
 
-    def test_streamed_piper_chunks_keep_one_model_for_request(self):
-        with tempfile.TemporaryDirectory() as directory:
-            for name in (config.PIPER_HINDI_VOICE, config.PIPER_ENGLISH_VOICE):
-                (Path(directory) / (name + ".onnx")).touch()
-                (Path(directory) / (name + ".onnx.json")).touch()
-            calls = []
-            class Worker:
-                def __init__(self, path):
-                    self.path = path
-                def synthesize(self, text, length_scale, cancelled):
-                    calls.append((self.path.name, text))
-                    return wav_sample(2000)
-            registry.begin("voice-lock-test", "voice-lock-request")
-            try:
-                with patch.object(config, "PIPER_MODEL_DIR", directory), patch(
-                    "services.tts_service._piper_worker", side_effect=Worker
-                ):
-                    for text in ("Yaar, mujhe kal office jaana hai.",
-                                 "Can you remind me at 9 AM?"):
-                        audio, mime = _synthesize_piper_speech(TTSRequest(
-                            text=text, language="hinglish", response_format="wav",
-                            session_id="voice-lock-test", request_id="voice-lock-request",
-                        ))
-                        self.assertEqual(mime, "audio/wav")
-                        self.assertTrue(audio.startswith(b"RIFF"))
-            finally:
-                registry.cancel("voice-lock-test", "voice-lock-request")
-            self.assertEqual([name for name, _ in calls],
-                             [config.PIPER_ENGLISH_VOICE + ".onnx"] * 2)
-            self.assertIn("mujhe kal", calls[0][1])
+    def test_piper_refuses_roman_hindi_instead_of_silent_english_voice(self):
+        from services.tts_service import TTSEngineError
+        with self.assertRaisesRegex(TTSEngineError, "cannot reliably speak Roman-script Hindi"):
+            _synthesize_piper_speech(TTSRequest(
+                text="Yaar, mujhe kal office jaana hai.",
+                language="hinglish", response_format="wav",
+            ))
+
 
 
 if __name__ == "__main__":

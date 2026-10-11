@@ -11,19 +11,19 @@ sys.path.insert(0, str(BACKEND_ROOT))
 import config
 
 
-def provision_whisper() -> None:
+def provision_whisper(offline: bool = False) -> None:
     engine = config.STT_ENGINE.strip().lower()
     if engine in {"transformers", "pytorch", "torch"}:
         from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
         model = config.WHISPER_TRANSFORMERS_MODEL
         print(f"Provisioning PyTorch Whisper model: {model}")
-        AutoProcessor.from_pretrained(model, local_files_only=False)
+        AutoProcessor.from_pretrained(model, local_files_only=offline)
         AutoModelForSpeechSeq2Seq.from_pretrained(
             model,
             low_cpu_mem_usage=True,
             use_safetensors=True,
-            local_files_only=False,
+            local_files_only=offline,
         )
         return
 
@@ -38,7 +38,7 @@ def provision_whisper() -> None:
         device="cpu",
         compute_type="int8",
         download_root=str(model_dir),
-        local_files_only=False,
+        local_files_only=offline,
     )
 
 
@@ -144,28 +144,26 @@ def provision_tts(offline: bool = False, engine_override: str | None = None) -> 
         raise RuntimeError(f"Unsupported provisioning engine: {engine}. Choose piper or espeak.")
 
 
-def provision_reranker() -> None:
+def provision_reranker(offline: bool = False) -> None:
     if not config.RERANK_ENABLED:
         return
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     model = config.RERANK_MODEL
     print(f"Provisioning reranker: {model}")
-    AutoTokenizer.from_pretrained(model)
-    AutoModelForSequenceClassification.from_pretrained(model)
+    AutoTokenizer.from_pretrained(model, local_files_only=offline)
+    AutoModelForSequenceClassification.from_pretrained(model, local_files_only=offline)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download configured offline assets and verify speech.")
     parser.add_argument("--only-tts", action="store_true")
     parser.add_argument("--engine", choices=("piper", "veena"), help="Override the configured speech engine for provisioning.")
-    parser.add_argument("--offline", action="store_true", help="Verify cached TTS assets without downloading.")
+    parser.add_argument("--offline", action="store_true", help="Verify all configured model assets without downloading.")
     args = parser.parse_args()
-    if args.offline and not args.only_tts:
-        parser.error("--offline currently requires --only-tts")
     config.configure_runtime_environment(offline=args.offline)
     provision_tts(offline=args.offline, engine_override=args.engine)
     if not args.only_tts:
-        provision_whisper()
-        provision_reranker()
+        provision_whisper(offline=args.offline)
+        provision_reranker(offline=args.offline)
     print("Configured offline assets are ready.", flush=True)

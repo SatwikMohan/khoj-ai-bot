@@ -131,6 +131,7 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
     events = queue.Queue(maxsize=64)
     cancelled = request.cancelled if request else threading.Event()
     finished = threading.Event()
+    stage = "Preparing your answer"
 
     def send(event):
         while not cancelled.is_set():
@@ -152,7 +153,7 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
         except Exception as exc:
             if not cancelled.is_set():
                 if request:
-                    request.status = "failed"
+                    registry.fail(request, stage, exc)
                 send({"type": "error", "message": str(exc) or type(exc).__name__})
         finally:
             finished.set()
@@ -164,7 +165,6 @@ def bounded_events(factory, timeout_seconds: float, heartbeat_seconds: float = 2
     if request:
         request.worker = worker
     worker.start()
-    stage = "Preparing your answer"
     completed = False
     try:
         while True:

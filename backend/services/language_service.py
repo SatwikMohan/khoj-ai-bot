@@ -1,6 +1,7 @@
 """Offline query language identification shared by answers and speech."""
 
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 
 import config
@@ -80,8 +81,7 @@ def detect_language(text: str, fallback: str = "en") -> str:
 
 
 def response_language(question: str) -> str:
-    configured = config.RESPONSE_LANGUAGE.strip().lower()
-    return detect_language(question) if configured == "auto" else configured
+    return resolve_language_context(question).target_language
 
 
 def language_instruction(code: str) -> str:
@@ -99,3 +99,73 @@ def language_instruction(code: str) -> str:
     if code == "en":
         return "Reply in grammatical English with standard spelling. Keep technical identifiers unchanged."
     return f"Reply in the user's language ({code}). Keep technical identifiers unchanged."
+
+
+@dataclass(frozen=True)
+class LanguageContext:
+    original_input: str
+    transcript: str | None
+    detected_language: str
+    target_language: str
+    script: str
+    selected_language: str | None = None
+    confidence: float | None = None
+    retrieved_languages: tuple[str, ...] = ()
+    tts_language: str = ""
+    tts_engine: str = ""
+    tts_voice: str = ""
+
+
+def resolve_language_context(
+    question: str, *, transcript: str | None = None, selected_language: str | None = None,
+) -> LanguageContext:
+    """Resolve the current query once; retrieved text and history cannot change it."""
+    current = (transcript if transcript is not None else question).strip()
+    detected = detect_language(current)
+    configured = config.RESPONSE_LANGUAGE.strip().lower()
+    selected = (selected_language or "").strip().lower() or None
+    target = selected or (detected if configured == "auto" else configured)
+    target = {"english": "en", "hindi": "hi"}.get(target, target)
+    script = "Devanagari" if re.search(r"[\u0900-\u097f]", current) else "Latin"
+    return LanguageContext(
+        question, transcript, detected, target, script, selected,
+        tts_language=target, tts_engine=config.TTS_ENGINE, tts_voice=config.TTS_VOICE,
+    )
+
+
+def answer_language_matches(text: str, expected: str) -> bool:
+    """Conservative guard against obvious script/language switches.
+
+    Ambiguous short text and technical identifiers are not treated as evidence
+    of a mismatch. This is a guard, not a claim of full language identification.
+    """
+    expected = {"english": "en", "hindi": "hi"}.get(expected.lower(), expected.lower())
+    body = re.sub(r"`[^`]*`|https?://\S+", " ", text)
+    letters = [char for char in body if char.isalpha()]
+    if len(letters) < 10:
+        return True
+    devanagari = sum("\u0900" <= char <= "\u097f" for char in letters)
+    if expected == "hi":
+        return devanagari / len(letters) >= 0.18
+    if expected == "en":
+        if devanagari / len(letters) >= 0.18:
+            return False
+        words = re.findall(r"[a-zA-Z\u00c0-\u00ff]+", body.lower())
+        if len(words) >= 8:
+            classifier = _classifier()
+            if classifier:
+                detected, confidence = classifier.classify(body)
+                if detected != "en" and confidence >= 0.95:
+                    return False
+        return True
+    if expected == "hinglish":
+        words = re.findall(r"[a-zA-Z]+", body.lower())
+        hindi = sum(word in ROMAN_HINDI for word in words)
+        return devanagari / len(letters) < 0.18 and hindi >= 2
+    if len(letters) >= 35:
+        classifier = _classifier()
+        if classifier:
+            detected, confidence = classifier.classify(body)
+            if confidence >= 0.95 and detected != expected:
+                return False
+    return True

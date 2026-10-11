@@ -1,5 +1,6 @@
 """Pull the configured Ollama models without loading a second config source."""
 
+import argparse
 import json
 import sys
 import urllib.request
@@ -9,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 
 
-def provision_models() -> None:
+def provision_models(offline: bool = False) -> None:
     base_url = config.OLLAMA_BASE_URL.rstrip("/")
     with urllib.request.urlopen(
         f"{base_url}/api/tags", timeout=config.OLLAMA_REQUEST_TIMEOUT_SECONDS
@@ -20,6 +21,11 @@ def provision_models() -> None:
         if model in installed or (":" not in model and f"{model}:latest" in installed):
             print(f"Already available: {model}", flush=True)
             continue
+        if offline:
+            raise RuntimeError(
+                f"Configured Ollama model '{model}' is missing. "
+                "Run python scripts/provision_ollama.py explicitly while connected."
+            )
         print(f"Downloading configured model: {model}", flush=True)
         request = urllib.request.Request(
             f"{base_url}/api/pull",
@@ -43,4 +49,7 @@ def provision_models() -> None:
 
 
 if __name__ == "__main__":
-    provision_models()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true", help="Check installed tags without pulling models.")
+    args = parser.parse_args()
+    provision_models(offline=args.offline)

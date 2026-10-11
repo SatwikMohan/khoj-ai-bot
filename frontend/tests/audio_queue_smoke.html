@@ -1,0 +1,39 @@
+﻿<!doctype html>
+<meta charset="utf-8">
+<title>Texmin audio queue browser smoke</title>
+<audio></audio><output id="result">PENDING</output>
+<script src="../assets/audio_manager.js"></script>
+<script>
+const result = document.getElementById("result");
+const audio = document.querySelector("audio");
+const plays = [], stopped = [];
+audio.load = () => {};
+audio.play = () => { plays.push(audio.src); return Promise.resolve(); };
+document.addEventListener("texmin:audio-stopped", e => stopped.push(e.detail.reason));
+function send(requestId, queueId, sequence, value) {
+  window.dispatchEvent(new MessageEvent("message", {data: {
+    type: "texmin:avatar-queue", requestId, queueId, sequence,
+    audio: btoa(value), mime: "audio/wav"
+  }}));
+}
+const first = createTexminAudioManager({sessionId:"smoke",requestId:"first",queueId:"q1",maxQueuedSegments:3});
+send("first","q1",1,"B");
+send("first","q1",0,"A");
+send("first","q1",1,"B");
+audio.dispatchEvent(new Event("ended"));
+const ordered = plays.length === 2 && plays[0].endsWith("QQ==") && plays[1].endsWith("Qg==");
+const second = createTexminAudioManager({sessionId:"smoke",requestId:"second",queueId:"q2",maxQueuedSegments:1});
+send("first","q1",2,"stale");
+send("second","q2",2,"C");
+send("second","q2",3,"D");
+const overflow = stopped.includes("queue_limit") && plays.length === 2;
+audio.play = () => Promise.reject(new Error("blocked"));
+const third = createTexminAudioManager({sessionId:"smoke",requestId:"third",queueId:"q3",maxQueuedSegments:3});
+send("third","q3",0,"E");
+setTimeout(() => {
+  const failed = stopped.includes("playback_failed");
+  const ok = ordered && overflow && failed;
+  result.textContent = ok ? "PASS" : JSON.stringify({ordered,overflow,failed,plays,stopped});
+  result.dataset.pass = String(ok);
+}, 100);
+</script>

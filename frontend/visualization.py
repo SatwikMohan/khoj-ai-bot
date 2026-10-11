@@ -1,15 +1,15 @@
 """Original 3D avatar and streamed speech player."""
 import json
-import streamlit.components.v1 as components
+import streamlit as st
 
 from avatar_renderer import render_script
 from audio_manager import audio_manager_script
 
 
-def render_ai_visualization(*, resume_listener_on_end=True, queue_id=None,
+def render_ai_visualization(*, queue_id=None,
                             request_id=None, session_id=None, thinking=False):
     settings = json.dumps({
-        "resume": resume_listener_on_end, "queueId": queue_id or "",
+        "queueId": queue_id or "",
         "requestId": request_id or "", "thinking": thinking,
     }, ensure_ascii=False).replace("</", "<\\/")
     html = r'''<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -48,7 +48,7 @@ const config=__SETTINGS__, visual=document.getElementById("visual"),
  audio=document.getElementById("audio"),statusText=document.getElementById("statusText");
 const activityKey="texmin_ai_activity",speakingKey="texmin_voice_avatar_speaking_at",
  interruptKey="texmin_voice_interrupt_at",startedAt=Date.now();
-let interrupted=false,playing=false,heartbeat=null,lastActivity=0,resumed=false;
+let interrupted=false,playing=false,heartbeat=null,lastActivity=0;
 let firstPlayback=true;const visualStarted=performance.now();
 function phase(value,label){
  if(playing&&value!=="speaking")return;
@@ -62,12 +62,11 @@ function speaking(on){
  if(on){const mark=()=>localStorage.setItem(speakingKey,String(Date.now()));mark();heartbeat=setInterval(mark,600)}
  else localStorage.removeItem(speakingKey);
 }
-function resume(){if(config.resume&&!resumed){resumed=true;localStorage.setItem("texmin_voice_resume_at",String(Date.now()))}}
 function interrupt(){
  const at=Number(localStorage.getItem(interruptKey)||0);
  if(!at||at<startedAt||interrupted)return;
  interrupted=true;window.texminAudioManager.stop("interrupted");
- visual.dataset.hasAudio="false";speaking(false);playing=false;phase("interrupted");resume();
+ visual.dataset.hasAudio="false";speaking(false);playing=false;phase("interrupted");
 }
 audio.addEventListener("play",()=>{
  if(firstPlayback){
@@ -86,10 +85,10 @@ function sync(){
  else if(!value||Date.now()-value.at>=120000)phase("idle");
 }
 window.addEventListener("storage",sync);setInterval(sync,250);
-document.addEventListener("texmin:audio-stopped",()=>{interrupted=true;playing=false;speaking(false);phase("interrupted")});
+document.addEventListener("texmin:audio-stopped",event=>{interrupted=true;playing=false;speaking(false);const reason=event.detail.reason;phase(reason==="queue_limit"||reason==="playback_failed"?"error":"interrupted",reason==="queue_limit"?"Speech stopped: playback queue full":reason==="playback_failed"?"Speech playback failed":"Interrupted")});
 document.addEventListener("texmin:audio-queued",()=>{visual.dataset.hasAudio="true"});
-document.addEventListener("texmin:audio-completed",()=>{playing=false;speaking(false);phase("idle");resume()});
-document.addEventListener("texmin:audio-play-failed",()=>{playing=false;speaking(false);phase("idle");resume()});
+document.addEventListener("texmin:audio-completed",()=>{playing=false;speaking(false);phase("idle")});
+document.addEventListener("texmin:audio-play-failed",()=>{playing=false;speaking(false);phase("idle")});
 if(config.thinking)phase("generating");
 sync();
 </script>__RENDERER_SCRIPT__</body></html>'''
@@ -98,5 +97,5 @@ sync();
             .replace("__AUDIO_MANAGER_SCRIPT__", audio_manager_script(session_id or "", request_id or "", queue_id or ""))
             .replace("__IMPORT_MAP__", import_map)
             .replace("__RENDERER_SCRIPT__", renderer_script))
-    components.html(html, height=620)
+    st.iframe(html, height=620)
 

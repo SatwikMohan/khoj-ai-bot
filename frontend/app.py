@@ -17,7 +17,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 import config
-from services.language_service import detect_language, response_language
+from services.language_service import response_language
 from services.speech_chunker import IncrementalSpeechSegments
 from services.request_lifecycle import registry
 from helpers.request_models import ChatMessage, TTSRequest
@@ -71,6 +71,10 @@ def init_state() -> None:
         st.session_state.last_voice_event = ""
     if "accepted_voice_request_id" not in st.session_state:
         st.session_state.accepted_voice_request_id = ""
+    if "pending_voice" not in st.session_state:
+        st.session_state.pending_voice = None
+    if "voice_error" not in st.session_state:
+        st.session_state.voice_error = None
 
 
 def markdown_to_html(content: str) -> str:
@@ -115,7 +119,7 @@ def render_voice_query_component() -> dict | None:
     value = voice_query_component(
         default=None,
         key="texmin_voice_query",
-        height=92,
+        height=120,
         no_speech_timeout_seconds=config.RECORDING_NO_SPEECH_TIMEOUT_SECONDS,
         max_recording_seconds=config.RECORDING_MAX_SECONDS,
         silence_ms=config.RECORDING_SILENCE_MS,
@@ -124,6 +128,9 @@ def render_voice_query_component() -> dict | None:
         stt_timeout_seconds=config.STT_REQUEST_TIMEOUT_SECONDS,
         session_id=st.session_state.conversation_session_id,
         accepted_request_id=st.session_state.accepted_voice_request_id,
+        review_request_id=(st.session_state.pending_voice or {}).get("request_id", ""),
+        voice_error_request_id=(st.session_state.voice_error or {}).get("request_id", ""),
+        voice_error=(st.session_state.voice_error or {}).get("message", ""),
     )
     if not isinstance(value, dict):
         return None
@@ -136,6 +143,8 @@ def render_voice_query_component() -> dict | None:
     session_id = st.session_state.conversation_session_id
     if kind == "begin":
         begin_voice_interaction(session_id, request_id)
+        st.session_state.pending_voice = None
+        st.session_state.voice_error = None
         st.session_state.accepted_voice_request_id = request_id
         st.rerun()  # Deliver the acknowledgement before the browser records audio.
     if kind == "cancel":
@@ -164,11 +173,20 @@ def render_voice_query_component() -> dict | None:
                     raise TimeoutError("Speech recognition timed out.")
                 progress.empty()  # Let Streamlit process a newer text or voice query.
         text = str(result.get("text", "")).strip()
-        if text:
-            return {"text": text, "request_id": request_id, "input_type": "audio"}
+        if text and registry.current(session_id, request_id) is not None:
+            st.session_state.pending_voice = {
+                "text": text, "request_id": request_id, "input_type": "audio",
+                "language": result.get("language", ""),
+            }
+            st.session_state.voice_transcript_review = text
+            st.session_state.voice_error = None
+            return None
+        raise ValueError("Speech recognition returned no usable transcript.")
     except Exception as exc:
         cancel_interaction(session_id, request_id)
-        st.warning(f"Offline speech recognition failed: {exc}")
+        st.session_state.accepted_voice_request_id = ""
+        st.session_state.voice_error = {"request_id": request_id, "message": str(exc)}
+        st.warning(f"Offline speech recognition failed: {exc}. Check the microphone and retry.")
     except BaseException:
         cancel_interaction(session_id, request_id)
         raise
@@ -188,17 +206,6 @@ def _qa_events(payload: dict):
         session_id=payload.get("session_id"),
         request_id=payload.get("request_id"),
         input_type=payload.get("input_type", "text"),
-    )
-
-
-def resume_voice_listener_without_audio() -> None:
-    components.html(
-        """
-        <script>
-            window.localStorage.setItem("texmin_voice_resume_at", String(Date.now()));
-        </script>
-        """,
-        height=0,
     )
 
 
@@ -262,15 +269,15 @@ def publish_ai_activity(line_container, signal_container, phase: str, label: str
     )
     event = json.dumps({"phase": phase, "label": label}, ensure_ascii=False)
     with signal_container:
-        components.html(
+        st.iframe(
             f'<script>localStorage.setItem("texmin_ai_activity", '
             f'JSON.stringify({{...{event}, at: Date.now()}}));</script>',
-            height=0,
+            height=1,
         )
 
 
 def render_chat_scroll_observer() -> None:
-    components.html(
+    st.iframe(
         """<script>
         try {
           const marker = window.parent.document.querySelector(".conversation-marker");
@@ -289,7 +296,7 @@ def render_chat_scroll_observer() -> None:
           }
         } catch (_) {}
         </script>""",
-        height=0,
+        height=1,
     )
 
 
@@ -319,12 +326,14 @@ def _send_avatar_queue_event(
         "final": final,
         "finalSequence": sequence if final else None,
     }
-    event_json = json.dumps(event, ensure_ascii=False).replace("</", "<\\/")
+    event_b64 = base64.b64encode(json.dumps(event, ensure_ascii=False).encode("utf-8")).decode("ascii")
     with sender_container:
-        components.html(
+        st.iframe(
             f"""
             <script>
-                const queueEvent = {event_json};
+                const queueEvent = JSON.parse(new TextDecoder().decode(
+                    Uint8Array.from(atob("{event_b64}"), character => character.charCodeAt(0))
+                ));
                 const broadcast = () => {{
                     for (let index = 0; index < window.parent.frames.length; index += 1) {{
                         window.parent.frames[index].postMessage(queueEvent, "*");
@@ -336,28 +345,28 @@ def _send_avatar_queue_event(
                 window.setTimeout(broadcast, 1500);
             </script>
             """,
-            height=0,
+            height=1,
         )
 
 
 def render_audio_queue_player(queue_id: str, request_id: str, session_id: str) -> None:
     manager_script = audio_manager_script(session_id, request_id, queue_id)
-    components.html(
+    st.iframe(
         f"""
         <audio id="voice" controls playsinline style="width:100%;height:42px"></audio>
+        <div id="speechStatus" role="status" style="font:13px sans-serif;color:#b4ffc8"></div>
         {manager_script}
         <script>
           const startedEpoch = Date.now();
-          function resumeListener() {{
-            localStorage.setItem("texmin_voice_resume_at", String(Date.now()));
-          }}
+          document.addEventListener("texmin:audio-stopped", event => {{
+            const reason = event.detail.reason;
+            if (reason === "queue_limit") document.getElementById("speechStatus").textContent = "Speech stopped: playback queue full. Text answer remains available.";
+            if (reason === "playback_failed") document.getElementById("speechStatus").textContent = "Speech playback failed. Check browser audio settings.";
+          }});
           function interrupt() {{
             const at = Number(localStorage.getItem("texmin_voice_interrupt_at") || 0);
             if (at && at >= startedEpoch) window.texminAudioManager.stop("interrupted");
           }}
-          document.addEventListener("texmin:audio-completed", resumeListener);
-          document.addEventListener("texmin:audio-stopped", resumeListener);
-          document.addEventListener("texmin:audio-play-failed", resumeListener);
           window.addEventListener("storage", interrupt);
           window.setInterval(interrupt, 250);
         </script>
@@ -406,7 +415,6 @@ def ask_api_stream(
     tts_config["session_id"] = payload["session_id"]
     tts_config["request_id"] = payload["request_id"]
     spoken_words = 0
-
     def submit_tts(segment: str) -> None:
         nonlocal queue_sequence, tts_executor, spoken_words
         if not queue_id or not tts_config["enabled"] or not segment.strip() or registry.current(payload["session_id"], payload["request_id"]) is None:
@@ -486,16 +494,15 @@ def ask_api_stream(
         with avatar_container:
             if st.session_state.avatar_enabled:
                 render_ai_visualization(
-                    resume_listener_on_end=True, queue_id=queue_id,
+                    queue_id=queue_id,
                     request_id=payload["request_id"], session_id=payload["session_id"], thinking=True,
                 )
             elif queue_id:
                 render_audio_queue_player(queue_id, payload["request_id"], payload["session_id"])
 
     try:
-        publish_ai_activity(activity_line, activity_signal, "retrieving", "Retrieving")
-        render_streaming_message(container, "", status)
-        last_phase = "retrieving"
+        render_streaming_message(container, "", "Preparing your request")
+        last_phase = ""
         with closing(_qa_events(payload)) as events:
             for event in events:
                 flush_tts()
@@ -517,6 +524,22 @@ def ask_api_stream(
                     for segment in speech_segments.push(token):
                         submit_tts(segment)
                     render_streaming_message(container, answer, status)
+                elif event_type == "replace":
+                    answer = event.get("text", "")
+                    speech_segments = IncrementalSpeechSegments()
+                    if queue_id:
+                        # A late language switch invalidates previously queued
+                        # speech. Keep the corrected text and stop that queue.
+                        tts_config["enabled"] = False
+                        for future, _ in tts_futures.values():
+                            future.cancel()
+                        tts_futures.clear()
+                        st.iframe(
+                            '<script>localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
+                            height=1,
+                        )
+                        audio_error = "Speech stopped after answer language correction. You can ask again with speech enabled."
+                    render_streaming_message(container, answer, status)
                 elif event_type == "done":
                     done_received = True
                     answer = event.get("answer") or answer
@@ -524,6 +547,7 @@ def ask_api_stream(
                     status = ""
                     render_streaming_message(container, answer, status)
                 elif event_type == "error":
+                    cancel_interaction(payload["session_id"], payload["request_id"])
                     if tts_executor is not None:
                         tts_executor.shutdown(wait=False, cancel_futures=True)
                     if queue_id and queue_sender is not None:
@@ -538,6 +562,7 @@ def ask_api_stream(
                     publish_ai_activity(activity_line, activity_signal, "interrupted", "Interrupted")
                     return "", [], "__cancelled__", None, audio_mime, None
     except Exception as exc:
+        cancel_interaction(payload["session_id"], payload["request_id"])
         if tts_executor is not None:
             tts_executor.shutdown(wait=False, cancel_futures=True)
         if queue_id and queue_sender is not None:
@@ -677,6 +702,37 @@ with right_col:
     activity_signal = st.empty()
     activity_line.markdown('<div class="activity-line">Ready</div>', unsafe_allow_html=True)
     voice_component_query = render_voice_query_component()
+    if st.session_state.voice_error:
+        st.error("Microphone transcription failed: " + st.session_state.voice_error["message"]
+                 + " Check the device, then use Record question again.")
+    pending_voice = st.session_state.pending_voice
+    if pending_voice:
+        st.markdown("**Review transcription**")
+        reviewed_text = st.text_area(
+            "Edit the recognized question", key="voice_transcript_review",
+        )
+        submit_voice, retry_voice = st.columns(2)
+        if submit_voice.button("Send question", key="submit_voice", disabled=not reviewed_text.strip()):
+            if registry.current(st.session_state.conversation_session_id, pending_voice["request_id"]):
+                voice_component_query = {
+                    "text": reviewed_text.strip(), "request_id": pending_voice["request_id"],
+                    "input_type": "audio",
+                }
+            st.session_state.pending_voice = None
+            st.session_state.accepted_voice_request_id = ""
+        if retry_voice.button("Discard and record again", key="retry_voice"):
+            cancel_interaction(st.session_state.conversation_session_id, pending_voice["request_id"])
+            st.session_state.pending_voice = None
+            st.session_state.accepted_voice_request_id = ""
+            st.rerun()
+    st.session_state.tts_enabled = st.toggle(
+        "Speak answers", value=st.session_state.tts_enabled, key="speech_toggle"
+    )
+    if st.button("Stop speech", key="stop_speech"):
+        st.iframe(
+            '<script>localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
+            height=1,
+        )
     typed_question = st.chat_input("Ask anything...")
 question = typed_question or (voice_component_query or {}).get("text") or voice_query_param
 
@@ -689,9 +745,12 @@ if question:
         # A rerun interrupted its previous answer; omit that unfinished turn.
         st.session_state.messages.pop()
     if typed_question:
-        components.html(
+        if st.session_state.pending_voice:
+            cancel_interaction(st.session_state.conversation_session_id, st.session_state.pending_voice["request_id"])
+            st.session_state.pending_voice = None
+        st.iframe(
             '<script>window.localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
-            height=0,
+            height=1,
         )
     with live_response_container:
         user_message = {"role": "user", "content": question}
@@ -734,7 +793,5 @@ if question:
                 "audio_error": audio_error,
             }
         )
-    if (voice_component_query or voice_query_param) and not st.session_state.get("audio_queue_active", False):
-        resume_voice_listener_without_audio()
     if voice_query_param and "voice_query" in st.query_params:
         del st.query_params["voice_query"]

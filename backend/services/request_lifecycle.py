@@ -6,6 +6,10 @@ import uuid
 from dataclasses import dataclass, field
 
 
+class DuplicateRequestError(RuntimeError):
+    pass
+
+
 @dataclass
 class ActiveRequest:
     session_id: str
@@ -13,11 +17,18 @@ class ActiveRequest:
     input_type: str = "text"
     created_at: float = field(default_factory=time.time)
     status: str = "processing"
+    updated_at: float = field(default_factory=time.time)
+    finished_at: float | None = None
+    cancel_reason: str | None = None
+    error: dict[str, str] | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
     worker: threading.Thread | None = None
 
-    def stop(self) -> None:
+    def stop(self, reason: str = "replaced") -> None:
         self.cancelled.set()
+        self.cancel_reason = reason
+        self.updated_at = time.time()
+        self.finished_at = self.updated_at
         self.status = "cancelled"
 
 
@@ -30,10 +41,12 @@ class RequestRegistry:
         request = ActiveRequest(session_id=session_id, request_id=request_id or uuid.uuid4().hex, input_type=input_type, status=status)
         with self._lock:
             self._active = {key: value for key, value in self._active.items()
-                            if value.status not in {"completed", "cancelled"} or time.time() - value.created_at < 3600}
+                            if value.status not in {"answer_ready", "cancelled", "failed"} or time.time() - (value.finished_at or value.created_at) < 3600}
             previous = self._active.get(session_id)
+            if previous and previous.request_id == request.request_id and not previous.cancelled.is_set():
+                raise DuplicateRequestError(f"Request {request.request_id} was already started.")
             if previous:
-                previous.stop()
+                previous.stop("superseded")
             self._active[session_id] = request
         return request
 
@@ -51,18 +64,27 @@ class RequestRegistry:
             if self._active.get(request.session_id) is not request or request.cancelled.is_set():
                 return False
             request.status = status
+            request.updated_at = time.time()
             return True
 
     def is_current(self, request: ActiveRequest) -> bool:
         with self._lock:
             return self._active.get(request.session_id) is request and not request.cancelled.is_set()
 
-    def cancel(self, session_id: str, request_id: str | None = None) -> bool:
+    def fail(self, request: ActiveRequest, stage: str, error: Exception) -> None:
+        with self._lock:
+            if self._active.get(request.session_id) is request and not request.cancelled.is_set():
+                request.error = {"stage": stage, "category": type(error).__name__}
+                request.status = "failed"
+                request.updated_at = time.time()
+                request.finished_at = request.updated_at
+
+    def cancel(self, session_id: str, request_id: str | None = None, reason: str = "cancelled") -> bool:
         with self._lock:
             request = self._active.get(session_id)
             if request is None or request_id and request.request_id != request_id:
                 return False
-            request.stop()
+            request.stop(reason)
             self._active.pop(session_id, None)
             return True
 
@@ -76,7 +98,10 @@ class RequestRegistry:
             if self._active.get(request.session_id) is request and request.session_id.startswith("anonymous-"):
                 self._active.pop(request.session_id, None)
             if not request.cancelled.is_set() and request.status != "failed":
-                request.status = "completed"
+                # Browser playback has a separate owner and may still be active.
+                request.status = "answer_ready"
+                request.updated_at = time.time()
+                request.finished_at = request.updated_at
 
 
 registry = RequestRegistry()

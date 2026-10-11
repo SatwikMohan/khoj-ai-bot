@@ -36,7 +36,7 @@ services:
     volumes:
       - ./backend/config.py:/app/config.py:ro
       - ./backend/scripts/provision_ollama.py:/app/scripts/provision_ollama.py:ro
-    command: ["python", "scripts/provision_ollama.py"]
+    command: ["python", "scripts/provision_ollama.py", "--offline"]
 
   config-init:
     image: python:3.12-alpine
@@ -57,7 +57,7 @@ services:
     volumes:
       - ./backend/config.py:/app/config.py:ro
       - ai_models:/models
-    command: ["python", "scripts/provision_models.py"]
+    command: ["python", "scripts/provision_models.py", "--offline"]
 
   index-init:
     build:

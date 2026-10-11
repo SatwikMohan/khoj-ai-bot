@@ -180,6 +180,7 @@ TTS_SAMPLE_WIDTH_BYTES = 2
 TTS_STREAM_MIN_CHARS = 60
 TTS_STREAM_MAX_CHARS = 320
 TTS_STREAM_CONCURRENCY = 2
+TTS_MAX_QUEUED_SEGMENTS = 24
 QA_STREAM_HEARTBEAT_SECONDS = 0.35
 TTS_TONE = "warm"  # Veena's speaker is fixed; Piper maps tone presets to speed.
 TTS_RATE = "+0%"
@@ -218,7 +219,7 @@ def validate_config() -> None:
         raise ValueError("Whisper input must be 16 kHz and recording/cancellation intervals positive.")
     if min(TTS_SAMPLE_RATE, TTS_CHANNELS, TTS_SAMPLE_WIDTH_BYTES) <= 0:
         raise ValueError("TTS audio format settings must be positive.")
-    if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0:
+    if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0 or TTS_MAX_QUEUED_SEGMENTS <= 0:
         raise ValueError("Streaming speech chunk sizes and concurrency must be positive and ordered.")
     if not 0 <= INDEX_MIN_RECALL_AT_5 <= 1:
         raise ValueError("INDEX_MIN_RECALL_AT_5 must be between zero and one.")

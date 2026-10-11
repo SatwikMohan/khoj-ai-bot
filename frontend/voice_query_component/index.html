@@ -85,9 +85,7 @@
       color: #9caea1;
       font-size: 0.75rem;
       line-height: 1.25;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
     }
 
     .voice-preview {
@@ -140,99 +138,42 @@
     const preview = document.getElementById("voicePreview");
     const canvas = document.getElementById("waveCanvas");
     const painter = canvas.getContext("2d");
-    const modeKey = "texmin_voice_conversation";
-    const waitingKey = "texmin_voice_waiting_since";
-    const resumeKey = "texmin_voice_resume_at";
     const interruptKey = "texmin_voice_interrupt_at";
-    const speakingKey = "texmin_voice_avatar_speaking_at";
-    let sessionId = "";
-    let settings = {};
-    let phase = "idle";
-    let generation = 0;
-    let requestId = "";
+    let settings = {}, sessionId = "", phase = "IDLE", generation = 0;
+    let requestId = "", stream = null, recorder = null, chunks = [];
+    let context = null, analyser = null, samples = null, timer = 0;
+    let startedAt = 0, speechAt = 0, noiseFloor = 0.005, beginAck = null;
     let ownInterruptAt = 0;
-    let beginAck = null;
-    let stream = null;
-    let context = null;
-    let analyser = null;
-    let samples = null;
-    let recorder = null;
-    let chunks = [];
-    let mime = "";
-    let raf = 0;
-    let startedAt = 0;
-    let lastSpeechAt = 0;
-    let candidateAt = 0;
-    let heardSpeech = false;
-    let noiseFloor = 0.005;
-    let waitingCandidateAt = 0;
-    let lastResumeAt = localStorage.getItem(resumeKey) || "";
-    let waitingMeterPending = false;
 
     function send(type, data) {
       window.parent.postMessage({isStreamlitMessage: true, type, ...data}, "*");
     }
-    window.addEventListener("message", event => {
-      if (event.data?.type !== "streamlit:render") return;
-      settings = event.data.args || {};
-      sessionId = settings.session_id || "";
-      if (beginAck && settings.accepted_request_id === beginAck.id) {
-        const pending = beginAck;
-        beginAck = null;
-        pending.resolve(true);
-      }
-      send("streamlit:setFrameHeight", {height: 92});
-      if (phase === "waiting" && !stream) startWaitingMonitor();
-    });
-    send("streamlit:componentReady", {apiVersion: 1});
-    send("streamlit:setFrameHeight", {height: 92});
-
-    function show(next, message) {
-      phase = next;
-      const visualPhase = {
-        idle: "idle", permission: "idle", listening: "listening",
-        processing: "transcribing", waiting: "retrieving", error: "error"
-      }[next] || "idle";
-      try {
-        localStorage.setItem("texmin_ai_activity", JSON.stringify({
-          phase: visualPhase,
-          label: visualPhase === "idle" ? "Ready" : visualPhase[0].toUpperCase() + visualPhase.slice(1),
-          at: Date.now()
-        }));
-      } catch (_) {}
-      button.classList.toggle("listening", next === "listening");
-      button.classList.toggle("waiting", next === "waiting");
-      label.textContent = {
-        idle: "Start conversation", permission: "Cancel microphone",
-        listening: "Stop & transcribe", processing: "Cancel transcription",
-        waiting: "Interrupt", error: "Try again"
-      }[next] || "Start conversation";
-      statusText.textContent = message;
-      button.disabled = false;
-    }
     function sendValue(value) {
       send("streamlit:setComponentValue", {value, dataType: "json"});
     }
-    function waitForBeginAck(id) {
-      return new Promise(resolve => {
-        const timeout = setTimeout(() => {
-          if (beginAck?.id === id) beginAck = null;
-          resolve(false);
-        }, 10000);
-        beginAck = {id, resolve: accepted => {
-          clearTimeout(timeout);
-          resolve(accepted);
-        }};
-      });
-    }
-    function current(id) { return id === generation; }
-    function interruptAudio() {
-      ownInterruptAt = Date.now();
-      localStorage.setItem(interruptKey, String(ownInterruptAt));
+    function show(next, message) {
+      phase = next;
+      label.textContent = ({
+        IDLE:"Record question", REQUESTING_PERMISSION:"Cancel", READY:"Record question",
+        RECORDING:"Stop recording", PROCESSING_AUDIO:"Cancel", TRANSCRIBING:"Cancel",
+        TRANSCRIPT_REVIEW:"Record again", PERMISSION_DENIED:"Retry microphone",
+        NO_DEVICE:"Retry microphone", NO_AUDIO:"Record again",
+        TRANSCRIPTION_FAILED:"Record again", CANCELLED:"Record question"
+      })[next] || "Record question";
+      button.setAttribute("aria-label", label.textContent);
+      button.classList.toggle("listening", next === "RECORDING");
+      button.classList.toggle("waiting", next === "TRANSCRIBING" || next === "PROCESSING_AUDIO");
+      statusText.textContent = message;
+      try {
+        localStorage.setItem("texmin_ai_activity", JSON.stringify({
+          phase: next === "RECORDING" ? "listening" : next === "TRANSCRIBING" ? "transcribing" : "idle",
+          label: next, at: Date.now()
+        }));
+      } catch (_) {}
     }
     function stopCapture() {
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
+      if (timer) clearInterval(timer);
+      timer = 0;
       if (recorder && recorder.state !== "inactive") {
         recorder.onstop = null;
         recorder.ondataavailable = null;
@@ -242,253 +183,183 @@
       if (stream) stream.getTracks().forEach(track => track.stop());
       stream = null;
       if (context) context.close().catch(() => {});
-      context = null;
-      analyser = null;
-      samples = null;
-      chunks = [];
+      context = null; analyser = null; samples = null; chunks = [];
       painter.clearRect(0, 0, canvas.width, canvas.height);
     }
-    function cancelCurrent(message = "Recording cancelled.") {
+    function cancel(message = "Recording cancelled.", state = "CANCELLED") {
       generation++;
-      if (beginAck) {
-        const pending = beginAck;
-        beginAck = null;
-        pending.resolve(false);
-      }
-      if (requestId) sendValue({kind: "cancel", request_id: requestId});
+      if (beginAck) { beginAck.resolve(false); beginAck = null; }
+      if (requestId) sendValue({kind:"cancel", request_id:requestId});
       requestId = "";
       stopCapture();
-      localStorage.removeItem(waitingKey);
-      show("idle", message);
+      show(state, message);
     }
-    async function acquireMeter(id) {
-      if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
-        throw new Error("This browser cannot record microphone audio.");
-      }
-      const acquiredStream = await navigator.mediaDevices.getUserMedia({audio: {
-        channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true
-      }});
-      if (!current(id)) {
-        acquiredStream.getTracks().forEach(track => track.stop());
-        return false;
-      }
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      const acquiredContext = new AudioContext();
-      try {
-        await acquiredContext.resume();
-        if (!current(id)) {
-          acquiredStream.getTracks().forEach(track => track.stop());
-          await acquiredContext.close();
-          return false;
-        }
-        const acquiredAnalyser = acquiredContext.createAnalyser();
-        acquiredAnalyser.fftSize = 512;
-        acquiredContext.createMediaStreamSource(acquiredStream).connect(acquiredAnalyser);
-        stream = acquiredStream;
-        context = acquiredContext;
-        analyser = acquiredAnalyser;
-        samples = new Uint8Array(analyser.fftSize);
-        return true;
-      } catch (error) {
-        acquiredStream.getTracks().forEach(track => track.stop());
-        acquiredContext.close().catch(() => {});
-        throw error;
-      }
+    function waitForAck(id) {
+      return new Promise(resolve => {
+        const timeout = setTimeout(() => {
+          if (beginAck?.id === id) beginAck = null;
+          resolve(false);
+        }, 10000);
+        beginAck = {id, resolve: value => {clearTimeout(timeout); resolve(value);}};
+      });
     }
-    function volume() {
+    window.addEventListener("message", event => {
+      if (event.data?.type !== "streamlit:render") return;
+      settings = event.data.args || {};
+      sessionId = settings.session_id || "";
+      if (beginAck && settings.accepted_request_id === beginAck.id) {
+        const pending = beginAck; beginAck = null; pending.resolve(true);
+      }
+      if (settings.review_request_id && settings.review_request_id === requestId) {
+        requestId = "";
+        show("TRANSCRIPT_REVIEW", "Transcript ready below. Review or edit it.");
+      } else if (settings.voice_error_request_id === requestId) {
+        requestId = "";
+        show("TRANSCRIPTION_FAILED", settings.voice_error || "Transcription failed. Record again.");
+      }
+      send("streamlit:setFrameHeight", {height: 120});
+    });
+    send("streamlit:componentReady", {apiVersion: 1});
+    send("streamlit:setFrameHeight", {height: 120});
+
+    function meterTick(id) {
+      if (id !== generation || phase !== "RECORDING" || !analyser) return;
       analyser.getByteTimeDomainData(samples);
       let squared = 0;
-      for (const value of samples) {
-        const amplitude = (value - 128) / 128;
-        squared += amplitude * amplitude;
-      }
-      return Math.sqrt(squared / samples.length);
-    }
-    function draw(level) {
+      for (const value of samples) squared += ((value - 128) / 128) ** 2;
+      const level = Math.sqrt(squared / samples.length);
+      const now = Date.now();
       painter.clearRect(0, 0, canvas.width, canvas.height);
-      painter.fillStyle = "rgba(9,14,24,.54)";
-      painter.fillRect(0, 0, canvas.width, canvas.height);
       painter.fillStyle = "rgba(82,214,180,.7)";
       for (let i = 0; i < 28; i++) {
-        const height = Math.max(3, Math.min(70, 4 + level * 440 * (0.55 + Math.sin(i * 2.1) * 0.3)));
+        const height = Math.max(3, Math.min(70, 4 + level * 450));
         painter.fillRect(i * 9.3, (76 - height) / 2, 6, height);
       }
-    }
-    function tick(id) {
-      if (!current(id) || !analyser) return;
-      const now = Date.now();
-      const level = volume();
-      draw(level);
-      if (phase === "listening") {
-        const threshold = Math.max(0.018, noiseFloor * 2.5 + 0.006);
-        if (level > threshold) {
-          if (!candidateAt) candidateAt = now;
-          if (now - candidateAt >= (settings.speech_confirm_ms || 150)) {
-            heardSpeech = true;
-            lastSpeechAt = now;
-            statusText.textContent = "Speech detected. Listening...";
-          }
-        } else {
-          candidateAt = 0;
-          if (!heardSpeech) noiseFloor = noiseFloor * 0.96 + level * 0.04;
-        }
-        if (!heardSpeech && now - startedAt > (settings.no_speech_timeout_seconds || 10) * 1000) {
-          cancelCurrent("No speech detected. Please try again.");
-          return;
-        }
-        if (heardSpeech && now - lastSpeechAt > (settings.silence_ms || 1100)) {
-          finishRecording(id);
-          return;
-        }
-        if (now - startedAt > (settings.max_recording_seconds || 30) * 1000) {
-          finishRecording(id);
-          return;
-        }
-      } else if (phase === "waiting") {
-        const speaking = Date.now() - Number(localStorage.getItem(speakingKey) || 0) < 1800;
-        const threshold = Math.max(speaking ? 0.09 : 0.045, noiseFloor * 3 + 0.02);
-        if (level > threshold) {
-          if (!waitingCandidateAt) waitingCandidateAt = now;
-          if (now - waitingCandidateAt > 300) {
-            stopCapture();
-            startListening();
-            return;
-          }
-        } else {
-          waitingCandidateAt = 0;
-          noiseFloor = noiseFloor * 0.98 + level * 0.02;
-        }
+      if (level > Math.max(0.018, noiseFloor * 2.5 + 0.006)) speechAt = now;
+      else if (!speechAt) noiseFloor = noiseFloor * 0.96 + level * 0.04;
+      statusText.textContent = `Recording ${Math.floor((now - startedAt) / 1000)}s. Tap to stop.`;
+      if (!speechAt && now - startedAt >= (settings.no_speech_timeout_seconds || 10) * 1000) {
+        cancel("No speech detected. Check the input device and try again.", "NO_AUDIO");
+      } else if (now - startedAt >= (settings.max_recording_seconds || 30) * 1000) {
+        finishRecording(id);
       }
-      raf = requestAnimationFrame(() => tick(id));
     }
-    async function startListening() {
-      if (!sessionId) { show("error", "Conversation is not ready. Please retry."); return; }
-      if (phase === "listening" || phase === "permission" || phase === "processing") cancelCurrent();
+    async function beginRecording() {
+      if (!sessionId) {show("TRANSCRIPTION_FAILED", "Conversation is not ready. Retry."); return;}
+      if (!window.isSecureContext) {
+        show("PERMISSION_DENIED", "Microphone access requires HTTPS or localhost. Open the secure app URL.");
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        show("NO_DEVICE", "This browser cannot record audio. Use a current browser.");
+        return;
+      }
       const id = ++generation;
       stopCapture();
       requestId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
-      interruptAudio();
-      localStorage.setItem(modeKey, "on");
-      localStorage.removeItem(waitingKey);
-      const acknowledged = waitForBeginAck(requestId);
-      sendValue({kind: "begin", request_id: requestId});
-      show("permission", "Preparing local microphone...");
-      preview.textContent = "";
+      ownInterruptAt = Date.now();
+      localStorage.setItem(interruptKey, String(ownInterruptAt));
+      const acknowledged = waitForAck(requestId);
+      sendValue({kind:"begin", request_id:requestId});
+      show("REQUESTING_PERMISSION", "Requesting microphone permission...");
       try {
         if (!await acknowledged) {
-          if (current(id)) cancelCurrent("Microphone setup timed out. Please retry.");
+          if (id === generation) cancel("Microphone setup timed out. Retry.", "TRANSCRIPTION_FAILED");
           return;
         }
-        if (!current(id) || !await acquireMeter(id)) return;
+        if (id !== generation) return;
+        const acquired = await navigator.mediaDevices.getUserMedia({audio:{
+          channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
+        }});
+        if (id !== generation) {acquired.getTracks().forEach(track => track.stop()); return;}
+        stream = acquired;
+        const track = stream.getAudioTracks()[0];
+        if (!track) throw new DOMException("No audio input track", "NotFoundError");
+        track.onended = () => {
+          if (id === generation && phase === "RECORDING")
+            cancel("Microphone disconnected. Reconnect it and retry.", "NO_DEVICE");
+        };
+        preview.textContent = track.label ? `Input: ${track.label}` : "Microphone input ready";
+        const audioContext = window.AudioContext || window.webkitAudioContext;
+        context = new audioContext();
+        await context.resume();
+        analyser = context.createAnalyser();
+        analyser.fftSize = 512;
+        context.createMediaStreamSource(stream).connect(analyser);
+        samples = new Uint8Array(analyser.fftSize);
         const choices = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4"];
-        mime = choices.find(candidate => MediaRecorder.isTypeSupported(candidate)) || "";
-        recorder = mime ? new MediaRecorder(stream, {mimeType: mime}) : new MediaRecorder(stream);
-        mime = recorder.mimeType || mime;
-        if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(mime.split(";", 1)[0])) {
-          throw new Error("This browser's recording format is not supported.");
+        const mime = choices.find(type => MediaRecorder.isTypeSupported(type));
+        recorder = mime ? new MediaRecorder(stream, {mimeType:mime}) : new MediaRecorder(stream);
+        if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(recorder.mimeType.split(";")[0])) {
+          throw new Error("This browser's recording format is unsupported.");
         }
         chunks = [];
-        recorder.ondataavailable = event => { if (current(id) && event.data?.size) chunks.push(event.data); };
-        recorder.onerror = () => { if (current(id)) cancelCurrent("Microphone recording failed. Please retry."); };
+        recorder.ondataavailable = event => {if (id === generation && event.data?.size) chunks.push(event.data);};
+        recorder.onerror = () => {if (id === generation) cancel("Recording failed. Retry.", "NO_AUDIO");};
         recorder.start(settings.recording_buffer_ms || 250);
-        startedAt = Date.now();
-        lastSpeechAt = 0;
-        candidateAt = 0;
-        heardSpeech = false;
-        noiseFloor = 0.005;
-        show("listening", "Listening... Tap to stop.");
-        tick(id);
+        startedAt = Date.now(); speechAt = 0; noiseFloor = 0.005;
+        show("RECORDING", "Recording 0s. Tap to stop.");
+        timer = setInterval(() => meterTick(id), 100);
       } catch (error) {
-        if (current(id)) cancelCurrent(error.name === "NotAllowedError"
-          ? "Microphone permission denied." : (error.message || "Microphone could not start."));
+        if (id !== generation) return;
+        const denied = error.name === "NotAllowedError" || error.name === "SecurityError";
+        const missing = error.name === "NotFoundError" || error.name === "OverconstrainedError";
+        cancel(denied ? "Permission denied. Allow this site in browser settings, then retry."
+          : missing ? "No microphone found. Connect one and check system permissions."
+          : error.message || "Microphone capture failed. Retry.",
+          denied ? "PERMISSION_DENIED" : missing ? "NO_DEVICE" : "NO_AUDIO");
       }
     }
     async function finishRecording(id) {
-      if (!current(id) || phase !== "listening") return;
-      show("processing", "Processing audio locally...");
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
-      const activeRecorder = recorder;
-      if (!activeRecorder || activeRecorder.state === "inactive") {
-        cancelCurrent("The recording stopped unexpectedly. Please retry.");
-        return;
+      if (id !== generation || phase !== "RECORDING") return;
+      show("PROCESSING_AUDIO", "Preparing recording...");
+      if (timer) clearInterval(timer);
+      timer = 0;
+      const active = recorder;
+      if (!active || active.state === "inactive") {
+        cancel("Recording stopped unexpectedly. Retry.", "NO_AUDIO"); return;
       }
-      const stopped = new Promise(resolve => { activeRecorder.onstop = resolve; });
-      activeRecorder.stop();
+      const stopped = new Promise(resolve => {active.onstop = resolve;});
+      active.stop();
       await stopped;
-      if (!current(id)) return;
-      const blob = new Blob(chunks, {type: mime});
+      if (id !== generation) return;
+      const duration = (Date.now() - startedAt) / 1000;
+      const blob = new Blob(chunks, {type:active.mimeType});
       stopCapture();
-      if (!blob.size) { cancelCurrent("The recording was empty. Please retry."); return; }
+      if (!blob.size || duration < 0.35 || !speechAt) {
+        cancel("No usable speech was recorded. Speak closer and retry.", "NO_AUDIO"); return;
+      }
       try {
         const dataUrl = await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error("Microphone recording could not be read."));
+          reader.onerror = () => reject(new Error("Recording could not be read."));
           reader.readAsDataURL(blob);
         });
-        if (!current(id)) return;
-        show("waiting", "Transcribing and answering locally...");
-        localStorage.setItem(waitingKey, String(Date.now()));
-        sendValue({
-          kind: "audio", request_id: requestId,
-          audio_mime: mime, audio_b64: String(dataUrl).split(",", 2)[1] || ""
-        });
-        startWaitingMonitor();
+        if (id !== generation) return;
+        show("TRANSCRIBING", "Transcribing locally. You can cancel and retry.");
+        sendValue({kind:"audio", request_id:requestId, audio_mime:active.mimeType,
+          audio_b64:String(dataUrl).split(",")[1] || "", duration_seconds:duration});
       } catch (error) {
-        if (current(id)) cancelCurrent(error.message || "Recording could not be sent.");
-      }
-    }
-    async function startWaitingMonitor() {
-      if (phase !== "waiting" || stream || waitingMeterPending) return;
-      const id = generation;
-      waitingMeterPending = true;
-      try {
-        if (!await acquireMeter(id)) return;
-        if (phase !== "waiting") { stopCapture(); return; }
-        waitingCandidateAt = 0;
-        tick(id);
-      } catch (_) {
-        if (current(id)) statusText.textContent = "Tap Interrupt to ask another question.";
-      } finally {
-        waitingMeterPending = false;
+        if (id === generation) cancel(error.message, "NO_AUDIO");
       }
     }
     button.addEventListener("click", () => {
-      if (phase === "listening") finishRecording(generation);
-      else if (phase === "permission" || phase === "processing") cancelCurrent();
-      else startListening();
+      if (phase === "RECORDING") finishRecording(generation);
+      else if (["REQUESTING_PERMISSION", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) cancel();
+      else beginRecording();
     });
     window.addEventListener("keydown", event => {
-      if (event.key === "Escape" && ["permission", "listening", "processing", "waiting"].includes(phase)) {
-        cancelCurrent("Voice interaction cancelled.");
-      }
+      if (event.key === "Escape" && ["REQUESTING_PERMISSION", "RECORDING", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) cancel();
     });
     window.addEventListener("storage", event => {
-      if (event.key === interruptKey && Number(event.newValue || 0) > ownInterruptAt && phase !== "idle") {
-        cancelCurrent("Interrupted by a newer query.");
+      if (event.key === interruptKey && Number(event.newValue || 0) > ownInterruptAt &&
+          ["REQUESTING_PERMISSION", "RECORDING", "PROCESSING_AUDIO", "TRANSCRIBING"].includes(phase)) {
+        cancel("Interrupted by a newer query.");
       }
     });
-    setInterval(() => {
-      const resumeAt = localStorage.getItem(resumeKey) || "";
-      if (resumeAt && resumeAt !== lastResumeAt) {
-        lastResumeAt = resumeAt;
-        if (phase === "waiting") {
-          stopCapture();
-          startListening();
-        }
-      }
-    }, 250);
-    window.addEventListener("beforeunload", () => {
-      stopCapture();
-    });
-    const waitingAt = Number(localStorage.getItem(waitingKey) || 0);
-    if (localStorage.getItem(modeKey) === "on" && waitingAt && Date.now() - waitingAt < 300000) {
-      show("waiting", "Speak or tap to interrupt.");
-      if (sessionId) startWaitingMonitor();
-    } else {
-      show("idle", "Tap once and speak naturally.");
-    }
+    window.addEventListener("beforeunload", stopCapture);
+    show("IDLE", "Tap to record with this browser's microphone.");
   </script>
 </body>
 </html>

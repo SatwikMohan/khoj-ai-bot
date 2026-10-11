@@ -2,6 +2,7 @@ import config
 import json
 import re
 import time
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -19,7 +20,7 @@ from services.embedding_service import (
     ollama_model_names,
 )
 from services.lexical_service import lexical_search
-from services.language_service import response_language, language_instruction
+from services.language_service import answer_language_matches, resolve_language_context, response_language, language_instruction
 from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
 from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
@@ -311,14 +312,14 @@ def _general_response(question: str) -> QAResponse:
         if language_style == "hindi":
             answer = "ज़रूर। जब चाहें, अगला सवाल पूछिए।"
         elif language_style == "hinglish":
-            answer = "बिलकुल—जब चाहें, अगला सवाल पूछ लीजिए।"
+            answer = "Bilkul, jab chahein agla sawaal poochhiye."
         else:
             answer = "Anytime. What would you like to look at next?"
     elif normalized in {"bye", "goodbye"}:
         if language_style == "hindi":
             answer = "ठीक है, फिर मिलते हैं। अपना ख्याल रखिए।"
         elif language_style == "hinglish":
-            answer = "ठीक है, फिर मिलते हैं। अपना खयाल रखिए।"
+            answer = "Theek hai, phir milte hain. Apna khayal rakhiye."
         else:
             answer = "See you soon. Take care."
     elif language_style == "hindi":
@@ -334,15 +335,15 @@ def _general_response(question: str) -> QAResponse:
             answer = "नमस्ते—आपसे बात करके अच्छा लगा। बताइए, आज क्या जानना है?"
     elif language_style == "hinglish":
         if is_wellbeing:
-            answer = "मैं बढ़िया हूँ—आपसे बात करके अच्छा लगा। बताइए, आज क्या समझना चाहेंगे?"
+            answer = "Main theek hoon, shukriya! Aap kaise hain? Aaj kis baare mein baat karein?"
         elif is_identity:
-            answer = f"मैं {assistant_name} हूँ। Complex documents समझने, compare करने और सीधा जवाब निकालने में आपकी help करता हूँ।"
+            answer = f"Main {assistant_name} hoon. Main documents samajhne, details compare karne aur seedha jawab dene mein help karta hoon."
         elif is_capability:
-            answer = "मैं आपके documents search कर सकता हूँ, rules और figures compare कर सकता हूँ, और simple language में समझा सकता हूँ।"
+            answer = "Main aapke documents search kar sakta hoon, rules aur figures compare kar sakta hoon, aur simple language mein samjha sakta hoon."
         elif is_help:
-            answer = "बिलकुल। बताइए कहाँ अटके हैं—वहीं से शुरू करते हैं।"
+            answer = "Bilkul. Bataiye kahan atke hain; wahi se shuru karte hain."
         else:
-            answer = "नमस्ते—अच्छा लगा आपसे बात करके। किस topic पर बात करें?"
+            answer = "Namaste! Aaj kis topic ke baare mein jaana chahenge?"
     elif is_wellbeing:
         answer = "I’m doing well—glad you’re here. What are we looking into today?"
     elif is_identity:
@@ -926,8 +927,9 @@ def _not_enough_context_response(question: str) -> QAResponse:
         )
     elif language_style == "hinglish":
         answer = (
-            "इस सवाल का जवाब देने वाला passage अभी documents में नहीं मिला। "
-            "किस document या section की बात कर रहे हैं? उससे search को सही दिशा मिलेगी।"
+            "Is sawaal ka bharosemand jawab mujhe abhi documents mein nahi mila. "
+            "Aap kis document ya section ki baat kar rahe hain? "
+            "Thoda detail denge to main sahi jagah search kar sakta hoon."
         )
     else:
         answer = (
@@ -1064,7 +1066,15 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
         return request is None or registry.is_current(request)
 
     started_at = time.perf_counter()
-    language = response_language(question)
+    language_context = resolve_language_context(
+        question, transcript=question if request and request.input_type == "audio" else None
+    )
+    language = language_context.target_language
+    print(json.dumps({"event": "language_resolved",
+                      "request_id": request.request_id if request else None,
+                      "input_type": request.input_type if request else "text",
+                      "detected": language_context.detected_language,
+                      "target": language, "script": language_context.script}), flush=True)
     if _is_general_query(question):
         response = _general_response(question)
         yield {
@@ -1086,6 +1096,16 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     )
     if not active():
         return
+    retrieved_languages = sorted({
+        str(doc.metadata.get("language", "")).lower()
+        for doc in docs if doc.metadata.get("language")
+    })
+    language_context = replace(language_context, retrieved_languages=tuple(retrieved_languages))
+    print(json.dumps({"event": "retrieval_language_context",
+                      "request_id": request.request_id if request else None,
+                      "target": language, "retrieved_languages": language_context.retrieved_languages,
+                      "elapsed_ms": round((time.perf_counter() - retrieval_started_at) * 1000, 1)}),
+          flush=True)
     if not docs:
         response = _not_enough_context_response(question)
         yield {
@@ -1127,6 +1147,9 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     metadata = {}
     generation_started_at = time.perf_counter()
     first_token_ms = None
+    pending_tokens = []
+    language_gate_open = False
+    early_language_mismatch = False
     chunks = chain.stream(inputs)
     try:
         for chunk in chunks:
@@ -1143,18 +1166,34 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                 )
             token = citation_filter.feed(filter_text.feed(content or ""))
             if token:
-                if request:
-                    request.status = "streaming"
-                if first_token_ms is None:
-                    first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
                 answer_parts.append(token)
-                yield {"type": "token", "text": token}
-        remaining = citation_filter.feed(filter_text.feed("", final=True), final=True)
-        if not active():
-            return
-        if remaining:
-            answer_parts.append(remaining)
-            yield {"type": "token", "text": remaining}
+                if language_gate_open:
+                    yield {"type": "token", "text": token}
+                else:
+                    pending_tokens.append(token)
+                    draft = "".join(answer_parts)
+                    boundary = draft.rstrip().endswith((".", "!", "?", "?"))
+                    if len(draft) >= 40 and (boundary or len(draft) >= 140):
+                        if not answer_language_matches(draft, language):
+                            early_language_mismatch = True
+                            break
+                        language_gate_open = True
+                        if request:
+                            registry.set_status(request, "streaming")
+                        first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                        for ready in pending_tokens:
+                            yield {"type": "token", "text": ready}
+                        pending_tokens.clear()
+        if not early_language_mismatch:
+            remaining = citation_filter.feed(filter_text.feed("", final=True), final=True)
+            if not active():
+                return
+            if remaining:
+                answer_parts.append(remaining)
+                if language_gate_open:
+                    yield {"type": "token", "text": remaining}
+                else:
+                    pending_tokens.append(remaining)
     finally:
         chunks.close()
 
@@ -1168,6 +1207,57 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             "For reasoning-only output, disable thinking if the model supports it, or increase "
             "OLLAMA_NUM_PREDICT. For load failures, inspect Ollama logs and available memory."
         )
+    if early_language_mismatch or not answer_language_matches(answer, language):
+        # The first complete sentence is held until its language passes this
+        # guard. A later switch can still replace already streamed text.
+        print(json.dumps({"event": "qa_language_retry", "request_id": request.request_id if request else None,
+                          "target_language": language}), flush=True)
+        yield {"type": "status", "message": "Correcting answer language"}
+        retry_inputs = dict(inputs)
+        retry_inputs["language_instruction"] += (
+            " The previous draft was in the wrong language. Rewrite the complete "
+            "answer in the required language. Preserve factual content and identifiers."
+        )
+        retry_filter = AnswerTextFilter()
+        retry_citations = CitationTextFilter(enabled=not include_locations)
+        retry_parts = []
+        retry_stream = chain.stream(retry_inputs)
+        try:
+            for chunk in retry_stream:
+                if not active():
+                    return
+                content = chunk.content
+                if isinstance(content, list):
+                    content = "".join(part.get("text", "") for part in content
+                                      if isinstance(part, dict) and part.get("type") == "text")
+                piece = retry_citations.feed(retry_filter.feed(content or ""))
+                if piece:
+                    retry_parts.append(piece)
+            tail = retry_citations.feed(retry_filter.feed("", final=True), final=True)
+            if tail:
+                retry_parts.append(tail)
+        finally:
+            retry_stream.close()
+        corrected = "".join(retry_parts).strip()
+        if not active():
+            return
+        if not corrected or not answer_language_matches(corrected, language):
+            raise QAEngineError(
+                f"Model {config.OLLAMA_CHAT_MODEL} could not answer in the required language ({language}). "
+                "Try a multilingual chat model or choose another response language."
+            )
+        answer = corrected
+        if language_gate_open:
+            yield {"type": "replace", "text": answer, "language": language}
+        else:
+            first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+            yield {"type": "token", "text": answer}
+    elif not language_gate_open:
+        if request:
+            registry.set_status(request, "streaming")
+        first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+        for ready in pending_tokens:
+            yield {"type": "token", "text": ready}
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
         "first_token": first_token_ms or 0.0,
@@ -1179,7 +1269,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "answer": answer, "response_metadata": metadata},
                          ensure_ascii=True, default=str), flush=True)
     print(json.dumps({
-        "event": "qa_stream_completed", "model": config.OLLAMA_CHAT_MODEL,
+        "event": "qa_stream_completed", "request_id": request.request_id if request else None,
+        "model": config.OLLAMA_CHAT_MODEL, "language": language,
         "done_reason": metadata.get("done_reason"), **timings,
     }), flush=True)
     yield {

@@ -13,8 +13,9 @@ Paths and the Ollama URL are selected for local versus Docker use in `config.py`
 The application identifies Ollama models by **name** through `OLLAMA_BASE_URL`;
 it never needs a filesystem path to their weights. In Compose, the `ollama`
 service owns its persistent `ollama_models` volume at `/root/.ollama`.
-`ollama-model-init` pulls configured names into that volume once. Rebuilding the
-app image does not erase the models. For a first offline boot, populate that
+`ollama-model-init` verifies configured names in that volume at startup.
+Model downloads require an explicit provisioning command. Rebuilding the app
+image does not erase the models. For a first offline boot, populate that
 volume on a connected machine before transferring it to the DGX; building the
 app image alone does not include model weights.
 Docker infrastructure (GPU reservations, published ports, DNS, and Ollama server
@@ -41,8 +42,10 @@ configured separately. Set `RERANK_ENABLED = False` for a lightweight local setu
 | `WHISPER_DEVICE` | `cpu` | `auto` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | `float16` |
 
-The DGX entries are now active in `backend/config.py`; their performance and
-retrieval quality still need validation on Spark. A chat-model change does not require indexing. An
+The checked-in working tree may use the Windows local model trio. Before DGX
+provisioning, set `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBED_MODEL`, and
+`OLLAMA_EMBED_DIMENSIONS` together in `backend/config.py` for the DGX profile.
+Performance and retrieval quality still need validation on Spark. A chat-model change does not require indexing. An
 embedding-model or embedding-prefix change does: run `python train_engine.py`
 to build a candidate, evaluate it, then run
 `python train_engine.py --promote-candidate`. The active collection stays in use
@@ -67,7 +70,8 @@ speaks every chunk, so language changes cannot switch speaker identity.
 Veena generates 24 kHz WAV through the local
 [SNAC 24 kHz codec](https://huggingface.co/hubertsiuzdak/snac_24khz).
 Both model revisions are pinned in `backend/config.py`; the weights are cached
-in the persistent `/models` volume during `backend-model-init`. Runtime speech
+in the persistent `/models` volume by an explicit provisioning command.
+`backend-model-init` only verifies cached assets. Runtime speech
 uses local files and requires the DGX CUDA GPU. The Veena checkpoint is about
 7.6 GB; allow space for its cache and the rest of the assistant's models.
 
@@ -76,7 +80,8 @@ checkpoint uses **US English phonemization**, despite the `en_IN` name. The
 Windows voice therefore cannot be used to judge the DGX Indian accent. Piper
 also uses separate Hindi and English speakers; the previous single-speaker
 routing keeps one speaker per answer chunk, but its accent and expression
-remain limited.
+remain limited. Piper refuses Roman-script Hinglish because its English
+phonemizer cannot reliably pronounce Hindi words.
 
 The active selection is in `backend/config.py`:
 
@@ -123,13 +128,19 @@ The DGX image uses `nvcr.io/nvidia/pytorch:26.08-py3`. If registry authenticatio
 required, run `docker login nvcr.io` using the literal username `$oauthtoken` and
 your NGC API key as the password. Place source documents in `backend/raw_data_files`.
 
-After transferring the updated files, build images on the ARM64 DGX and
-provision the selected models. `backend/config.py` now names the DGX trial
-models. Prepare their index before starting the app:
+After transferring the updated files and setting the DGX model trio in
+`backend/config.py`, check free disk and memory before downloading the selected
+models. Build images on the ARM64 DGX, then explicitly provision weights and
+prepare the index:
 
 ```bash
+df -h .
+free -h
+nvidia-smi
 docker compose build app backend-model-init index-init
 docker compose up -d ollama
+docker compose run --rm --no-deps ollama-model-init python scripts/provision_ollama.py
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py
 docker compose run --rm --no-deps ollama-model-init
 docker compose run --rm --no-deps backend-model-init
 docker compose run --rm --no-deps index-init python train_engine.py
@@ -167,7 +178,7 @@ For a chat-model-only change, edit `backend/config.py`, then ensure the new mode
 is downloaded before restarting the app:
 
 ```bash
-docker compose run --rm --no-deps ollama-model-init
+docker compose run --rm --no-deps ollama-model-init python scripts/provision_ollama.py
 docker compose restart app
 ```
 
@@ -176,7 +187,7 @@ maintenance window. Edit the embedding name and dimension in `backend/config.py`
 then stage and inspect the candidate before restarting the app:
 
 ```bash
-docker compose run --rm --no-deps ollama-model-init
+docker compose run --rm --no-deps ollama-model-init python scripts/provision_ollama.py
 docker compose run --rm --no-deps index-init python train_engine.py --force-rebuild
 docker compose run --rm --no-deps index-init python evaluate_retrieval.py evals/golden_local.jsonl --top-k 5 --candidate
 docker compose run --rm --no-deps index-init python train_engine.py --promote-candidate
@@ -291,3 +302,104 @@ docker compose run --rm --no-deps backend-model-init python scripts/provision_mo
 Whisper and reranker assets must also be cached for fully offline startup. Use
 Compose service name `ollama` for logs. See the
 [Docker DNS documentation](https://docs.docker.com/engine/network/#dns-services).
+
+
+## Production microphone and language validation
+
+The Streamlit component records the **browser host's** microphone with
+`getUserMedia` and `MediaRecorder`. The app container receives encoded audio
+through the component protocol and decodes it with PyAV. No `/dev/snd` mount is
+needed for a browser running on a laptop. A USB microphone plugged into the DGX
+will not appear in that laptop browser. To use that device, run a browser on the
+DGX desktop, forward its input through a remote desktop session that supports
+microphone redirection, or attach the microphone to the client computer.
+The app does not implement server-side ALSA capture.
+
+On the DGX host, check a locally attached USB microphone:
+
+```bash
+lsusb
+arecord -l
+wpctl status
+pactl list short sources
+ls -l /dev/snd
+arecord -D default -f S16_LE -r 16000 -c 1 -d 5 /tmp/texmin-mic.wav
+```
+
+`pactl` or `wpctl` may be absent if PulseAudio or PipeWire is not installed.
+The last command is a host capture check only; it is not required when the
+browser is on another machine. For a real offline STT inference check, transfer
+a recorded WAV/WebM fixture into the app container and run:
+
+```bash
+docker compose exec app python backend/scripts/diagnose_voice.py
+docker compose exec app python backend/scripts/transcribe_sample.py /tmp/texmin-mic.wav
+docker compose exec app python backend/evals/veena_smoke.py
+```
+
+The fixture path must exist inside the container. For a host WAV, use
+`docker cp /tmp/texmin-mic.wav texmin-app:/tmp/texmin-mic.wav` first.
+The diagnostic checks cached model files, packages, CUDA visibility, storage,
+and relevant audio nodes without recording or downloading anything. Validate
+actual CUDA inference with the two sample commands; `torch.cuda.is_available()`
+alone is insufficient.
+
+In the browser, open the configured HTTPS hostname and trust the Caddy local CA,
+or use an SSH tunnel to localhost. Then verify:
+
+1. Browser site settings show microphone permission granted and the expected input device selected.
+2. The microphone button shows a running duration, waveform, and input device name. Stop it explicitly.
+3. The transcript appears for editing. Submit English, Hindi, then Hinglish questions and inspect the answer language.
+4. Start a long answer, then ask a second question. Confirm old text and audio stop.
+5. Deny permission and unplug the microphone in separate trials; text chat must remain usable.
+6. Turn speech off, then on. Stop speech during playback and retry after a TTS failure.
+7. Inspect `docker compose logs --tail=200 app` for request IDs, STT stage, answer language, voice selection, and error category. Raw audio is not logged.
+
+The configured offline speech support is:
+
+| Input | DGX Veena | Windows Piper |
+| --- | --- | --- |
+| English | Model card supports; DGX listening pending | Valid WAV generated locally |
+| Hindi in Devanagari | Model card supports; DGX listening pending | Valid WAV generated locally |
+| Roman-script Hindi / Hinglish | Model card describes code mixing; DGX listening pending | Explicit unsupported error |
+| Other languages | Unsupported by selected Veena checkpoint | Requires separately configured and validated voice |
+
+Veena is a 3B parameter Hindi/English model with code-mixed claims and an Apache
+2.0 model license. XTTS-v2 was considered, but its public model license permits
+noncommercial use only; it was not added. Model cards are evidence of stated
+support, not a listening result. The Windows sample files and timings are in
+`backend/evals/voice_samples/production_check/results.json` after running
+`python backend/evals/evaluate_language_aware_tts.py --output-dir
+backend/evals/voice_samples/production_check`. The benchmark does not rate pronunciation or prosody. The first answer
+sentence is held until a conservative language check passes; speech can then
+start before the answer ends. A later language switch stops queued speech and
+replaces the text after one bounded correction attempt.
+
+## Reproducible release checks
+
+On Windows with the project virtual environment installed:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m unittest discover -s tests -p test_*.py
+cd ..\frontend
+..\.venv\Scripts\python.exe -m unittest discover -s tests -p test_*.py
+cd ..
+.\.venv\Scripts\python.exe backend/scripts/diagnose_voice.py
+.\.venv\Scripts\python.exe backend/evals/evaluate_language_aware_tts.py --output-dir backend/evals/voice_samples/production_check
+```
+
+Open `frontend/tests/audio_queue_smoke.html` in a current Chromium browser. It
+must display `PASS` after checking ordering, stale messages, queue limits, and
+playback failure recovery. The voice capture component uses Streamlit's declared
+component protocol. Playback and visualization helpers use `st.iframe` from the
+pinned Streamlit 1.62 dependency. Browser buffers are capped by
+`TTS_MAX_QUEUED_SEGMENTS` in `backend/config.py`; if playback falls behind that
+limit, speech stops with a visible error while the text answer remains available.
+
+The Windows run on 2026-10-11 passed 125 backend and 7 frontend tests; headless
+Edge passed the audio queue smoke test. The local Whisper cache and CUDA device
+were missing, so the real STT inference check could not run there. Ollama also
+failed KV allocation during a real QA smoke test on that host, even after a
+smaller context was tried. Provision and run the real fixture and browser checks
+on the DGX before calling the deployment validated.

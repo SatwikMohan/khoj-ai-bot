@@ -43,6 +43,7 @@ function createTexminAudioManager(settings) {
       if (!current()) return;
       console.warn("Audio playback failed", error);
       emit("play-failed", {sequence:item.sequence});
+      stop("playback_failed");
     });
   }
   if (settings.requestId) sessionStorage.setItem(key, owner);
@@ -55,6 +56,10 @@ function createTexminAudioManager(settings) {
         item.queueId !== settings.queueId || item.requestId !== settings.requestId) return;
     if ((item.audio || item.skip) && Number.isInteger(item.sequence) &&
         item.sequence >= nextSequence && !ready.has(item.sequence)) {
+      if (ready.size + clips.length >= settings.maxQueuedSegments) {
+        stop("queue_limit");
+        return;
+      }
       ready.set(item.sequence, item);
       while (ready.has(nextSequence)) {
         const ordered = ready.get(nextSequence);

@@ -26,6 +26,12 @@ from services.request_lifecycle import registry
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_FORMATS = {"mp3", "wav"}
+# Documentation-backed support only. Extra Piper languages require an explicit
+# voice mapping and separate listening validation.
+TTS_LANGUAGE_SUPPORT = {
+    "veena": frozenset({"en", "hi", "hinglish"}),
+    "piper": frozenset({"en", "hi"}),
+}
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 SENTENCE_RE = re.compile(r"[^.!?।]+[.!?।]*")
 TONE_PRESETS = {
@@ -197,6 +203,17 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
         )
 
     engine_name = config.TTS_ENGINE.strip().lower()
+    language = (payload.language or detect_language(payload.text)).lower()
+    language = {"english": "en", "hindi": "hi"}.get(language, language)
+    supported = TTS_LANGUAGE_SUPPORT.get("piper" if engine_name == "auto" else engine_name)
+    if supported is not None and language not in supported:
+        if engine_name in {"piper", "auto"} and language in config.PIPER_ADDITIONAL_VOICES:
+            pass
+        else:
+            raise TTSEngineError(
+                f"{engine_name} has no validated voice for '{language}'. "
+                "The text answer remains available; configure a supported offline model."
+            )
     fallback_names = [
         name.strip().lower()
         for name in config.TTS_FALLBACK_ENGINES.split(",")
@@ -298,6 +315,10 @@ def tts_runtime_status() -> dict:
         "engine": config.TTS_ENGINE,
         "fallback_engines": config.TTS_FALLBACK_ENGINES,
         "failures": failures,
+        "validated_languages": sorted(TTS_LANGUAGE_SUPPORT.get(
+            "piper" if config.TTS_ENGINE.strip().lower() == "auto" else config.TTS_ENGINE.strip().lower(),
+            (),
+        )),
     }
     engine = status["engine"].strip().lower()
     if engine == "auto":
@@ -709,6 +730,12 @@ def _close_piper_workers():
 
 
 def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    language = (payload.language or detect_language(payload.text)).lower()
+    if language == "hinglish":
+        raise TTSEngineError(
+            "Piper English uses English phonemization and cannot reliably speak Roman-script Hindi. "
+            "Use Veena on a CUDA host for code-mixed speech."
+        )
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     if not spoken_text:
         raise TTSEngineError("There is no speakable text.")
