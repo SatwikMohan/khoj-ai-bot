@@ -98,3 +98,11 @@ the installed English/Hindi voices; normal chat reuses persistent CPU workers.
 Veena remains available by explicit configuration. This faster profile uses
 separate English and Hindi speakers and does not support Roman-script Hinglish.
 See DEPLOYMENT.md for provisioning and the TTS-only benchmark commands.
+
+Automatic Hinglish input with Piper and TTS_ENABLED=True now generates Hindi
+answers in Devanagari, using the existing Hindi voice. This avoids Roman-script
+Hindi phonemization and adds no translation model call. English replies are
+unchanged. Explicit language overrides remain honored; explicitly forcing
+Roman Hinglish still requires a capable engine such as Veena. Turning off the
+per-session Speak answers toggle does not change this global language policy;
+TTS_ENABLED=False restores automatic Roman Hinglish for text-only deployments.

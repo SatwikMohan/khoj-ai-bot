@@ -435,3 +435,11 @@ were missing, so the real STT inference check could not run there. Ollama also
 failed KV allocation during a real QA smoke test on that host, even after a
 smaller context was tried. Provision and run the real fixture and browser checks
 on the DGX before calling the deployment validated.
+
+Automatic Hinglish input with Piper and TTS_ENABLED=True now generates Hindi
+answers in Devanagari, using the existing Hindi voice. This avoids Roman-script
+Hindi phonemization and adds no translation model call. English replies are
+unchanged. Explicit language overrides remain honored; explicitly forcing
+Roman Hinglish still requires a capable engine such as Veena. Turning off the
+per-session Speak answers toggle does not change this global language policy;
+TTS_ENABLED=False restores automatic Roman Hinglish for text-only deployments.

@@ -135,6 +135,11 @@ def resolve_language_context(
     selected = (selected_language or "").strip().lower() or None
     target = selected or (detected if configured == "auto" else configured)
     target = {"english": "en", "hindi": "hi"}.get(target, target)
+    # Choose a pronounceable answer before generation, not a second LLM
+    # translation after generation. Keep detection and explicit choices intact.
+    if (target == "hinglish" and selected is None and configured == "auto"
+            and config.TTS_ENABLED and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}):
+        target = "hi"
     script = "Devanagari" if re.search(r"[\u0900-\u097f]", current) else "Latin"
     return LanguageContext(
         question, transcript, detected, target, script, selected,
