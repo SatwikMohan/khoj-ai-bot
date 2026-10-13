@@ -472,3 +472,7 @@ Copy the updated code and rebuild/recreate app; no voice download is needed if t
 Hindi Piper model was already provisioned. The configured Llama 3.1 model must be
 installed locally in Ollama. Local tests use mocked conversion responses; target
 conversion accuracy and latency remain unverified.
+
+### Shared speaker and language switching
+
+`PIPER_SHARED_VOICE = PIPER_HINDI_VOICE` uses the same offline Piper speaker for English, Hindi, and Hinglish converted to Hindi speech. English answers stay in English; the Hindi checkpoint's English pronunciation must be checked by listening on the deployment. Set `PIPER_SHARED_VOICE = ""` to restore separate language voices. In automatic language mode, the current question determines the response language even after a different-language conversation turn. The English output guard rejects Roman Hindi carryover and uses the existing language correction retry.

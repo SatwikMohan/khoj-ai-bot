@@ -106,7 +106,12 @@ def language_instruction(code: str) -> str:
             "Keep English technical terms, product names, code, acronyms and identifiers unchanged."
         )
     if code == "en":
-        return "Reply in grammatical English with standard spelling. Keep technical identifiers unchanged."
+        return (
+            "Reply entirely in grammatical English with standard spelling. "
+            "Do not use Roman Hindi or Hinglish words. The current message selects "
+            "the response language; previous conversation language must not carry over. "
+            "Keep technical identifiers unchanged."
+        )
     return f"Reply in the user's language ({code}). Keep technical identifiers unchanged."
 
 
@@ -169,6 +174,10 @@ def answer_language_matches(text: str, expected: str) -> bool:
         if devanagari / len(letters) >= 0.18:
             return False
         words = re.findall(r"[a-zA-Z\u00c0-\u00ff]+", body.lower())
+        # A Latin script classifier can label code-mixed Hindi as English.
+        # Require multiple distinct clues to avoid rejecting isolated names.
+        if len(set(words) & ROMAN_HINDI_STRONG) >= 2:
+            return False
         if len(words) >= 8:
             classifier = _classifier()
             if classifier:

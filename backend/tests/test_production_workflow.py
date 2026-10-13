@@ -64,6 +64,33 @@ class LanguageContractTests(unittest.TestCase):
         self.assertIn("grammatical English", prompts[0])
 
 
+    def test_english_followup_after_hinglish_rejects_carryover(self):
+        prompts = []
+        def generate(inputs):
+            prompts.append(str(list(inputs)))
+            yield AIMessageChunk(content=(
+                "Yeh ventilation system hai, isko daily check karna chahiye."
+                if len(prompts) == 1 else
+                "A mine is a place where minerals are extracted from the ground."
+            ))
+        with patch.multiple(config, TTS_ENGINE="piper", RESPONSE_LANGUAGE="auto"), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context",
+            return_value=[Document(page_content="A mine is a place where minerals are extracted from the ground.", metadata={"source": "manual"})]
+        ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
+            events = list(stream_answer_events("what do you mean by mine", chat_history=[
+                {"role": "user", "content": "Mujhe ventilation samjhao"},
+                {"role": "assistant", "content": "Yeh ventilation system hai."},
+            ]))
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["language"], "en")
+        self.assertEqual(events[-1]["answer"], "A mine is a place where minerals are extracted from the ground.")
+        self.assertEqual(len(prompts), 2)
+        tokens = "".join(event["text"] for event in events if event["type"] == "token")
+        self.assertNotIn("Yeh", tokens)
+        self.assertIn("previous conversation language must not carry over", prompts[0])
+
     def test_text_only_hinglish_keeps_original_script(self):
         with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=False, RESPONSE_LANGUAGE="auto"):
             self.assertEqual(resolve_language_context("Mujhe safety rules samjhao").target_language, "hinglish")

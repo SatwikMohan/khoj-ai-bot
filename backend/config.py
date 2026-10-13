@@ -163,6 +163,9 @@ VEENA_CODEC_REVISION = "d73ad176a12188fcf4f360ba3bf2c2fbbe8f58ec"
 VEENA_CODEC_DIR = str(MODEL_ROOT / "snac_24khz")
 VEENA_SPEAKER = "kavya"
 PIPER_HINDI_VOICE = "hi_IN-pratham-medium"
+# Use one speaker for English, Hindi and converted Hinglish. Empty restores
+# separate language voices. English pronunciation needs a deployment listening check.
+PIPER_SHARED_VOICE = PIPER_HINDI_VOICE
 PIPER_INDIAN_ENGLISH_VOICE = "en_IN-spicor-english"
 PIPER_ENGLISH_VOICE = PIPER_INDIAN_ENGLISH_VOICE  # Windows fallback; its config uses en-us phonemization.
 # Third-party voice is absent from Piper's registry. Provision with pinned file hashes.

@@ -347,8 +347,14 @@ def tts_runtime_status() -> dict:
             status.update(status="unavailable", error="Missing Piper voice files: " + ", ".join(missing))
         status["voices"] = [str(path) for path in paths]
         status["device"] = config.PIPER_DEVICE
-        status["cross_language_speaker_consistency"] = False
-        status["english_voice_accent"] = "US phonemization" if config.PIPER_ENGLISH_VOICE == "en_IN-spicor-english" else "depends on configured model"
+        status["cross_language_speaker_consistency"] = bool(config.PIPER_SHARED_VOICE.strip())
+        status["shared_speaker_languages"] = ["en", "hi"] if config.PIPER_SHARED_VOICE.strip() else []
+        status["english_voice_accent"] = (
+            "Shared Hindi speaker; English pronunciation needs listening validation"
+            if config.PIPER_SHARED_VOICE else
+            "US phonemization" if config.PIPER_ENGLISH_VOICE == "en_IN-spicor-english"
+            else "depends on configured model"
+        )
     elif engine == "veena":
         model = Path(config.VEENA_MODEL_DIR)
         codec = Path(config.VEENA_CODEC_DIR)
@@ -593,6 +599,8 @@ def _piper_path(language: str) -> Path:
     directory = Path(config.PIPER_MODEL_DIR)
     code = {"hindi": "hi", "english": "en"}.get(language, language)
     name = {"hi": config.PIPER_HINDI_VOICE, "en": config.PIPER_ENGLISH_VOICE, **config.PIPER_ADDITIONAL_VOICES}.get(code)
+    if code in {"en", "hi"} and config.PIPER_SHARED_VOICE.strip():
+        name = config.PIPER_SHARED_VOICE
     if not name:
         raise TTSEngineError(f"No Piper voice is configured for language '{code}'.")
     name = name.strip()

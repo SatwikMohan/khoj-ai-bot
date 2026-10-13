@@ -30,6 +30,19 @@ def wav_sample(value: int, rate: int = 22050) -> bytes:
 
 
 class LanguageAwareSpeechTests(unittest.TestCase):
+    def test_shared_speaker_preserves_english_words(self):
+        from services.tts_service import _piper_path
+        with patch.object(config, "PIPER_SHARED_VOICE", "hi_IN-pratham-medium"):
+            self.assertEqual(_piper_path("en"), _piper_path("hi"))
+            self.assertEqual(_piper_path("en").stem, "hi_IN-pratham-medium")
+        self.assertEqual(speech_phrases("Check the safety valve.", "en"),
+                         [("en", "Check the safety valve.")])
+
+    def test_separate_speakers_remain_configurable(self):
+        from services.tts_service import _piper_path
+        with patch.object(config, "PIPER_SHARED_VOICE", ""):
+            self.assertNotEqual(_piper_path("en"), _piper_path("hi"))
+
     def test_hinglish_keeps_one_speaker_and_original_words(self):
         text = "Yaar, mujhe kal office jaana hai. Can you remind me at 9 AM?"
         self.assertEqual(speech_phrases(text, "hinglish"), [("en", text)])

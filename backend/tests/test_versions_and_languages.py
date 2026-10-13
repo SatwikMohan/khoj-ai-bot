@@ -217,7 +217,7 @@ class LanguageAndVoiceTests(unittest.TestCase):
                     wav.writeframes(b"\x00\x10" * 2205)
                 return SimpleNamespace(returncode=0, stdout=output.getvalue())
 
-            with patch.object(config, "PIPER_MODEL_DIR", directory), patch("services.tts_service.subprocess.run", side_effect=run):
+            with patch.object(config, "PIPER_SHARED_VOICE", ""), patch.object(config, "PIPER_MODEL_DIR", directory), patch("services.tts_service.subprocess.run", side_effect=run):
                 _synthesize_piper_speech(TTSRequest(text="English answer", language="en"))
                 _synthesize_piper_speech(TTSRequest(text="हिंदी उत्तर", language="hi"))
             self.assertIn(config.PIPER_ENGLISH_VOICE, calls[0])
