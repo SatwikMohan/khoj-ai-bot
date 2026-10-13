@@ -11,13 +11,13 @@ from pathlib import Path
 
 # DGX Spark deployment profile. The Windows machine is for local development and
 # tests only; its smaller model settings are examples below.
-# OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
-# OLLAMA_EMBED_MODEL = "bge-m3"
-# OLLAMA_EMBED_DIMENSIONS = 1024
+OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
+OLLAMA_EMBED_MODEL = "bge-m3"
+OLLAMA_EMBED_DIMENSIONS = 1024
 # Windows local test alternatives; switch all three together when testing locally:
-OLLAMA_CHAT_MODEL = "llama3.2:latest"
-OLLAMA_EMBED_MODEL = "nomic-embed-text"
-OLLAMA_EMBED_DIMENSIONS = 768
+# OLLAMA_CHAT_MODEL = "llama3.2:latest"
+# OLLAMA_EMBED_MODEL = "nomic-embed-text"
+# OLLAMA_EMBED_DIMENSIONS = 768
 # Provision these tags in the Ollama Docker volume and build/promote a new index
 # before starting the app; the Windows nomic index uses a different vector space.
 # The application sends these model names to Ollama; it never opens model files.
