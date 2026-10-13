@@ -436,8 +436,10 @@ failed KV allocation during a real QA smoke test on that host, even after a
 smaller context was tried. Provision and run the real fixture and browser checks
 on the DGX before calling the deployment validated.
 
-Automatic Hinglish input with Piper and TTS_ENABLED=True now generates Hindi
-answers in Devanagari, using the existing Hindi voice. This avoids Roman-script
+Automatic Hinglish input with Piper and TTS_ENABLED=True now generates English
+answers using the English voice. The earlier forced-Hindi fallback caused language
+validation failures with the deployed Llama model and has been removed.
+Hindi-script questions and explicit Hindi overrides still request Hindi. This avoids Roman-script
 Hindi phonemization and adds no translation model call. English replies are
 unchanged. Explicit language overrides remain honored; explicitly forcing
 Roman Hinglish still requires a capable engine such as Veena. Turning off the

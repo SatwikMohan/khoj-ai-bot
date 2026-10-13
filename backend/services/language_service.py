@@ -139,7 +139,10 @@ def resolve_language_context(
     # translation after generation. Keep detection and explicit choices intact.
     if (target == "hinglish" and selected is None and configured == "auto"
             and config.TTS_ENABLED and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}):
-        target = "hi"
+        # Piper cannot pronounce Roman Hindi, and forcing Devanagari caused
+        # generation failures with the deployed Llama model. Use English for
+        # this automatic fallback only; explicit Hindi remains Hindi.
+        target = "en"
     script = "Devanagari" if re.search(r"[\u0900-\u097f]", current) else "Latin"
     return LanguageContext(
         question, transcript, detected, target, script, selected,

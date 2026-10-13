@@ -30,21 +30,23 @@ class LanguageContractTests(unittest.TestCase):
         engine.start()
         self.addCleanup(engine.stop)
 
-    def test_piper_auto_hinglish_generates_pronounceable_hindi(self):
+    def test_piper_auto_hinglish_generates_pronounceable_english(self):
         with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto"):
             context = resolve_language_context("Mujhe safety rules samjhao")
             self.assertEqual(context.detected_language, "hinglish")
-            self.assertEqual(context.target_language, "hi")
-            self.assertEqual(context.tts_language, "hi")
+            self.assertEqual(context.target_language, "en")
+            self.assertEqual(context.tts_language, "en")
             self.assertTrue(answer_language_matches(
-                _not_enough_context_response("CMR ka rule kya hai?").answer, "hi"))
-            self.assertTrue(answer_language_matches(_general_response("aap kaise ho").answer, "hi"))
+                _not_enough_context_response("CMR ka rule kya hai?").answer, "en"))
+            self.assertTrue(answer_language_matches(_general_response("aap kaise ho").answer, "en"))
             self.assertEqual(resolve_language_context("Explain ventilation").target_language, "en")
+            self.assertEqual(resolve_language_context("\u092e\u0941\u091d\u0947 \u092c\u0924\u093e\u0913").target_language, "hi")
+            self.assertEqual(resolve_language_context("Mujhe batao", selected_language="hi").target_language, "hi")
             self.assertEqual(resolve_language_context("Mujhe batao", selected_language="hinglish").target_language, "hinglish")
 
-    def test_piper_hinglish_stream_uses_hindi_prompt_and_metadata(self):
+    def test_piper_hinglish_stream_uses_english_prompt_and_metadata(self):
         prompts = []
-        answer = "\u092d\u0902\u0921\u093e\u0930\u0923 \u0915\u0940 \u0938\u0940\u092e\u093e 100 kg \u0939\u0948\u0964"
+        answer = "The storage limit is 100 kg."
         def generate(inputs):
             prompts.append(str(list(inputs)))
             yield AIMessageChunk(content=answer)
@@ -56,10 +58,11 @@ class LanguageContractTests(unittest.TestCase):
         ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
             events = list(stream_answer_events("Storage limit kya hai?"))
         self.assertEqual(events[-1]["type"], "done")
-        self.assertEqual(events[-1]["language"], "hi")
+        self.assertEqual(events[-1]["language"], "en")
         self.assertEqual(events[-1]["answer"], answer)
         self.assertEqual(len(prompts), 1)
-        self.assertIn("Hindi in Devanagari", prompts[0])
+        self.assertIn("grammatical English", prompts[0])
+
 
     def test_text_only_hinglish_keeps_original_script(self):
         with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=False, RESPONSE_LANGUAGE="auto"):
