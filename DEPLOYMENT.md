@@ -62,7 +62,39 @@ model; reasoning-capable models are not accepted even when thinking can be disab
 A timed-out native model operation may still be finishing in the background;
 request cancellation discards its result and closes its stream where supported.
 
-## Offline speech
+## Fast offline speech profile (2026-10-12)
+
+The current default is `TTS_ENGINE = "piper"` on DGX and Windows.
+The Veena instructions below describe the optional older voice profile.
+Piper uses persistent CPU workers and preloads English and Hindi at app startup.
+It does not require internet for inference. English and Hindi use different
+speakers; the selected English checkpoint uses US phonemization. Roman-script
+Hinglish remains unsupported by this profile; its written answer remains available.
+
+After transferring the updated code/config, provision the smaller Piper voices
+once while connected (or transfer their ONNX and JSON files into
+`/models/piper` in the existing `ai_models` volume):
+
+```bash
+docker compose build app backend-model-init
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine piper
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine piper --offline
+docker compose up -d --no-deps --force-recreate app
+docker compose logs --tail=100 -f app
+```
+
+After warm-up, measure on the DGX without loading QA or STT in the benchmark:
+
+```bash
+docker compose exec app python /app/backend/evals/benchmark_tts_only.py --runs 10
+docker compose cp app:/app/backend/evals/voice_samples/tts_speed ./dgx-tts-speed
+```
+
+The benchmark saves cold/warm timings, WAV files and any error before exiting.
+The separate benchmark process has its own cold worker; it does not share the
+app's warmed models. Do not compare its cold first call with warm chat latency.
+
+## Optional Veena speech
 
 The Docker deployment on the NVIDIA DGX uses [Veena](https://huggingface.co/maya-research/Veena)
 with its built-in `kavya` speaker for English, Hindi, and Hinglish. One model

@@ -11,13 +11,13 @@ from pathlib import Path
 
 # DGX Spark deployment profile. The Windows machine is for local development and
 # tests only; its smaller model settings are examples below.
-OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
-OLLAMA_EMBED_MODEL = "bge-m3"
-OLLAMA_EMBED_DIMENSIONS = 1024
+# OLLAMA_CHAT_MODEL = "llama3.1:8b-instruct-q4_K_M"
+# OLLAMA_EMBED_MODEL = "bge-m3"
+# OLLAMA_EMBED_DIMENSIONS = 1024
 # Windows local test alternatives; switch all three together when testing locally:
-# OLLAMA_CHAT_MODEL = "llama3.2:latest"
-# OLLAMA_EMBED_MODEL = "nomic-embed-text"
-# OLLAMA_EMBED_DIMENSIONS = 768
+OLLAMA_CHAT_MODEL = "llama3.2:latest"
+OLLAMA_EMBED_MODEL = "nomic-embed-text"
+OLLAMA_EMBED_DIMENSIONS = 768
 # Provision these tags in the Ollama Docker volume and build/promote a new index
 # before starting the app; the Windows nomic index uses a different vector space.
 # The application sends these model names to Ollama; it never opens model files.
@@ -151,9 +151,10 @@ RECORDING_SPEECH_CONFIRM_MS = 150
 STT_REQUEST_TIMEOUT_SECONDS = 90
 VOICE_TURN_WATCHDOG_SECONDS = 900  # Browser recovery if a turn never receives completion.
 
-# The DGX uses one Indian bilingual speaker. Piper remains the lightweight
-# Windows development voice; its English model uses US phonemization.
-TTS_ENGINE = "veena" if RUNNING_IN_DOCKER else "piper"
+# Fast offline speech on both DGX and Windows. Piper keeps small voice models
+# resident on CPU; Veena remains an explicit, slower bilingual alternative.
+# Piper supports English and Hindi here, not Roman-script Hinglish.
+TTS_ENGINE = "piper"
 VEENA_MODEL_ID = "maya-research/Veena"
 VEENA_MODEL_REVISION = "8b770f9e69e6b35ef320d4cd70a99a4ab6dd022f"
 VEENA_MODEL_DIR = str(MODEL_ROOT / "veena")

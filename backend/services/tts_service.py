@@ -679,6 +679,9 @@ class PersistentPiperWorker:
                 raise TTSEngineError(f"{self.label} worker failed: {exc}") from exc
             finally:
                 stopped.set()
+                # A prior watchdog must exit before this healthy worker is reused.
+                # Otherwise cancelling the completed request can kill the next job.
+                watcher.join()
         finally:
             self.lock.release()
 

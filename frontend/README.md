@@ -92,3 +92,9 @@ go to stderr so they cannot corrupt the binary audio protocol on stdout.
 The DGX sample supplied on 2026-10-11 took 3.22 seconds for QA and 24.88 seconds
 for synthesis of 6.45 seconds of speech before this change. Re-measure on the DGX;
 local mocked tests do not establish a GPU speedup.
+
+The default speech engine is now Piper on DGX as well as Windows. Startup preloads
+the installed English/Hindi voices; normal chat reuses persistent CPU workers.
+Veena remains available by explicit configuration. This faster profile uses
+separate English and Hindi speakers and does not support Roman-script Hinglish.
+See DEPLOYMENT.md for provisioning and the TTS-only benchmark commands.
