@@ -210,6 +210,17 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     engine_name = config.TTS_ENGINE.strip().lower()
     language = (payload.language or detect_language(payload.text)).lower()
     language = {"english": "en", "hindi": "hi"}.get(language, language)
+    if (engine_name in {"piper", "auto"} and language == "hinglish"
+            and config.TTS_HINGLISH_TRANSLITERATION):
+        from services.hinglish_speech import devanagari_speech
+        try:
+            spoken = devanagari_speech(_markdown_to_spoken_text(payload.text, payload.max_words))
+        except ValueError as exc:
+            raise TTSEngineError(str(exc)) from exc
+        if payload.session_id and payload.request_id and _speech_request_stopped(payload):
+            raise TTSEngineError("This speech request was cancelled.")
+        payload = payload.model_copy(update={"text": spoken, "language": "hi"})
+        language = "hi"
     supported = TTS_LANGUAGE_SUPPORT.get("piper" if engine_name == "auto" else engine_name)
     if supported is not None and language not in supported:
         if engine_name in {"piper", "auto"} and language in config.PIPER_ADDITIONAL_VOICES:

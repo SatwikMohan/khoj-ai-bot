@@ -31,7 +31,7 @@ class LanguageContractTests(unittest.TestCase):
         self.addCleanup(engine.stop)
 
     def test_piper_auto_hinglish_generates_pronounceable_english(self):
-        with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto"):
+        with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto", TTS_HINGLISH_TRANSLITERATION=False):
             context = resolve_language_context("Mujhe safety rules samjhao")
             self.assertEqual(context.detected_language, "hinglish")
             self.assertEqual(context.target_language, "en")
@@ -50,7 +50,7 @@ class LanguageContractTests(unittest.TestCase):
         def generate(inputs):
             prompts.append(str(list(inputs)))
             yield AIMessageChunk(content=answer)
-        with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto"), patch(
+        with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto", TTS_HINGLISH_TRANSLITERATION=False), patch(
             "services.qa_service._load_environment"
         ), patch("services.qa_service._vector_store"), patch(
             "services.qa_service._retrieve_context",
@@ -197,7 +197,7 @@ class AudioBoundaryTests(unittest.TestCase):
 
 class SpeechSupportTests(unittest.TestCase):
     def test_piper_declines_hinglish_without_fake_english_speech(self):
-        with patch.object(config, "TTS_ENGINE", "piper"):
+        with patch.multiple(config, TTS_ENGINE="piper", TTS_HINGLISH_TRANSLITERATION=False):
             with self.assertRaisesRegex(TTSEngineError, "no validated voice"):
                 synthesize_speech(TTSRequest(
                     text="Mujhe safety rules samjhao.", language="hinglish",

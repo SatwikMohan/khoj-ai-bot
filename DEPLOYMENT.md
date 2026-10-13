@@ -445,3 +445,30 @@ unchanged. Explicit language overrides remain honored; explicitly forcing
 Roman Hinglish still requires a capable engine such as Veena. Turning off the
 per-session Speak answers toggle does not change this global language policy;
 TTS_ENABLED=False restores automatic Roman Hinglish for text-only deployments.
+
+## Hinglish speech conversion
+
+TTS_HINGLISH_TRANSLITERATION=True supersedes the earlier English-answer fallback.
+The written answer remains Roman Hinglish. Before Piper synthesis, the existing
+local Ollama chat model converts Hindi word spellings to Devanagari; the resulting
+speech-only text uses Piper's Hindi voice. English words and technical terms are
+instructed to remain unchanged. Numbers/punctuation are reconstructed from the
+original text; common units, acronyms and numeric identifiers are protected.
+
+This is script conversion, not answer regeneration or a Hindi translation.
+The model can still misspell or misidentify words; listen to representative mining
+terminology on the DGX. Structural validation is not a semantic correctness proof.
+No cloud service, new model download or external transliteration dependency is used.
+English and Hindi answers bypass this conversion.
+
+Each speech segment adds one local model request, bounded by a token cap and the
+12-second TTS_TRANSLITERATION_TIMEOUT_SECONDS socket timeout. No automatic retry
+is added. This can increase first-audio latency and contend with answer generation.
+The hinglish_speech_conversion log reports its elapsed time. On failure, the text
+answer stays visible and speech reports an error. Disabling the setting restores
+the automatic English-answer fallback when Piper and TTS are enabled.
+
+Copy the updated code and rebuild/recreate app; no voice download is needed if the
+Hindi Piper model was already provisioned. The configured Llama 3.1 model must be
+installed locally in Ollama. Local tests use mocked conversion responses; target
+conversion accuracy and latency remain unverified.

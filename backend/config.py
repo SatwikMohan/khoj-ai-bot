@@ -153,7 +153,7 @@ VOICE_TURN_WATCHDOG_SECONDS = 900  # Browser recovery if a turn never receives c
 
 # Fast offline speech on both DGX and Windows. Piper keeps small voice models
 # resident on CPU; Veena remains an explicit, slower bilingual alternative.
-# Piper supports English and Hindi here, not Roman-script Hinglish.
+# Piper speaks English/Hindi; the optional local conversion below handles Hinglish.
 TTS_ENGINE = "piper"
 VEENA_MODEL_ID = "maya-research/Veena"
 VEENA_MODEL_REVISION = "8b770f9e69e6b35ef320d4cd70a99a4ab6dd022f"
@@ -177,6 +177,9 @@ PIPER_CUSTOM_VOICE_SOURCES = {
 PIPER_DEVICE = "cpu"  # "cuda" requires a compatible ONNX Runtime GPU build on the deployment host.
 # Optional ISO 639-1 code to installed Piper voice name or absolute ONNX path.
 PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
+# Convert Roman Hindi to Devanagari for Piper speech, keeping chat text intact.
+TTS_HINGLISH_TRANSLITERATION = True
+TTS_TRANSLITERATION_TIMEOUT_SECONDS = 12
 TTS_PRELOAD_VOICES = True
 TTS_FALLBACK_ENGINES = ""  # Avoid a different speaker after a Piper failure.
 TTS_TIMEOUT_SECONDS = 120 if TTS_ENGINE == "veena" else 45
@@ -243,6 +246,8 @@ def validate_config() -> None:
            LLM_TOTAL_GENERATION_TIMEOUT_SECONDS, QA_WORKER_QUEUE_TIMEOUT_SECONDS,
            QA_MAX_ACTIVE_WORKERS) <= 0:
         raise ValueError("QA stage timeouts and worker capacity must be positive.")
+    if TTS_TRANSLITERATION_TIMEOUT_SECONDS <= 0:
+        raise ValueError("TTS_TRANSLITERATION_TIMEOUT_SECONDS must be positive.")
     if PIPER_DEVICE not in {"cpu", "cuda"}:
         raise ValueError("PIPER_DEVICE must be cpu or cuda.")
     if OFFLINE_MODE and TTS_ENGINE.strip().lower() in {"edge", "edge-tts"}:

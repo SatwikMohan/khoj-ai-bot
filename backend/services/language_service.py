@@ -138,7 +138,8 @@ def resolve_language_context(
     # Choose a pronounceable answer before generation, not a second LLM
     # translation after generation. Keep detection and explicit choices intact.
     if (target == "hinglish" and selected is None and configured == "auto"
-            and config.TTS_ENABLED and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}):
+            and config.TTS_ENABLED and not config.TTS_HINGLISH_TRANSLITERATION
+            and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}):
         # Piper cannot pronounce Roman Hindi, and forcing Devanagari caused
         # generation failures with the deployed Llama model. Use English for
         # this automatic fallback only; explicit Hindi remains Hindi.
