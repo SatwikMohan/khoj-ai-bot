@@ -64,15 +64,16 @@ class HinglishSpeechTests(unittest.TestCase):
         original = TTSRequest(text="Mujhe batao.", language="hinglish")
         hindi = MUJHE + " " + BATAO + "."
         self.assertEqual(resolve_language_context(original.text).target_language, "hinglish")
-        with patch("services.hinglish_speech.devanagari_speech", return_value=hindi), patch(
-            "services.tts_service._synthesize_with_engine", return_value=(b"audio", "audio/wav")
-        ) as synth, patch("services.tts_service._validate_audio"), patch(
-            "services.tts_service._voice_circuit_open", return_value=False
-        ):
-            synthesize_speech(original)
-        self.assertEqual(synth.call_args.args[0], "piper")
-        self.assertEqual(synth.call_args.args[1].language, "hi")
-        self.assertEqual(synth.call_args.args[1].text, hindi)
+        for engine in ("piper", "goonj"):
+            with self.subTest(engine=engine), patch.object(config, "TTS_ENGINE", engine), patch(
+                "services.hinglish_speech.devanagari_speech", return_value=hindi
+            ), patch("services.tts_service._synthesize_with_engine", return_value=(b"audio", "audio/wav")) as synth, patch(
+                "services.tts_service._validate_audio"
+            ), patch("services.tts_service._voice_circuit_open", return_value=False):
+                synthesize_speech(original)
+                self.assertEqual(synth.call_args.args[0], engine)
+                self.assertEqual(synth.call_args.args[1].language, "hi")
+                self.assertEqual(synth.call_args.args[1].text, hindi)
         self.assertEqual(original.text, "Mujhe batao.")
         self.assertEqual(original.language, "hinglish")
 

@@ -19,7 +19,7 @@ COPY backend/requirements.txt /tmp/backend-requirements.txt
 COPY frontend/requirements.txt /tmp/frontend-requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r /tmp/backend-requirements.txt -r /tmp/frontend-requirements.txt \
-    && python -c "from piper import PiperVoice, SynthesisConfig; print('Piper CPU runtime ready')"
+    && python -c "from piper import PiperVoice, SynthesisConfig; from kokoro import KModel, KPipeline; print('Offline speech runtimes ready')"
 
 COPY backend /app/backend
 COPY frontend /app/frontend

@@ -180,7 +180,7 @@
         } catch (_) {}
       }
     }
-    function stopCapture() {
+    function stopCapture(releaseStream = true) {
       if (timer) clearInterval(timer);
       timer = 0;
       if (recorder && recorder.state !== "inactive") {
@@ -189,10 +189,13 @@
         recorder.stop();
       }
       recorder = null;
-      if (stream) stream.getTracks().forEach(track => track.stop());
-      stream = null;
-      if (context) context.close().catch(() => {});
-      context = null; analyser = null; samples = null; chunks = [];
+      if (releaseStream) {
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        if (context) context.close().catch(() => {});
+        context = null; analyser = null; samples = null;
+      }
+      chunks = [];
       painter.clearRect(0, 0, canvas.width, canvas.height);
     }
     function cancel(message = "Conversation ended.", state = "IDLE",
@@ -299,6 +302,32 @@
     send("streamlit:componentReady", {apiVersion: 1});
     send("streamlit:setFrameHeight", {height: 120});
 
+    function startRecorder(id, mime) {
+      recorder = mime ? new MediaRecorder(stream, {mimeType:mime}) : new MediaRecorder(stream);
+      if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(recorder.mimeType.split(";")[0]))
+        throw new Error("This browser's recording format is unsupported.");
+      chunks = [];
+      recorder.ondataavailable = event => {
+        if (id === generation && event.data?.size) chunks.push(event.data);
+      };
+      recorder.onerror = () => {if (id === generation) cancel("Recording failed. Retry.", "NO_AUDIO");};
+      recorder.start(settings.recording_buffer_ms || 250);
+      startedAt = Date.now(); speechAt = 0; speechCandidateAt = 0;
+      lastSpeechAt = 0; noiseFloor = 0.005;
+    }
+    function restartSilentCapture(id) {
+      if (id !== generation || !stream || !recorder) return;
+      try {
+        const mime = recorder.mimeType;
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.stop();
+        startRecorder(id, mime);
+        console.info(JSON.stringify({event:"voice_silent_buffer_reset", request_id:requestId}));
+      } catch (error) {
+        cancel(error.message || "Microphone capture failed. Retry.", "NO_AUDIO");
+      }
+    }
     function meterTick(id) {
       if (id !== generation || !["LISTENING", "RECORDING"].includes(phase) || !analyser) return;
       analyser.getByteTimeDomainData(samples);
@@ -338,8 +367,8 @@
       } else if (!speechAt && now - startedAt >= Math.min(
           settings.no_speech_timeout_seconds || 10,
           settings.max_recording_seconds || 30) * 1000) {
-        // Start a fresh container; never discard its header or intermediate packets.
-        beginRecording(requestId);
+        // Start a fresh container without closing the mic or asking for permission again.
+        restartSilentCapture(id);
       }
     }
     async function beginRecording(reuseId = "") {
@@ -353,7 +382,7 @@
         return;
       }
       const id = ++generation;
-      stopCapture();
+      stopCapture(false);
       requestId = reuseId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
       const acknowledged = reuseId ? Promise.resolve(true) : waitForAck(requestId);
       if (!reuseId) {
@@ -362,17 +391,25 @@
         writeTurn("requesting");
         sendValue({kind:"begin", request_id:requestId});
       }
-      show("REQUESTING_PERMISSION", "Requesting microphone permission...");
+      if (!stream) show("REQUESTING_PERMISSION", "Requesting microphone permission...");
       try {
         if (!await acknowledged) {
           if (id === generation) cancel("Microphone setup timed out. Retry.", "TRANSCRIPTION_FAILED");
           return;
         }
         if (id !== generation) return;
-        const acquired = await navigator.mediaDevices.getUserMedia({audio:{
+        const reusable = stream && stream.getAudioTracks().some(track => track.readyState !== "ended");
+        if (!reusable && context) {
+          context.close().catch(() => {});
+          context = null; analyser = null; samples = null;
+        }
+        const acquired = reusable ? stream : await navigator.mediaDevices.getUserMedia({audio:{
           channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
         }});
-        if (id !== generation) {acquired.getTracks().forEach(track => track.stop()); return;}
+        if (id !== generation) {
+          if (acquired !== stream) acquired.getTracks().forEach(track => track.stop());
+          return;
+        }
         stream = acquired;
         const track = stream.getAudioTracks()[0];
         if (!track) throw new DOMException("No audio input track", "NotFoundError");
@@ -382,27 +419,17 @@
         };
         preview.textContent = track.label ? `Input: ${track.label}` : "Microphone input ready";
         const audioContext = window.AudioContext || window.webkitAudioContext;
-        context = new audioContext();
+        if (!context) context = new audioContext();
         await context.resume();
-        analyser = context.createAnalyser();
-        analyser.fftSize = 512;
-        context.createMediaStreamSource(stream).connect(analyser);
-        samples = new Uint8Array(analyser.fftSize);
+        if (!analyser) {
+          analyser = context.createAnalyser();
+          analyser.fftSize = 512;
+          context.createMediaStreamSource(stream).connect(analyser);
+          samples = new Uint8Array(analyser.fftSize);
+        }
         const choices = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/webm", "audio/mp4"];
         const mime = choices.find(type => MediaRecorder.isTypeSupported(type));
-        recorder = mime ? new MediaRecorder(stream, {mimeType:mime}) : new MediaRecorder(stream);
-        if (!["audio/webm", "audio/ogg", "audio/mp4"].includes(recorder.mimeType.split(";")[0])) {
-          throw new Error("This browser's recording format is unsupported.");
-        }
-        chunks = [];
-        recorder.ondataavailable = event => {
-          if (id !== generation || !event.data?.size) return;
-          chunks.push(event.data);
-        };
-        recorder.onerror = () => {if (id === generation) cancel("Recording failed. Retry.", "NO_AUDIO");};
-        recorder.start(settings.recording_buffer_ms || 250);
-        startedAt = Date.now(); speechAt = 0; speechCandidateAt = 0;
-        lastSpeechAt = 0; noiseFloor = 0.005;
+        startRecorder(id, mime);
         show("LISTENING", "Listening for your question...");
         writeTurn("listening");
         console.info(JSON.stringify({event:"voice_listening_started",request_id:requestId}));
@@ -432,7 +459,7 @@
       if (id !== generation) return;
       const duration = speechAt ? (Date.now() - speechAt) / 1000 : 0;
       const blob = new Blob(chunks, {type:active.mimeType});
-      stopCapture();
+      stopCapture(false);
       if (!blob.size || duration < 0.35 || !speechAt) {
         // The next begin supersedes this request; keep the voice session active.
         requestId = "";

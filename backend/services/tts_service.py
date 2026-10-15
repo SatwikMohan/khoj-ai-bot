@@ -30,6 +30,7 @@ SUPPORTED_FORMATS = {"mp3", "wav"}
 # voice mapping and separate listening validation.
 TTS_LANGUAGE_SUPPORT = {
     "veena": frozenset({"en", "hi", "hinglish"}),
+    "goonj": frozenset({"en", "hi", "hinglish"}),
     "piper": frozenset({"en", "hi"}),
 }
 DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
@@ -210,7 +211,7 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
     engine_name = config.TTS_ENGINE.strip().lower()
     language = (payload.language or detect_language(payload.text)).lower()
     language = {"english": "en", "hindi": "hi"}.get(language, language)
-    if (engine_name in {"piper", "auto"} and language == "hinglish"
+    if (engine_name in {"piper", "auto", "goonj"} and language == "hinglish"
             and config.TTS_HINGLISH_TRANSLITERATION):
         from services.hinglish_speech import devanagari_speech
         try:
@@ -269,6 +270,8 @@ def synthesize_speech(payload: TTSRequest) -> tuple[bytes, str]:
 def _synthesize_with_engine(engine_name: str, payload: TTSRequest) -> tuple[bytes, str]:
     if engine_name == "piper":
         return _synthesize_piper_speech(payload)
+    if engine_name == "goonj":
+        return _synthesize_goonj_speech(payload)
     if engine_name == "veena":
         return _synthesize_veena_speech(payload)
     if engine_name == "espeak":
@@ -355,6 +358,18 @@ def tts_runtime_status() -> dict:
             "US phonemization" if config.PIPER_ENGLISH_VOICE == "en_IN-spicor-english"
             else "depends on configured model"
         )
+    elif engine == "goonj":
+        from services.goonj_voice import required_files
+        missing = [str(path) for path in required_files() if not path.is_file()]
+        if missing:
+            status.update(status="unavailable", error="Missing Goonj voice files: " + ", ".join(missing))
+        else:
+            try:
+                import kokoro
+            except ImportError:
+                status.update(status="unavailable", error="Install kokoro==0.9.4 and misaki[en].")
+        status["voice"] = config.GOONJ_VOICE
+        status["cross_language_speaker_consistency"] = True
     elif engine == "veena":
         model = Path(config.VEENA_MODEL_DIR)
         codec = Path(config.VEENA_CODEC_DIR)
@@ -393,6 +408,9 @@ def warm_up_tts() -> None:
     status = tts_runtime_status()
     if status["status"] != "ready":
         raise TTSEngineError(status.get("error", "TTS warm-up failed."))
+    if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() == "goonj":
+        for language, sample in (("en", "Voice ready."), ("hi", "\u0906\u0935\u093e\u091c\u093c \u0924\u0948\u092f\u093e\u0930 \u0939\u0948\u0964")):
+            _synthesize_goonj_speech(TTSRequest(text=sample, language=language))
     if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() == "veena":
         _veena_worker().synthesize("\u0928\u092e\u0938\u094d\u0924\u0947. Hello.", 1.0, None)
     if config.TTS_PRELOAD_VOICES and config.TTS_ENGINE.strip().lower() in {"piper", "auto"}:
@@ -561,6 +579,30 @@ def _kokoro_voice_candidates(requested_voice: str) -> list[str]:
         if re.fullmatch(r"[ab][fm]_[a-z0-9_]+", voice.strip())
     ]
     return list(dict.fromkeys([primary_voice, default_voice, *fallback_voices]))
+
+
+def _synthesize_goonj_speech(payload: TTSRequest) -> tuple[bytes, str]:
+    from services import goonj_voice
+
+    spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
+    if not spoken_text:
+        raise TTSEngineError("There is no speakable text.")
+    language = (payload.language or detect_language(spoken_text)).lower()
+    language = {"hindi": "hi", "english": "en"}.get(language, language)
+    spoken_text = normalize_speech_text(spoken_text, language)
+    rate, _, _ = _prosody_settings(payload)
+    speed = max(0.75, min(1.3, 1 + _parse_percent(rate) / 100))
+    print(json.dumps({"event": "tts_speaker_selected", "request_id": payload.request_id,
+                      "language": language, "voice_model": config.GOONJ_MODEL_ID,
+                      "speaker": config.GOONJ_VOICE}), flush=True)
+    request = (registry.current(payload.session_id, payload.request_id)
+               if payload.session_id and payload.request_id else None)
+    if payload.session_id and payload.request_id and (request is None or request.speech_cancelled.is_set()):
+        raise TTSEngineError("This speech request was cancelled.")
+    with NEURAL_TTS_LOCK:
+        audio = goonj_voice.synthesize(spoken_text, language, speed,
+                                       request.speech_cancelled if request else None)
+    return _audio_array_to_wav(audio, sample_rate=24000), "audio/wav"
 
 
 def _synthesize_kokoro_speech(payload: TTSRequest) -> tuple[bytes, str]:
@@ -763,7 +805,7 @@ def _synthesize_piper_speech(payload: TTSRequest) -> tuple[bytes, str]:
     if language == "hinglish":
         raise TTSEngineError(
             "Piper English uses English phonemization and cannot reliably speak Roman-script Hindi. "
-            "Use Veena on a CUDA host for code-mixed speech."
+            "Use Goonj for offline code-mixed speech."
         )
     spoken_text = _markdown_to_spoken_text(payload.text, payload.max_words)
     if not spoken_text:

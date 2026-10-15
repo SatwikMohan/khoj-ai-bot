@@ -47,15 +47,7 @@ The broader retrieval defaults help the bot compare repeated topics across diffe
 facts, years, rules, figures, and sources instead of answering from the first matching chunk only.
 Recent chat history is included only to resolve follow-up questions and is trimmed before prompting.
 
-Text-to-speech routes Hindi and English phrases through separate offline Piper
-voices, including known Romanized Hindi and English technical terms in a Hinglish
-response. Displayed chat text remains unchanged. Other languages require a
-configured local Piper voice or an installed espeak-ng fallback. The default
-English Piper voice is the selected Indian English `en_IN-spicor-english`.
-Its repository labels the checkpoint AGPL-3.0; review the terms for deployment.
-See [the avatar and speech report](../AVATAR_TTS_REPORT.md) for test results and limits.
-Set `TTS_ENGINE = "piper"` and run `python scripts/provision_models.py --only-tts` from
-`backend` once to download and verify the voices. No reference WAV is required.
+Text-to-speech uses one offline Goonj speaker pack for English, Hindi, and converted Hinglish. The displayed answer is unchanged. The model and speaker files are provisioned with `python scripts/provision_models.py --only-tts` from `backend` on a connected machine, then verified with `--offline`. See the deployment guide for transfer to an air-gapped DGX. Piper and Veena are optional voice engines.
 See [deployment and model configuration](../DEPLOYMENT.md) for local/DGX settings,
 offline setup and switching models. The pull commands above are examples; use
 the names selected in `backend/config.py`. Restart the process after edits; no
@@ -93,28 +85,14 @@ The DGX sample supplied on 2026-10-11 took 3.22 seconds for QA and 24.88 seconds
 for synthesis of 6.45 seconds of speech before this change. Re-measure on the DGX;
 local mocked tests do not establish a GPU speedup.
 
-The default speech engine is now Piper on DGX as well as Windows. Startup preloads
-the installed English/Hindi voices; normal chat reuses persistent CPU workers.
-Veena remains available by explicit configuration. This faster profile uses
-separate English and Hindi speakers and does not support Roman-script Hinglish.
-See DEPLOYMENT.md for provisioning and the TTS-only benchmark commands.
-
-Automatic Hinglish input with Piper and TTS_ENABLED=True now generates English
-answers using the English voice. The earlier forced-Hindi fallback caused language
-validation failures with the deployed Llama model and has been removed.
-Hindi-script questions and explicit Hindi overrides still request Hindi. This avoids Roman-script
-Hindi phonemization and adds no translation model call. English replies are
-unchanged. Explicit language overrides remain honored; explicitly forcing
-Roman Hinglish still requires a capable engine such as Veena. Turning off the
-per-session Speak answers toggle does not change this global language policy;
-TTS_ENABLED=False restores automatic Roman Hinglish for text-only deployments.
+The default offline speech engine is Goonj-1-82M, using one Indian `en_priya` speaker pack for English, Hindi, and Hinglish. Piper and Veena remain optional. The mic keeps one media stream during a voice conversation, resets silent recording buffers without asking for permission again, and allows 1.6 seconds of pause before submitting an utterance. The controls above the message input have been removed; speech follows `TTS_ENABLED` in `backend/config.py`.
 
 ## Hinglish speech conversion
 
 TTS_HINGLISH_TRANSLITERATION=True supersedes the earlier English-answer fallback.
-The written answer remains Roman Hinglish. Before Piper synthesis, the existing
+The written answer remains Roman Hinglish. Before Goonj synthesis, the existing
 local Ollama chat model converts Hindi word spellings to Devanagari; the resulting
-speech-only text uses Piper's Hindi voice. English words and technical terms are
+speech-only text uses Goonj's Hindi phonemizer with the same speaker pack. English words and technical terms are
 instructed to remain unchanged. Numbers/punctuation are reconstructed from the
 original text; common units, acronyms and numeric identifiers are protected.
 

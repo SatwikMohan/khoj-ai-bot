@@ -146,15 +146,18 @@ RECORDING_BUFFER_MS = 250
 REQUEST_CANCELLATION_POLL_SECONDS = 0.1
 RECORDING_NO_SPEECH_TIMEOUT_SECONDS = 10
 RECORDING_MAX_SECONDS = 30
-RECORDING_SILENCE_MS = 1100
+RECORDING_SILENCE_MS = 1600
 RECORDING_SPEECH_CONFIRM_MS = 150
 STT_REQUEST_TIMEOUT_SECONDS = 90
 VOICE_TURN_WATCHDOG_SECONDS = 900  # Browser recovery if a turn never receives completion.
 
-# Fast offline speech on both DGX and Windows. Piper keeps small voice models
-# resident on CPU; Veena remains an explicit, slower bilingual alternative.
-# Piper speaks English/Hindi; the optional local conversion below handles Hinglish.
-TTS_ENGINE = "piper"
+# Offline Indian English/Hindi/Hinglish voice on both DGX and Windows.
+# A single Goonj speaker pack stays fixed across languages; assets are provisioned once.
+TTS_ENGINE = "goonj"
+GOONJ_MODEL_ID = "BH-Builds/goonj-1-82M"
+GOONJ_REVISION = "7056ccc1a0b58beaad09fe2057730545d74261cb"
+GOONJ_MODEL_DIR = str(MODEL_ROOT / "goonj")
+GOONJ_VOICE = "en_priya"  # One Indian speaker pack for English, Hindi and Hinglish.
 VEENA_MODEL_ID = "maya-research/Veena"
 VEENA_MODEL_REVISION = "8b770f9e69e6b35ef320d4cd70a99a4ab6dd022f"
 VEENA_MODEL_DIR = str(MODEL_ROOT / "veena")
@@ -180,7 +183,7 @@ PIPER_CUSTOM_VOICE_SOURCES = {
 PIPER_DEVICE = "cpu"  # "cuda" requires a compatible ONNX Runtime GPU build on the deployment host.
 # Optional ISO 639-1 code to installed Piper voice name or absolute ONNX path.
 PIPER_ADDITIONAL_VOICES: dict[str, str] = {}
-# Convert Roman Hindi to Devanagari for Piper speech, keeping chat text intact.
+# Convert Roman Hindi to Devanagari for speech, keeping chat text intact.
 TTS_HINGLISH_TRANSLITERATION = True
 TTS_TRANSLITERATION_TIMEOUT_SECONDS = 12
 TTS_PRELOAD_VOICES = True
@@ -190,7 +193,7 @@ TTS_RESPONSE_TIMEOUT_SECONDS = 120
 TTS_FAILURE_THRESHOLD = 2
 TTS_FAILURE_COOLDOWN_SECONDS = 60
 TTS_MIN_AUDIO_BYTES = 1024
-TTS_SAMPLE_RATE = 24000 if TTS_ENGINE == "veena" else 22050
+TTS_SAMPLE_RATE = 24000 if TTS_ENGINE in {"veena", "goonj"} else 22050
 TTS_CHANNELS = 1
 TTS_SAMPLE_WIDTH_BYTES = 2
 TTS_STREAM_MIN_CHARS = 60

@@ -824,14 +824,6 @@ with right_col:
     if st.session_state.voice_error:
         st.error("Microphone transcription failed: " + st.session_state.voice_error["message"]
                  + " Check the device, then start the conversation again.")
-    st.session_state.tts_enabled = st.toggle(
-        "Speak answers", value=st.session_state.tts_enabled, key="speech_toggle"
-    )
-    if st.button("Stop speech", key="stop_speech"):
-        st.iframe(
-            '<script>localStorage.setItem("texmin_voice_interrupt_at", String(Date.now()));</script>',
-            height=1,
-        )
     typed_question = st.chat_input("Ask anything...")
     retry_question = None
     if st.session_state.messages and st.session_state.messages[-1].get("incomplete"):

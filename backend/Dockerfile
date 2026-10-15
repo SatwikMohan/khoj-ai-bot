@@ -17,7 +17,7 @@ ENV PATH="/opt/texmin-venv/bin:${PATH}"
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
     && python -m pip install --no-cache-dir -r requirements.txt \
-    && python -c "from piper import PiperVoice, SynthesisConfig; print('Piper CPU runtime ready')"
+    && python -c "from piper import PiperVoice, SynthesisConfig; from kokoro import KModel, KPipeline; print('Offline speech runtimes ready')"
 
 COPY . .
 

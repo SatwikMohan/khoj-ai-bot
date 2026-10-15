@@ -15,13 +15,17 @@ MOCKS = r"""
 <script>
 const events = [];
 let begins = 0, audios = 0, earlyBegin = false, earlyAudio = false;
-let speaking = false, speechEndAt = 0, completeHeaders = true, recorderStarts = 0;
+let speaking = false, speechEndAt = 0, completeHeaders = true, recorderStarts = 0, mediaAcquires = 0;
 const result = document.createElement("output");
 result.id = "result";
 document.addEventListener("DOMContentLoaded", () => document.body.appendChild(result));
 Object.defineProperty(window, "isSecureContext", {value:true});
 Object.defineProperty(navigator, "mediaDevices", {value:{
-  getUserMedia:async()=>({getTracks:()=>[{stop() {}}],getAudioTracks:()=>[{label:"fake microphone",stop() {}}]})
+  getUserMedia:async()=>{
+    mediaAcquires++;
+    const track={label:"fake microphone",readyState:"live",stop(){this.readyState="ended";}};
+    return {getTracks:()=>[track],getAudioTracks:()=>[track]};
+  }
 }});
 class FakeRecorder {
   static isTypeSupported() {return true;}
@@ -125,10 +129,10 @@ setTimeout(()=>{
 },5100);
 setTimeout(()=>{
   const text="begins="+begins+" audios="+audios+" early="+earlyBegin+" earlyAudio="+earlyAudio+
-    " headers="+completeHeaders+" recorderStarts="+recorderStarts+" cancels="+events.filter(x=>x==="cancel").length+
+    " headers="+completeHeaders+" recorderStarts="+recorderStarts+" acquires="+mediaAcquires+" cancels="+events.filter(x=>x==="cancel").length+
     " label="+document.getElementById("micLabel").textContent;
   result.dataset.pass=String(begins===4&&audios===3&&completeHeaders&&!earlyBegin&&!earlyAudio&&
-    events.filter(x=>x==="cancel").length===0&&
+    mediaAcquires===1&&events.filter(x=>x==="cancel").length===0&&
     document.getElementById("micLabel").textContent==="Start conversation");
   result.textContent=text;
 },6000);

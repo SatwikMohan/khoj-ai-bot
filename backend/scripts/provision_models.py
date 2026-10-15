@@ -111,6 +111,25 @@ def provision_tts(offline: bool = False, engine_override: str | None = None) -> 
             audio, media = tts_service._synthesize_piper_speech(TTSRequest(text=text, language=language, response_format="wav"))
             _validate_audio(audio, media)
             print(f"Piper {language} offline synthesis passed.", flush=True)
+    elif engine == "goonj":
+        from huggingface_hub import snapshot_download
+        from services.goonj_voice import required_files
+        if not offline:
+            snapshot_download(
+                repo_id=config.GOONJ_MODEL_ID,
+                revision=config.GOONJ_REVISION,
+                local_dir=config.GOONJ_MODEL_DIR,
+                allow_patterns=["config.json", "kokoro_hindi_final.pth",
+                                "voices/" + config.GOONJ_VOICE + ".pt"],
+            )
+        missing = [str(path) for path in required_files() if not path.is_file()]
+        if missing:
+            raise RuntimeError("Missing offline Goonj model files: " + ", ".join(missing))
+        for language, text in (("en", "Voice ready."),
+                               ("hi", "\u0906\u0935\u093e\u091c\u093c \u0924\u0948\u092f\u093e\u0930 \u0939\u0948\u0964")):
+            audio, media = _synthesize_with_engine(engine, TTSRequest(text=text, language=language))
+            _validate_audio(audio, media)
+            print(f"Goonj {language} offline synthesis passed.", flush=True)
     elif engine == "veena":
         from huggingface_hub import snapshot_download
 
@@ -139,9 +158,9 @@ def provision_tts(offline: bool = False, engine_override: str | None = None) -> 
         audio, media = _synthesize_with_engine(engine, TTSRequest(text="नमस्ते। आपका स्वागत है।"))
         _validate_audio(audio, media)
     elif engine in {"edge", "edge-tts"}:
-        raise RuntimeError("Edge TTS cannot be provisioned for offline use. Choose piper or espeak.")
+        raise RuntimeError("Edge TTS cannot be provisioned for offline use. Choose goonj, piper or espeak.")
     else:
-        raise RuntimeError(f"Unsupported provisioning engine: {engine}. Choose piper or espeak.")
+        raise RuntimeError(f"Unsupported provisioning engine: {engine}. Choose goonj, piper or espeak.")
 
 
 def provision_reranker(offline: bool = False) -> None:
@@ -158,7 +177,7 @@ def provision_reranker(offline: bool = False) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download configured offline assets and verify speech.")
     parser.add_argument("--only-tts", action="store_true")
-    parser.add_argument("--engine", choices=("piper", "veena"), help="Override the configured speech engine for provisioning.")
+    parser.add_argument("--engine", choices=("piper", "veena", "goonj"), help="Override the configured speech engine for provisioning.")
     parser.add_argument("--offline", action="store_true", help="Verify all configured model assets without downloading.")
     args = parser.parse_args()
     config.configure_runtime_environment(offline=args.offline)

@@ -62,41 +62,40 @@ model; reasoning-capable models are not accepted even when thinking can be disab
 A timed-out native model operation may still be finishing in the background;
 request cancellation discards its result and closes its stream where supported.
 
-## Fast offline speech profile (2026-10-12)
+## Offline Indian voice (2026-10-15)
 
-The current default is `TTS_ENGINE = "piper"` on DGX and Windows.
-The Veena instructions below describe the optional older voice profile.
-Piper uses persistent CPU workers and preloads English and Hindi at app startup.
-It does not require internet for inference. English and Hindi use different
-speakers; the selected English checkpoint uses US phonemization. Roman-script
-Hinglish remains unsupported by this profile; its written answer remains available.
+The default `TTS_ENGINE = "goonj"` uses [Goonj-1-82M](https://huggingface.co/BH-Builds/goonj-1-82M) with the one `en_priya` speaker pack for English, Hindi, and Hinglish. The model was trained for these three speech modes and runs from local files after provisioning. Roman Hinglish is converted to Devanagari for speech using the existing local Ollama model; the written answer stays Roman Hinglish. Speech recognition also runs locally. The first speech load is slower; startup preloads English and Hindi in the background. The new voice's perceived accent and DGX latency require a listening and timing check on the deployment machine.
 
-After transferring the updated code/config, provision the smaller Piper voices
-once while connected (or transfer their ONNX and JSON files into
-`/models/piper` in the existing `ai_models` volume):
+On a connected DGX, provision the voice once, then verify the same files without network access:
 
 ```bash
 docker compose build app backend-model-init
-docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine piper
-docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine piper --offline
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine goonj
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine goonj --offline
 docker compose up -d --no-deps --force-recreate app
 docker compose logs --tail=100 -f app
 ```
 
-After warm-up, measure on the DGX without loading QA or STT in the benchmark:
+For a DGX with no network access, copy the provisioned `backend/models/goonj` directory to `voice-stage/goonj` beside `docker-compose.yml`, then import it into the persistent model volume:
 
 ```bash
-docker compose exec app python /app/backend/evals/benchmark_tts_only.py --runs 10
+docker compose run --rm --no-deps -v "$PWD/voice-stage/goonj:/voice-stage:ro" backend-model-init sh -c 'mkdir -p /models/goonj && cp -a /voice-stage/. /models/goonj/'
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --offline
+docker compose up -d --no-deps --force-recreate app
+```
+
+Measure speech on the DGX after provisioning:
+
+```bash
+docker compose exec app python /app/backend/evals/benchmark_tts_only.py --runs 3
 docker compose cp app:/app/backend/evals/voice_samples/tts_speed ./dgx-tts-speed
 ```
 
-The benchmark saves cold/warm timings, WAV files and any error before exiting.
-The separate benchmark process has its own cold worker; it does not share the
-app's warmed models. Do not compare its cold first call with warm chat latency.
+The benchmark saves timings and WAV files. Listen to both language samples; one speaker pack keeps voice identity fixed, but pronunciation quality cannot be established by a test that only checks valid audio. Piper and Veena remain optional engines.
 
 ## Optional Veena speech
 
-The Docker deployment on the NVIDIA DGX uses [Veena](https://huggingface.co/maya-research/Veena)
+The optional Veena profile uses [Veena](https://huggingface.co/maya-research/Veena)
 with its built-in `kavya` speaker for English, Hindi, and Hinglish. One model
 speaks every chunk, so language changes cannot switch speaker identity.
 Veena generates 24 kHz WAV through the local
@@ -107,21 +106,7 @@ in the persistent `/models` volume by an explicit provisioning command.
 uses local files and requires the DGX CUDA GPU. The Veena checkpoint is about
 7.6 GB; allow space for its cache and the rest of the assistant's models.
 
-Windows development keeps the small Piper voices. Its `en_IN-spicor-english`
-checkpoint uses **US English phonemization**, despite the `en_IN` name. The
-Windows voice therefore cannot be used to judge the DGX Indian accent. Piper
-also uses separate Hindi and English speakers; the previous single-speaker
-routing keeps one speaker per answer chunk, but its accent and expression
-remain limited. Piper refuses Roman-script Hinglish because its English
-phonemizer cannot reliably pronounce Hindi words.
-
-The active selection is in `backend/config.py`:
-
-```python
-TTS_ENGINE = "veena" if RUNNING_IN_DOCKER else "piper"
-VEENA_SPEAKER = "kavya"
-TTS_FALLBACK_ENGINES = ""
-```
+Piper remains an optional fast CPU voice. Its `en_IN-spicor-english` model uses US phonemization despite the name, and the former shared Hindi Piper model had an unsuitable English accent. The active Goonj selection is documented above.
 
 The empty fallback list prevents a failed generation from changing to a
 second speaker. A voice error leaves the written answer visible. The service
@@ -436,22 +421,14 @@ failed KV allocation during a real QA smoke test on that host, even after a
 smaller context was tried. Provision and run the real fixture and browser checks
 on the DGX before calling the deployment validated.
 
-Automatic Hinglish input with Piper and TTS_ENABLED=True now generates English
-answers using the English voice. The earlier forced-Hindi fallback caused language
-validation failures with the deployed Llama model and has been removed.
-Hindi-script questions and explicit Hindi overrides still request Hindi. This avoids Roman-script
-Hindi phonemization and adds no translation model call. English replies are
-unchanged. Explicit language overrides remain honored; explicitly forcing
-Roman Hinglish still requires a capable engine such as Veena. Turning off the
-per-session Speak answers toggle does not change this global language policy;
-TTS_ENABLED=False restores automatic Roman Hinglish for text-only deployments.
+Automatic language selection uses the current question. English questions receive English answers after Hinglish turns, and Roman Hinglish answers remain Roman Hinglish when the current question is Hinglish. The same Goonj speaker pack is used for speech in all three modes.
 
 ## Hinglish speech conversion
 
 TTS_HINGLISH_TRANSLITERATION=True supersedes the earlier English-answer fallback.
-The written answer remains Roman Hinglish. Before Piper synthesis, the existing
+The written answer remains Roman Hinglish. Before Goonj synthesis, the existing
 local Ollama chat model converts Hindi word spellings to Devanagari; the resulting
-speech-only text uses Piper's Hindi voice. English words and technical terms are
+speech-only text uses Goonj's Hindi phonemizer with the same speaker pack. English words and technical terms are
 instructed to remain unchanged. Numbers/punctuation are reconstructed from the
 original text; common units, acronyms and numeric identifiers are protected.
 
@@ -465,14 +442,12 @@ Each speech segment adds one local model request, bounded by a token cap and the
 12-second TTS_TRANSLITERATION_TIMEOUT_SECONDS socket timeout. No automatic retry
 is added. This can increase first-audio latency and contend with answer generation.
 The hinglish_speech_conversion log reports its elapsed time. On failure, the text
-answer stays visible and speech reports an error. Disabling the setting restores
-the automatic English-answer fallback when Piper and TTS are enabled.
+answer stays visible and speech reports an error. Disabling the setting leaves Roman Hinglish speech unsupported by the current Goonj routing.
 
-Copy the updated code and rebuild/recreate app; no voice download is needed if the
-Hindi Piper model was already provisioned. The configured Llama 3.1 model must be
+Copy the updated code and provision the Goonj voice as shown above. The configured Llama 3.1 model must be
 installed locally in Ollama. Local tests use mocked conversion responses; target
 conversion accuracy and latency remain unverified.
 
 ### Shared speaker and language switching
 
-`PIPER_SHARED_VOICE = PIPER_HINDI_VOICE` uses the same offline Piper speaker for English, Hindi, and Hinglish converted to Hindi speech. English answers stay in English; the Hindi checkpoint's English pronunciation must be checked by listening on the deployment. Set `PIPER_SHARED_VOICE = ""` to restore separate language voices. In automatic language mode, the current question determines the response language even after a different-language conversation turn. The English output guard rejects Roman Hindi carryover and uses the existing language correction retry.
+`GOONJ_VOICE = "en_priya"` selects one Indian speaker pack for English, Hindi, and Hinglish speech. The current question determines answer language even after a different-language conversation turn. The English output guard rejects Roman Hindi carryover and uses the existing language correction retry.

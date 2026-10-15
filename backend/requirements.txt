@@ -29,3 +29,6 @@ transformers>=4.51,<5
 accelerate>=1,<2
 soundfile>=0.12,<1
 snac==1.2.1
+
+kokoro==0.9.4
+misaki[en]==0.9.4
