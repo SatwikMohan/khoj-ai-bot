@@ -55,6 +55,18 @@ class HinglishSpeechTests(unittest.TestCase):
         self.assertEqual(self.convert("Check the safety valve.", ["Check", "the", "safety", "valve"]),
                          "Check the safety valve.")
 
+    def test_invalid_first_conversion_retries_same_offline_model(self):
+        invalid = {"done": True, "message": {"content": json.dumps({"words": ["mujhe", "batao"]})}}
+        valid = {"done": True, "message": {"content": json.dumps({"words": [MUJHE, BATAO]})}}
+        responses = [io.BytesIO(json.dumps(result).encode()) for result in (invalid, valid)]
+        with patch("services.hinglish_speech.urllib.request.urlopen", side_effect=responses) as call:
+            self.assertEqual(devanagari_speech("mujhe batao"), MUJHE + " " + BATAO)
+        self.assertEqual(call.call_count, 2)
+        requests = [json.loads(item.args[0].data) for item in call.call_args_list]
+        self.assertEqual(requests[0]["model"], requests[1]["model"])
+        self.assertEqual(requests[0]["messages"][1], requests[1]["messages"][1])
+        self.assertIn("previous conversion was invalid", requests[1]["messages"][0]["content"])
+
     def test_timeout_reports_conversion_failure(self):
         with patch("services.hinglish_speech.urllib.request.urlopen", side_effect=TimeoutError):
             with self.assertRaisesRegex(ValueError, "written answer"):

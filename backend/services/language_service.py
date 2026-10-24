@@ -87,6 +87,17 @@ def detect_language(text: str, fallback: str = "en") -> str:
     return code if confidence >= 0.7 else fallback
 
 
+def _explicit_response_language(question: str) -> str | None:
+    """Honor a language requested in this turn, even when its words are English."""
+    match = re.search(
+        r"\b(?:in|into)\s+(?:(?:simple|plain|proper|fluent|natural)\s+)?"
+        r"(hindi|english|hinglish)\b", question, re.IGNORECASE,
+    )
+    return {"hindi": "hi", "english": "en", "hinglish": "hinglish"}.get(
+        match.group(1).lower() if match else ""
+    )
+
+
 def response_language(question: str) -> str:
     return resolve_language_context(question).target_language
 
@@ -138,7 +149,8 @@ def resolve_language_context(
     detected = detect_language(current)
     configured = config.RESPONSE_LANGUAGE.strip().lower()
     selected = (selected_language or "").strip().lower() or None
-    target = selected or (detected if configured == "auto" else configured)
+    explicit = _explicit_response_language(current) if configured == "auto" else None
+    target = selected or (explicit or detected if configured == "auto" else configured)
     target = {"english": "en", "hindi": "hi"}.get(target, target)
     # Choose a pronounceable answer before generation, not a second LLM
     # translation after generation. Keep detection and explicit choices intact.

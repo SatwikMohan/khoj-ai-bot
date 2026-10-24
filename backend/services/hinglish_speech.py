@@ -12,7 +12,7 @@ WORDS = re.compile(r"[A-Za-z]+")
 DEVANAGARI_WORD = re.compile(r"[\u0900-\u0963\u0971-\u097f]+(?:[\u200c\u200d][\u0900-\u0963\u0971-\u097f]+)*")
 
 
-def devanagari_speech(text: str) -> str:
+def devanagari_speech(text: str, _attempt: int = 0, _retry_reason: str = "") -> str:
     """Convert word slots only; numbers, punctuation and ordering stay in Python."""
     if not config.OFFLINE_MODE:
         raise ValueError("Speech conversion requires OFFLINE_MODE=True.")
@@ -51,6 +51,12 @@ def devanagari_speech(text: str) -> str:
         "options": {"temperature": 0, "num_ctx": config.OLLAMA_NUM_CTX,
                     "num_predict": min(1024, max(128, len(words) * 16))},
     }
+    if _attempt:
+        payload["messages"][0]["content"] += (
+            " The previous conversion was invalid: " + _retry_reason[:120] + ". "
+            "Return exactly the same number of words; every Roman Hindi word "
+            "must be in Devanagari, while English and technical words remain unchanged."
+        )
     started = time.perf_counter()
     request = urllib.request.Request(
         config.OLLAMA_BASE_URL.rstrip("/") + "/api/chat",
@@ -82,6 +88,10 @@ def devanagari_speech(text: str) -> str:
         parts.append(text[end:])
         return "".join(parts)
     except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(json.dumps({"event": "hinglish_speech_conversion_retry" if _attempt == 0 else "hinglish_speech_conversion_failed",
+                          "reason": type(exc).__name__, "detail": str(exc)[:160]}), flush=True)
+        if _attempt == 0:
+            return devanagari_speech(text, _attempt=1, _retry_reason=str(exc))
         raise ValueError(
             "Offline Hindi speech conversion failed. The written answer is still available."
         ) from exc

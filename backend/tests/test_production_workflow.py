@@ -105,6 +105,17 @@ class LanguageContractTests(unittest.TestCase):
                          ["en", "hi", "hinglish", "hi"])
         self.assertEqual(hindi.script, "Devanagari")
 
+    def test_explicit_followup_language_overrides_english_wording(self):
+        with patch.object(config, "RESPONSE_LANGUAGE", "auto"):
+            hindi = resolve_language_context("can you explain it again in Hindi")
+            english = resolve_language_context("please explain this in English")
+            mixed = resolve_language_context("explain it in Hinglish")
+            selected = resolve_language_context("explain it in Hindi", selected_language="en")
+        self.assertEqual(hindi.detected_language, "en")
+        self.assertEqual((hindi.target_language, english.target_language,
+                          mixed.target_language, selected.target_language),
+                         ("hi", "en", "hinglish", "en"))
+
     def test_obvious_wrong_language_is_rejected(self):
         self.assertFalse(answer_language_matches("The storage limit is 100 kg.", "hi"))
         self.assertFalse(answer_language_matches(

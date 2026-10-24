@@ -83,10 +83,9 @@ def init_state() -> None:
         st.session_state.top_k = config.QA_TOP_K
     if "temperature" not in st.session_state:
         st.session_state.temperature = DEFAULT_QA_TEMPERATURE
-    if "tts_enabled" not in st.session_state:
-        st.session_state.tts_enabled = config.TTS_ENABLED
-    if "tts_voice_id" not in st.session_state:
-        st.session_state.tts_voice_id = DEFAULT_TTS_VOICE
+    # These settings no longer have UI controls. Clear values left by older sessions.
+    st.session_state.tts_enabled = config.TTS_ENABLED
+    st.session_state.tts_voice_id = DEFAULT_TTS_VOICE
     if "tts_tone" not in st.session_state:
         st.session_state.tts_tone = config.TTS_TONE.strip().lower()
     if "tts_rate" not in st.session_state:
@@ -387,6 +386,9 @@ def render_audio_queue_player(queue_id: str, request_id: str, session_id: str) -
         {manager_script}
         <script>
           const startedEpoch = Date.now();
+          document.addEventListener("texmin:audio-gesture-needed", () => {{
+            document.getElementById("speechStatus").textContent = "Tap Play on the audio player to hear the answer.";
+          }});
           document.addEventListener("texmin:audio-stopped", event => {{
             const reason = event.detail.reason;
             if (reason === "queue_limit") document.getElementById("speechStatus").textContent = "Speech stopped: playback queue full. Text answer remains available.";
@@ -401,7 +403,7 @@ def render_audio_queue_player(queue_id: str, request_id: str, session_id: str) -
           window.setInterval(interrupt, 250);
         </script>
         """,
-        height=48,
+        height=72,
     )
 
 
@@ -745,7 +747,7 @@ def _request_tts(text: str, tts_options: dict, sequence: int | None = None, subm
 
     voice_id = tts_options["voice_id"]
     if not voice_id:
-        return None, DEFAULT_AUDIO_MIME, "Voice is off: add a voice name in the sidebar to hear replies."
+        return None, DEFAULT_AUDIO_MIME, "Voice is unavailable: configure TTS_VOICE in backend/config.py."
 
     payload = {
         "text": text,
@@ -824,6 +826,11 @@ with right_col:
     if st.session_state.voice_error:
         st.error("Microphone transcription failed: " + st.session_state.voice_error["message"]
                  + " Check the device, then start the conversation again.")
+    if config.TTS_ENABLED and DEFAULT_TTS_ENGINE == "goonj":
+        from services.goonj_voice import required_files
+        if any(not path.is_file() for path in required_files()):
+            st.error("Speech unavailable: offline voice files are missing on this server. "
+                     "Ask the administrator to provision Goonj in the model volume.")
     typed_question = st.chat_input("Ask anything...")
     retry_question = None
     if st.session_state.messages and st.session_state.messages[-1].get("incomplete"):

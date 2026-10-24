@@ -23,6 +23,26 @@ class InterfaceTests(unittest.TestCase):
         self.startup_flags.start()
         self.addCleanup(self.startup_flags.stop)
 
+    def test_missing_offline_voice_is_visible_before_asking(self):
+        with tempfile.TemporaryDirectory() as missing_models, patch.multiple(
+            config, TTS_ENABLED=True, TTS_PRELOAD_VOICES=False,
+            AVATAR_ENABLED=False, GOONJ_MODEL_DIR=missing_models,
+        ):
+            app = AppTest.from_file(str(ROOT / "frontend" / "app.py"), default_timeout=20).run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any("offline voice files are missing" in str(item.value)
+                                for item in app.error))
+
+    def test_removed_speech_controls_cannot_leave_old_session_muted(self):
+        with patch.multiple(config, TTS_ENABLED=True, TTS_PRELOAD_VOICES=False, AVATAR_ENABLED=False):
+            app = AppTest.from_file(str(ROOT / "frontend" / "app.py"), default_timeout=10).run()
+            app.session_state.tts_enabled = False
+            app.session_state.tts_voice_id = ""
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertTrue(app.session_state.tts_enabled)
+            self.assertEqual(app.session_state.tts_voice_id, config.TTS_VOICE)
+
     def test_normal_answers_hide_source_metadata_after_stream_and_rerun(self):
         def fake_stream(**kwargs):
             yield {"type": "token", "text": "A supported answer."}

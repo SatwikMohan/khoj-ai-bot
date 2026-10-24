@@ -69,6 +69,13 @@ function createTexminAudioManager(settings) {
     audio.play().catch(error => {
       if (!current()) return;
       console.warn("Audio playback failed", error);
+      if (error && error.name === "NotAllowedError") {
+        // Autoplay can be blocked when speech arrives after the user gesture.
+        // Keep the clip loaded so a tap on the player can start it.
+        mark("awaiting_gesture");
+        emit("gesture-needed", {sequence:item.sequence});
+        return;
+      }
       emit("play-failed", {sequence:item.sequence});
       stop("playback_failed");
     });

@@ -34,21 +34,26 @@ def render_ai_visualization(*, queue_id=None,
 .dot{width:6px;height:6px;border-radius:50%;background:#6cbd83;box-shadow:0 0 11px rgba(102,255,153,.55)}
 .audio{position:absolute;left:6%;right:6%;bottom:14%;width:88%;height:30px;opacity:0;pointer-events:none;transition:opacity .25s}
 .visual[data-has-audio="true"] .audio{opacity:.8;pointer-events:auto}
+.play-answer{position:absolute;left:50%;bottom:22%;transform:translateX(-50%);padding:9px 17px;
+ border:1px solid #79df9a;border-radius:20px;background:#173723;color:#eaffef;cursor:pointer;font:600 13px Inter,Segoe UI,Arial,sans-serif}
+.play-answer[hidden]{display:none}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style><script type="importmap">__IMPORT_MAP__</script></head><body>
 <div class="visual" id="visual" data-state="idle" data-has-audio="false">
  <div id="avatarScene" role="img" aria-label="3D AI avatar"></div>
  <div id="modelStatus" class="model-status">Loading avatar...</div>
  <div class="credit"><a href="https://sketchfab.com/3d-models/invincible-debbie-grayson-ee506a1b4f754694892a33b8d0f65344" target="_blank" rel="noopener">Invincible - Debbie Grayson</a> by <a href="https://sketchfab.com/asideofchidori" target="_blank" rel="noopener">ASideOfChidori</a> &middot; <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a></div>
+ <button id="playAnswer" class="play-answer" type="button" hidden>Play answer</button>
  <audio id="audio" class="audio" controls playsinline preload="auto"></audio>
  <div class="status" role="status" aria-live="polite"><span class="dot"></span><span id="statusText">Ready</span></div></div>
 __AUDIO_MANAGER_SCRIPT__
 <script>
 const config=__SETTINGS__, visual=document.getElementById("visual"),
- audio=document.getElementById("audio"),statusText=document.getElementById("statusText");
+ audio=document.getElementById("audio"),playAnswer=document.getElementById("playAnswer"),
+ statusText=document.getElementById("statusText");
 const activityKey="texmin_ai_activity",speakingKey="texmin_voice_avatar_speaking_at",
  interruptKey="texmin_voice_interrupt_at",startedAt=Date.now();
-let interrupted=false,playing=false,heartbeat=null,lastActivity=0;
+let interrupted=false,playing=false,awaitingGesture=false,heartbeat=null,lastActivity=0;
 let firstPlayback=true;const visualStarted=performance.now();
 function phase(value,label){
  if(playing&&value!=="speaking")return;
@@ -68,7 +73,9 @@ function interrupt(){
  interrupted=true;window.texminAudioManager.stop("interrupted");
  visual.dataset.hasAudio="false";speaking(false);playing=false;phase("interrupted");
 }
+playAnswer.addEventListener("click",()=>audio.play().catch(()=>phase("error","Audio playback failed")));
 audio.addEventListener("play",()=>{
+ awaitingGesture=false;playAnswer.hidden=true;
  if(firstPlayback){
   firstPlayback=false;
   console.info(JSON.stringify({event:"voice_first_playback",request_id:config.requestId,
@@ -79,15 +86,18 @@ audio.addEventListener("play",()=>{
 audio.addEventListener("pause",()=>{if(!audio.ended){playing=false;speaking(false);phase("idle")}});
 audio.addEventListener("ended",()=>{playing=false;speaking(false);lastActivity=0;sync()});
 function sync(){
- interrupt();if(playing||interrupted)return;
+ interrupt();if(playing||awaitingGesture||interrupted)return;
  let value;try{value=JSON.parse(localStorage.getItem(activityKey)||"null")}catch(_){value=null}
  if(value&&value.at!==lastActivity&&Date.now()-value.at<120000){lastActivity=value.at;phase(value.phase,value.label)}
  else if(!value||Date.now()-value.at>=120000)phase("idle");
 }
 window.addEventListener("storage",sync);setInterval(sync,250);
-document.addEventListener("texmin:audio-stopped",event=>{interrupted=true;playing=false;speaking(false);const reason=event.detail.reason;phase(reason==="queue_limit"||reason==="queue_stalled"||reason==="playback_failed"?"error":"interrupted",reason==="queue_limit"?"Speech stopped: playback queue full":reason==="queue_stalled"?"Speech stopped: audio queue stalled":reason==="playback_failed"?"Speech playback failed":"Interrupted")});
+document.addEventListener("texmin:audio-stopped",event=>{awaitingGesture=false;playAnswer.hidden=true;interrupted=true;playing=false;speaking(false);const reason=event.detail.reason;phase(reason==="queue_limit"||reason==="queue_stalled"||reason==="playback_failed"?"error":"interrupted",reason==="queue_limit"?"Speech stopped: playback queue full":reason==="queue_stalled"?"Speech stopped: audio queue stalled":reason==="playback_failed"?"Speech playback failed":"Interrupted")});
 document.addEventListener("texmin:audio-queued",()=>{visual.dataset.hasAudio="true"});
-document.addEventListener("texmin:audio-completed",()=>{playing=false;speaking(false);phase("idle")});
+document.addEventListener("texmin:audio-gesture-needed",()=>{
+ awaitingGesture=true;playAnswer.hidden=false;phase("synthesizing","Tap Play to hear answer");
+});
+document.addEventListener("texmin:audio-completed",()=>{awaitingGesture=false;playAnswer.hidden=true;playing=false;speaking(false);phase("idle")});
 document.addEventListener("texmin:audio-play-failed",()=>{playing=false;speaking(false);phase("idle")});
 if(config.thinking)phase("generating");
 sync();

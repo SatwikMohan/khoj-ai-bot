@@ -76,11 +76,15 @@ docker compose up -d --no-deps --force-recreate app
 docker compose logs --tail=100 -f app
 ```
 
-For a DGX with no network access, copy the provisioned `backend/models/goonj` directory to `voice-stage/goonj` beside `docker-compose.yml`, then import it into the persistent model volume:
+If app logs show `tts_chunk_failed` with `Missing offline Goonj files: /models/goonj/...`, the voice files are absent from the DGX model volume. Rebuilding the image alone cannot add them because `backend/models` is excluded from the image. Provision them in the volume using one of the paths below, then restart the app.
+
+For a DGX with no network access, copy the provisioned Goonj directory from the development machine to the DGX. `backend/models/goonj` on the host is **not** `/models/goonj` in the container: `/models` is a named Docker volume shared by `backend-model-init` and `app`. Set `VOICE_SRC` to the actual absolute host directory containing `config.json`, `kokoro_hindi_final.pth`, and `voices/en_priya.pt` (for example, `$PWD/backend/models/goonj` or `$PWD/voice-stage/goonj`). These checks fail before copying if the bind source is empty or points to the wrong directory:
 
 ```bash
-docker compose run --rm --no-deps -v "$PWD/voice-stage/goonj:/voice-stage:ro" backend-model-init sh -c 'mkdir -p /models/goonj && cp -a /voice-stage/. /models/goonj/'
-docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --offline
+VOICE_SRC="$PWD/backend/models/goonj"  # Change this if the files are elsewhere on the DGX.
+test -s "$VOICE_SRC/config.json" && test -s "$VOICE_SRC/kokoro_hindi_final.pth" && test -s "$VOICE_SRC/voices/en_priya.pt"
+docker compose run --rm --no-deps -v "$VOICE_SRC:/voice-stage:ro" backend-model-init sh -ec 'test -s /voice-stage/config.json; test -s /voice-stage/kokoro_hindi_final.pth; test -s /voice-stage/voices/en_priya.pt; mkdir -p /models/goonj; cp -a /voice-stage/. /models/goonj/'
+docker compose run --rm --no-deps backend-model-init python scripts/provision_models.py --only-tts --engine goonj --offline
 docker compose up -d --no-deps --force-recreate app
 ```
 

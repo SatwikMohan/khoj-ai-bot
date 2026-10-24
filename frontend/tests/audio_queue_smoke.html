@@ -32,7 +32,7 @@ const third = createTexminAudioManager({sessionId:"smoke",requestId:"third",queu
 send("third","q3",0,"E");
 setTimeout(() => {
   const failed = stopped.includes("playback_failed");
-  createTexminAudioManager({sessionId:"smoke",requestId:"fourth",queueId:"q4",maxQueuedSegments:3});
+  const fourth = createTexminAudioManager({sessionId:"smoke",requestId:"fourth",queueId:"q4",maxQueuedSegments:3});
   window.dispatchEvent(new MessageEvent("message", {data:{
     type:"texmin:avatar-queue",requestId:"fourth",queueId:"q4",final:true,finalSequence:0
   }}));
@@ -40,8 +40,22 @@ setTimeout(() => {
   second.stop("replaced");
   const state = JSON.parse(localStorage.getItem("texmin_voice_audio_state:smoke") || "null");
   const completed = state?.requestId === "fourth" && state.state === "completed";
-  const ok = ordered && overflow && failed && completed;
-  result.textContent = ok ? "PASS" : JSON.stringify({ordered,overflow,failed,completed,plays,stopped});
-  result.dataset.pass = String(ok);
+  third.stop("replaced");
+  fourth.stop("replaced");
+  let gestureNeeded = false;
+  document.addEventListener("texmin:audio-gesture-needed", () => gestureNeeded = true, {once:true});
+  audio.play = () => Promise.reject(Object.assign(new Error("autoplay blocked"), {name:"NotAllowedError"}));
+  createTexminAudioManager({sessionId:"smoke",requestId:"fifth",queueId:"q5",maxQueuedSegments:3});
+  send("fifth","q5",0,"F");
+  setTimeout(() => {
+    const notStopped = gestureNeeded && audio.hasAttribute("src") &&
+      JSON.parse(localStorage.getItem("texmin_voice_audio_state:smoke") || "null")?.state === "awaiting_gesture";
+    audio.play = () => { audio.dispatchEvent(new Event("play")); return Promise.resolve(); };
+    audio.play();
+    const resumed = JSON.parse(localStorage.getItem("texmin_voice_audio_state:smoke") || "null")?.state === "playing";
+    const ok = ordered && overflow && failed && completed && notStopped && resumed;
+    result.textContent = ok ? "PASS" : JSON.stringify({ordered,overflow,failed,completed,notStopped,resumed,plays,stopped});
+    result.dataset.pass = String(ok);
+  }, 20);
 }, 100);
 </script>

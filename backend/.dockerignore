@@ -8,3 +8,4 @@ __pycache__/
 raw_data_files/
 vector_db/
 models/
+evals/
