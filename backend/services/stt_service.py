@@ -10,6 +10,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SUPPORTED_SPEECH_LANGUAGES = frozenset({"en", "hi"})
+UNSUPPORTED_SCRIPT = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u0400-\u04ff\u0370-\u03ff\u4e00-\u9fff]")
 TRANSCRIBE_SEMAPHORE = threading.BoundedSemaphore(
     max(1, int(config.STT_MAX_CONCURRENT))
 )
@@ -17,6 +19,10 @@ TRANSCRIBE_SEMAPHORE = threading.BoundedSemaphore(
 
 class STTEngineError(RuntimeError):
     pass
+
+
+class STTRecoverableError(STTEngineError):
+    """A clip with no usable question; continuous listening can resume."""
 
 
 def _load_environment() -> None:
@@ -142,6 +148,8 @@ def transcribe_audio(
         raise STTEngineError("No audio was received.")
     if len(audio) > max_bytes:
         raise STTEngineError(f"Audio exceeds the {max_bytes // (1024 * 1024)} MB limit.")
+    if language and language.lower() not in SUPPORTED_SPEECH_LANGUAGES:
+        raise STTEngineError("The microphone supports English, Hindi and Hinglish speech.")
 
     safe_suffix = suffix if suffix in {".webm", ".wav", ".mp3", ".ogg", ".m4a"} else ".webm"
     path = ""
@@ -165,6 +173,14 @@ def transcribe_audio(
                 text, detected_language, language_probability, duration = _transcribe_transformers(
                     model_state, samples, language, cancelled
                 )
+                if not language and (detected_language not in SUPPORTED_SPEECH_LANGUAGES
+                                     or UNSUPPORTED_SCRIPT.search(text)):
+                    recovered_language, language_probability = _preferred_supported_language(
+                        model_state, samples
+                    )
+                    text, detected_language, _, duration = _transcribe_transformers(
+                        model_state, samples, recovered_language, cancelled
+                    )
             else:
                 segments, info = model_state["model"].transcribe(
                     samples,
@@ -200,8 +216,12 @@ def transcribe_audio(
 
     if cancelled is not None and cancelled.is_set():
         raise STTEngineError("This voice interaction was replaced.")
-    if not text:
-        raise STTEngineError("Speech was not detected in the recording.")
+    if not text or not re.search(r"[A-Za-z\u0900-\u097f]", text):
+        raise STTRecoverableError("Speech was not detected in the recording.")
+    if detected_language not in SUPPORTED_SPEECH_LANGUAGES or UNSUPPORTED_SCRIPT.search(text):
+        raise STTRecoverableError(
+            "The microphone could not recognize English, Hindi or Hinglish. Please speak again."
+        )
 
     return {
         "text": text,
@@ -232,7 +252,7 @@ def _decode_audio(path: str):
         raise STTEngineError(f"Could not decode the microphone recording: {exc}") from exc
 
     if not samples:
-        raise STTEngineError("Speech was not detected in the recording.")
+        raise STTRecoverableError("Speech was not detected in the recording.")
     audio = np.concatenate(samples).astype(np.float32) / 32768.0
     max_seconds = float(config.WHISPER_MAX_AUDIO_SECONDS)
     if len(audio) > int(16000 * max_seconds):
@@ -250,14 +270,14 @@ def _validate_speech_signal(audio, np_module=None) -> None:
 
     minimum_duration = float(config.STT_MIN_SPEECH_SECONDS)
     if len(audio) < int(16000 * minimum_duration):
-        raise STTEngineError("Speech was not detected in the recording.")
+        raise STTRecoverableError("Speech was not detected in the recording.")
 
     peak = float(np_module.max(np_module.abs(audio)))
     rms = float(np_module.sqrt(np_module.mean(np_module.square(audio))))
     if peak < float(config.STT_MIN_AUDIO_PEAK) or rms < float(
         config.STT_MIN_AUDIO_RMS
     ):
-        raise STTEngineError("Speech was not detected in the recording.")
+        raise STTRecoverableError("Speech was not detected in the recording.")
 
     frame_size = 320
     usable = len(audio) - (len(audio) % frame_size)
@@ -274,8 +294,49 @@ def _validate_speech_signal(audio, np_module=None) -> None:
     if snr_db < minimum_snr_db or active_ratio < float(
         config.STT_MIN_ACTIVE_FRAME_RATIO
     ):
-        raise STTEngineError("Only background noise was detected. Please speak closer to the microphone.")
+        raise STTRecoverableError("Only background noise was detected. Please speak closer to the microphone.")
+    active_frames = frames[frame_rms >= active_threshold]
+    if len(active_frames) * frame_size / 16000 < float(config.STT_MIN_VOICED_SECONDS):
+        raise STTRecoverableError("Only a brief sound was detected. Please speak again.")
+    # Broadband bumps and rustling can have high energy without being speech.
+    window = np_module.hanning(frame_size)
+    power = np_module.abs(np_module.fft.rfft(active_frames * window, axis=1)) ** 2
+    speech_band = power[:, 3:70] + 1e-12  # 150-3450 Hz at 16 kHz.
+    flatness = np_module.exp(np_module.mean(np_module.log(speech_band), axis=1)) / (
+        np_module.mean(speech_band, axis=1)
+    )
+    if float(np_module.median(flatness)) > float(config.STT_MAX_SPECTRAL_FLATNESS):
+        raise STTRecoverableError("Only background noise was detected. Please speak closer to the microphone.")
 
+
+def _preferred_supported_language(model_state: dict, audio) -> tuple[str, float]:
+    """Use Whisper language logits to recover a dialect misheard as another language."""
+    import torch
+
+    model = model_state["model"]
+    config_map = getattr(model.generation_config, "lang_to_id", {}) or {}
+    allowed = [(code, config_map.get(f"<|{code}|>")) for code in ("en", "hi")]
+    if any(token_id is None for _, token_id in allowed):
+        raise STTEngineError("Microphone language recovery is unavailable.")
+    features = model_state["processor"](
+        audio, sampling_rate=16000, return_tensors="pt", return_attention_mask=True
+    ).input_features.to(device=model_state["device"], dtype=model_state["dtype"])
+    start_id = model.generation_config.decoder_start_token_id
+    start = torch.tensor([[start_id]], device=model_state["device"])
+    with torch.inference_mode():
+        logits = model(input_features=features, decoder_input_ids=start,
+                       use_cache=False).logits[0, -1]
+    ids = list(config_map.values())
+    probabilities = torch.softmax(logits[ids].float(), dim=0)
+    scores = {code: float(probabilities[ids.index(token_id)].item())
+              for code, token_id in allowed}
+    chosen = max(scores, key=scores.get)
+    probability = scores[chosen]
+    if probability < float(config.WHISPER_LANGUAGE_RETRY_MIN_PROB):
+        raise STTRecoverableError(
+            "The microphone could not recognize English, Hindi or Hinglish. Please speak again."
+        )
+    return chosen, probability
 
 def _transcribe_transformers(model_state: dict, audio, language: str | None, cancelled: threading.Event | None = None):
     import torch

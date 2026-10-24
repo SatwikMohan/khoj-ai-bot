@@ -3,6 +3,7 @@ import unittest
 import io
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +28,10 @@ from services.qa_service import (
     _retrieve_context,
     _topic_opener_response,
 )
-from services.stt_service import STTEngineError, _validate_speech_signal, transcribe_audio
+from services.stt_service import (
+    STTEngineError, STTRecoverableError, _preferred_supported_language,
+    _validate_speech_signal, transcribe_audio,
+)
 from services.tts_service import TTSEngineError, _validate_audio, tts_runtime_status
 
 
@@ -85,6 +89,12 @@ class RetrievalQueryTests(unittest.TestCase):
         history = [{"role": "assistant", "content": "The rule was amended in 2025."}]
         result = _history_aware_query("When did it apply?", history)
         self.assertIn("Recent conversation", result)
+
+    def test_hinglish_pronoun_followup_keeps_previous_topic(self):
+        history = [{"role": "user", "content": "DGMS ke bare mein jankari de"}]
+        result = _history_aware_query("isko detail me samjhao", history)
+        self.assertIn("DGMS", result)
+        self.assertIn("isko detail me samjhao", result)
 
     def test_latest_version_followup_keeps_previous_entity(self):
         history = [{"role": "user", "content": "What is the structure of CMR?"}]
@@ -244,6 +254,88 @@ class SpeechReliabilityTests(unittest.TestCase):
     def test_empty_microphone_recording_is_rejected_before_model_load(self):
         with self.assertRaises(STTEngineError):
             transcribe_audio(b"")
+
+    def test_short_noise_burst_is_not_sent_to_whisper(self):
+        rng = np.random.default_rng(11)
+        audio = rng.normal(0.0, 0.002, 16000).astype(np.float32)
+        audio[5000:6600] += rng.normal(0.0, 0.04, 1600)
+        with self.assertRaises(STTEngineError):
+            _validate_speech_signal(audio)
+
+    def test_sustained_broadband_noise_is_not_sent_to_whisper(self):
+        rng = np.random.default_rng(13)
+        audio = rng.normal(0.0, 0.002, 16000).astype(np.float32)
+        audio[4800:11200] += rng.normal(0.0, 0.04, 6400)
+        with self.assertRaises(STTEngineError):
+            _validate_speech_signal(audio)
+
+    def test_modulated_voiced_signal_is_allowed(self):
+        rng = np.random.default_rng(17)
+        audio = rng.normal(0.0, 0.002, 16000).astype(np.float32)
+        timeline = np.arange(6400) / 16000.0
+        audio[4800:11200] += (
+            0.04 * np.sin(2 * np.pi * 180 * timeline)
+            + 0.016 * np.sin(2 * np.pi * 360 * timeline)
+        ).astype(np.float32)
+        _validate_speech_signal(audio)
+
+    def test_arabic_auto_detection_retries_supported_language(self):
+        with (
+            patch("services.stt_service._decode_audio", return_value=np.zeros(16000)),
+            patch("services.stt_service._model", return_value={"engine": "transformers"}),
+            patch("services.stt_service._preferred_supported_language", return_value=("hi", 0.18)) as preference,
+            patch("services.stt_service._transcribe_transformers", side_effect=[
+                ("?????", "ar", 0.0, 1.0),
+                ("???? DGMS ?? ???? ??? ????", "hi", 0.0, 1.0),
+            ]) as transcribe,
+        ):
+            result = transcribe_audio(b"recording")
+        self.assertEqual(result["language"], "hi")
+        self.assertIn("DGMS", result["text"])
+        preference.assert_called_once()
+        self.assertEqual(transcribe.call_args_list[1].args[2], "hi")
+
+    def test_language_recovery_uses_english_hindi_logits(self):
+        import torch
+
+        class Model:
+            generation_config = SimpleNamespace(
+                lang_to_id={"<|en|>": 1, "<|hi|>": 2, "<|ar|>": 3},
+                decoder_start_token_id=0,
+            )
+
+            def __call__(self, **kwargs):
+                self.last_kwargs = kwargs
+                logits = torch.tensor([[[0.0, 2.0, 1.0, 3.0]]])
+                return SimpleNamespace(logits=logits)
+
+        model = Model()
+        processor = lambda *_args, **_kwargs: SimpleNamespace(
+            input_features=torch.zeros(1, 80, 3000)
+        )
+        state = {
+            "model": model, "processor": processor,
+            "device": "cpu", "dtype": torch.float32,
+        }
+        language, probability = _preferred_supported_language(
+            state, np.zeros(16000, dtype=np.float32)
+        )
+        self.assertEqual(language, "en")
+        self.assertGreater(probability, 0.02)
+        self.assertIn("decoder_input_ids", model.last_kwargs)
+
+    def test_unsupported_transcript_never_reaches_question_answering(self):
+        with (
+            patch("services.stt_service._decode_audio", return_value=np.zeros(16000)),
+            patch("services.stt_service._model", return_value={"engine": "transformers"}),
+            patch("services.stt_service._preferred_supported_language", return_value=("en", 0.14)),
+            patch("services.stt_service._transcribe_transformers", side_effect=[
+                ("?????", "ar", 0.0, 1.0),
+                ("?????", "en", 0.0, 1.0),
+            ]),
+        ):
+            with self.assertRaises(STTRecoverableError):
+                transcribe_audio(b"recording")
 
     def test_stationary_background_noise_is_rejected(self):
         rng = np.random.default_rng(7)

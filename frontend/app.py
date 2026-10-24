@@ -26,7 +26,7 @@ from services.speech_chunker import IncrementalSpeechSegments
 from services.request_lifecycle import registry
 from helpers.request_models import ChatMessage, TTSRequest
 from services.qa_service import answer_question, stream_answer_events, warm_up_qa_engine
-from services.stt_service import warm_up_stt
+from services.stt_service import STTRecoverableError, warm_up_stt
 from services.tts_service import synthesize_speech, warm_up_tts
 from services.voice_interaction import begin_voice_interaction, cancel_interaction, transcribe_interaction
 from visualization import render_ai_visualization
@@ -157,6 +157,7 @@ def render_voice_query_component() -> dict | None:
         accepted_request_id=st.session_state.accepted_voice_request_id,
         voice_error_request_id=(st.session_state.voice_error or {}).get("request_id", ""),
         voice_error=(st.session_state.voice_error or {}).get("message", ""),
+        voice_retry=(st.session_state.voice_error or {}).get("retry", False),
     )
     if not isinstance(value, dict):
         return None
@@ -213,7 +214,10 @@ def render_voice_query_component() -> dict | None:
     except Exception as exc:
         cancel_interaction(session_id, request_id)
         st.session_state.accepted_voice_request_id = ""
-        st.session_state.voice_error = {"request_id": request_id, "message": str(exc)}
+        st.session_state.voice_error = {
+            "request_id": request_id, "message": str(exc),
+            "retry": isinstance(exc, STTRecoverableError),
+        }
         st.rerun()  # Deliver the error to the component; no answer or audio is active.
     except BaseException:
         cancel_interaction(session_id, request_id)
@@ -823,7 +827,7 @@ with right_col:
     activity_signal = st.empty()
     activity_line.markdown('<div class="activity-line">Ready</div>', unsafe_allow_html=True)
     voice_component_query = render_voice_query_component()
-    if st.session_state.voice_error:
+    if st.session_state.voice_error and not st.session_state.voice_error.get("retry"):
         st.error("Microphone transcription failed: " + st.session_state.voice_error["message"]
                  + " Check the device, then start the conversation again.")
     if config.TTS_ENABLED and DEFAULT_TTS_ENGINE == "goonj":

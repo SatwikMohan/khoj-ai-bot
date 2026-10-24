@@ -723,6 +723,15 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         "uska",
         "iske",
         "uske",
+        "isko",
+        "iska",
+        "iski",
+        "isme",
+        "usko",
+        "uski",
+        "usme",
+        "dobara",
+        "again",
     }
     words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
     explicit_follow_up_phrases = (
@@ -735,6 +744,9 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         "what about ",
         "how about ",
         "and what about ",
+        "aur batao",
+        "aur samjhao",
+        "thoda aur",
     )
     is_follow_up = len(words) <= 12 and (
         bool(words & follow_up_markers)

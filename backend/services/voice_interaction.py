@@ -4,7 +4,7 @@ import config
 import json
 import time
 from services.request_lifecycle import registry
-from services.stt_service import STTEngineError, transcribe_audio
+from services.stt_service import STTEngineError, STTRecoverableError, transcribe_audio
 
 
 SUFFIXES = {
@@ -46,7 +46,8 @@ def transcribe_interaction(
         result = transcribe_audio(audio, suffix, language, request.cancelled)
     except STTEngineError as exc:
         detail = str(exc).lower()
-        stage = ("audio_decode" if "decode" in detail or "audio was received" in detail
+        stage = ("signal_validation" if isinstance(exc, STTRecoverableError)
+                 else "audio_decode" if "decode" in detail or "audio was received" in detail
                  else "model_load" if "load offline" in detail or "not installed" in detail
                  else "signal_validation" if "speech was not detected" in detail or "background noise" in detail
                  else "inference")

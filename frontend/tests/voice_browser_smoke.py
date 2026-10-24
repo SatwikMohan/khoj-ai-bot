@@ -144,7 +144,7 @@ def main():
     browser = EDGE if EDGE.exists() else shutil.which("msedge")
     if not browser:
         raise SystemExit("Microsoft Edge is unavailable")
-    for mode in ("typed_interrupt", "stalled_turn", "silent_restart"):
+    for mode in ("typed_interrupt", "stalled_turn", "silent_restart", "recoverable_error"):
         mocks = MOCKS
         if mode == "silent_restart":
             mocks = mocks.replace("if(begins<=3)", "if(false)")
@@ -152,6 +152,18 @@ def main():
                                   "speech_confirm_ms:100,silence_ms:300,no_speech_timeout_seconds:0.5,")
             mocks = mocks.replace("begins===4&&audios===3&&completeHeaders",
                                   "begins===1&&audios===0&&recorderStarts>=3")
+        if mode == "recoverable_error":
+            original = "setTimeout(()=>finishTurn(id,audios<3),70);"
+            retry = """if(audios===1) setTimeout(()=>window.postMessage({
+      type:"streamlit:render",args:{
+        session_id:"smoke-session",accepted_request_id:"",
+        voice_error_request_id:id,voice_retry:true,
+        voice_error:"Only background noise was detected."
+      }
+    },"*"),70);
+    else setTimeout(()=>finishTurn(id,false),70);"""
+            assert original in mocks
+            mocks = mocks.replace(original, retry)
         if mode == "stalled_turn":
             start = mocks.index("setTimeout(()=>{\n  const at=Date.now();")
             end = mocks.index("setTimeout(()=>{\n  const text=", start)

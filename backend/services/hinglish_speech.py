@@ -1,4 +1,4 @@
-"""Speech-only script conversion through the configured offline Ollama model."""
+"""Speech-only conversion with a local fast path and offline model for unknown words."""
 import json
 import re
 import time
@@ -7,9 +7,46 @@ import urllib.request
 import config
 from services.model_config import thinking_setting
 from services.language_service import ROMAN_HINDI_STRONG
+from services.hinglish_lexicon import HINDI_WORDS, ENGLISH_WORDS, AMBIGUOUS_HINDI_WORDS
 
 WORDS = re.compile(r"[A-Za-z]+")
 DEVANAGARI_WORD = re.compile(r"[\u0900-\u0963\u0971-\u097f]+(?:[\u200c\u200d][\u0900-\u0963\u0971-\u097f]+)*")
+PROTECTED_UNITS = frozenset({
+    "kg", "mg", "g", "km", "cm", "mm", "m", "s", "ms", "hz", "khz",
+    "mhz", "bar", "psi", "pa", "kpa", "mpa", "kw", "mw", "v", "kv",
+    "rpm", "ppm",
+})
+
+
+def _fast_devanagari_speech(text: str, matches: list[re.Match]) -> str | None:
+    """Convert a completely recognized segment without another model call."""
+    parts, end, converted_hindi = [], 0, 0
+    for match in matches:
+        word = match.group()
+        lower = word.lower()
+        protected = (
+            lower in PROTECTED_UNITS
+            or (len(word) > 1 and word.isupper())
+            or (match.start() > 0 and text[match.start() - 1].isdigit())
+            or (match.end() < len(text) and text[match.end()].isdigit())
+        )
+        if protected:
+            spoken = word
+        elif lower in AMBIGUOUS_HINDI_WORDS:
+            return None
+        elif lower in HINDI_WORDS:
+            spoken = HINDI_WORDS[lower]
+            converted_hindi += 1
+        elif lower in ENGLISH_WORDS or word.istitle():
+            spoken = word
+        else:
+            return None
+        parts.extend((text[end:match.start()], spoken))
+        end = match.end()
+    if not converted_hindi:
+        return None
+    parts.append(text[end:])
+    return "".join(parts)
 
 
 def devanagari_speech(text: str, _attempt: int = 0, _retry_reason: str = "") -> str:
@@ -21,11 +58,17 @@ def devanagari_speech(text: str, _attempt: int = 0, _retry_reason: str = "") -> 
         return text
     if len(text) > 2000:
         raise ValueError("Speech conversion segment is too long.")
+    if _attempt == 0:
+        fast = _fast_devanagari_speech(text, matches)
+        if fast is not None:
+            print(json.dumps({"event": "hinglish_speech_conversion_fast",
+                              "text_chars": len(text)}), flush=True)
+            return fast
     words = [match.group() for match in matches]
     # Acronyms and alphanumeric equipment IDs must not be transliterated.
     protected = {
         i for i, match in enumerate(matches)
-        if match.group().lower() in {"kg", "mg", "g", "km", "cm", "mm", "m", "s", "ms", "hz", "khz", "mhz", "bar", "psi", "pa", "kpa", "mpa", "kw", "mw", "v", "kv", "rpm", "ppm"}
+        if match.group().lower() in PROTECTED_UNITS
         or (len(match.group()) > 1 and match.group().isupper())
         or (match.start() > 0 and text[match.start() - 1].isdigit())
         or (match.end() < len(text) and text[match.end()].isdigit())
