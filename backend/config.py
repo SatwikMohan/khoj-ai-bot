@@ -41,8 +41,10 @@ QA_MAX_ACTIVE_WORKERS = 4
 QA_WARMUP_ON_STARTUP = True
 QA_TEMPERATURE = 0.3
 QA_TOP_K = 5
-QA_ANSWER_CONTEXT_DOCS = 2  # Focus routine answers; version comparisons keep all retrieved passages.
-QA_DIAGNOSTICS_ENABLED = False  # Includes question, evidence and final prompt in server logs.
+QA_ANSWER_CONTEXT_DOCS = 3  # Give grounded answers room for several supporting passages.
+QA_DIAGNOSTICS_ENABLED = False  # Logs system template, hashes and passage IDs; never full private text.
+QA_EVIDENCE_GATE_ENABLED = True  # Check requested facts before generation.
+QA_EVIDENCE_GATE_TIMEOUT_SECONDS = 8  # Reserved for a future bounded semantic verifier.
 # None selects model-specific embedding prefixes automatically; "" disables them.
 EMBED_QUERY_PREFIX = None
 EMBED_DOCUMENT_PREFIX = None
@@ -255,6 +257,8 @@ def validate_config() -> None:
            LLM_TOTAL_GENERATION_TIMEOUT_SECONDS, QA_WORKER_QUEUE_TIMEOUT_SECONDS,
            QA_MAX_ACTIVE_WORKERS) <= 0:
         raise ValueError("QA stage timeouts and worker capacity must be positive.")
+    if QA_EVIDENCE_GATE_TIMEOUT_SECONDS <= 0:
+        raise ValueError("QA_EVIDENCE_GATE_TIMEOUT_SECONDS must be positive.")
     if TTS_TRANSLITERATION_TIMEOUT_SECONDS <= 0:
         raise ValueError("TTS_TRANSLITERATION_TIMEOUT_SECONDS must be positive.")
     if PIPER_DEVICE not in {"cpu", "cuda"}:

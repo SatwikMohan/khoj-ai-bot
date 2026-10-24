@@ -1,0 +1,979 @@
+{
+  "summary": {
+    "validation": {
+      "cases": 7,
+      "recall_at_5": 1.0,
+      "precision_at_5": 0.2667,
+      "mrr": 1.0,
+      "ndcg_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "precision_at_10": 0.3667,
+      "ndcg_at_10": 1.0,
+      "decision_accuracy": 1.0,
+      "unanswerable_false_admission_rate": 0.0,
+      "latency_ms_p50": 215.3
+    },
+    "heldout": {
+      "cases": 8,
+      "recall_at_5": 0.8333,
+      "precision_at_5": 0.3,
+      "mrr": 0.75,
+      "ndcg_at_5": 0.7718,
+      "recall_at_10": 0.8333,
+      "precision_at_10": 0.3333,
+      "ndcg_at_10": 0.7718,
+      "decision_accuracy": 0.875,
+      "unanswerable_false_admission_rate": 0.0,
+      "latency_ms_p50": 111.6
+    },
+    "all": {
+      "cases": 15,
+      "recall_at_5": 0.8889,
+      "precision_at_5": 0.2889,
+      "mrr": 0.8333,
+      "ndcg_at_5": 0.8479,
+      "recall_at_10": 0.8889,
+      "precision_at_10": 0.3444,
+      "ndcg_at_10": 0.8479,
+      "decision_accuracy": 0.9333,
+      "unanswerable_false_admission_rate": 0.0,
+      "latency_ms_p50": 141.4
+    }
+  },
+  "cases": [
+    {
+      "id": "bwe_en",
+      "split": "validation",
+      "category": "explicit",
+      "question": "Which continuous mining machine uses a rotating wheel with buckets to excavate material?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "BWE.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.8023,
+          "hybrid_score": 0.032787,
+          "content_sha256": "c22af3abe285"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.7484,
+          "hybrid_score": 0.02971,
+          "content_sha256": "b76ea105ed96"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.692,
+          "hybrid_score": 0.028571,
+          "content_sha256": "2194176cd161"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6777,
+          "hybrid_score": 0.027032,
+          "content_sha256": "7d11cdd26d80"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.7514,
+          "hybrid_score": 0.015873,
+          "content_sha256": "c17c7f96b3f8"
+        },
+        {
+          "source": "raw_data_files/Q&As/Longwall.docx",
+          "chunk_id": "9cbf21aa4f15c09a93e1c1e17f4d3e4727dda565",
+          "dense_score": null,
+          "hybrid_score": 0.011236,
+          "content_sha256": "32338b88d222"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.6893,
+          "hybrid_score": 0.030018,
+          "content_sha256": "e4892276014b"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.6909,
+          "hybrid_score": 0.029958,
+          "content_sha256": "9234355b921a"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.7343,
+          "hybrid_score": 0.029274,
+          "content_sha256": "bc4216811592"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.684,
+          "hybrid_score": 0.029139,
+          "content_sha256": "76239ab6c930"
+        }
+      ],
+      "retrieval_ms": 4056.5
+    },
+    {
+      "id": "dragline_en",
+      "split": "validation",
+      "category": "paraphrase",
+      "question": "What is a dragline excavator used for in an open-cast mine?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "Dragline.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.8059,
+          "hybrid_score": 0.032787,
+          "content_sha256": "7d11cdd26d80"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.7207,
+          "hybrid_score": 0.032002,
+          "content_sha256": "b1388909a762"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.7088,
+          "hybrid_score": 0.02967,
+          "content_sha256": "2194176cd161"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "",
+          "dense_score": 0.6266,
+          "hybrid_score": 0.024706,
+          "content_sha256": "bc961987ae63"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.6516,
+          "hybrid_score": 0.012346,
+          "content_sha256": "a7a2207b5709"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.715,
+          "hybrid_score": 0.030118,
+          "content_sha256": "3740a1975fff"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.7044,
+          "hybrid_score": 0.029631,
+          "content_sha256": "d77ffb0d9e01"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.7078,
+          "hybrid_score": 0.028139,
+          "content_sha256": "c0494f3502eb"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.6563,
+          "hybrid_score": 0.028043,
+          "content_sha256": "c0f86394d8c0"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.7373,
+          "hybrid_score": 0.027623,
+          "content_sha256": "4cd5849546b0"
+        }
+      ],
+      "retrieval_ms": 402.6
+    },
+    {
+      "id": "critical_minerals_en",
+      "split": "validation",
+      "category": "exact_name_date",
+      "question": "Which ministry listed thirty critical minerals for India in December 2023?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "19_1751370840.pdf"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.8308,
+          "hybrid_score": 0.032787,
+          "content_sha256": "8278e3522b41"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.8056,
+          "hybrid_score": 0.032258,
+          "content_sha256": "4f797952ec74"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "702d5a4caf2fccd88280ad6964365f0cfb0913f0",
+          "dense_score": null,
+          "hybrid_score": 0.012987,
+          "content_sha256": "4957f4b79fee"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7893,
+          "hybrid_score": 0.030331,
+          "content_sha256": "50c94f93bb5b"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7803,
+          "hybrid_score": 0.02901,
+          "content_sha256": "2f71a6605449"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "42d0ddf6d2d0026bba6615127d162d91068dfc08",
+          "dense_score": null,
+          "hybrid_score": 0.0125,
+          "content_sha256": "b548f0612520"
+        }
+      ],
+      "retrieval_ms": 215.3
+    },
+    {
+      "id": "underground_en",
+      "split": "heldout",
+      "category": "multi_fact",
+      "question": "What is a continuous miner and what is its main purpose underground?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "UG Mines .docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.8653,
+          "hybrid_score": 0.032787,
+          "content_sha256": "c17c7f96b3f8"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.8261,
+          "hybrid_score": 0.032258,
+          "content_sha256": "b76ea105ed96"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.7002,
+          "hybrid_score": 0.027052,
+          "content_sha256": "95079d04b349"
+        },
+        {
+          "source": "raw_data_files/Q&As/Longwall.docx",
+          "chunk_id": "",
+          "dense_score": 0.6593,
+          "hybrid_score": 0.025353,
+          "content_sha256": "49d25ffde459"
+        },
+        {
+          "source": "raw_data_files/Q&As/Mining Geology.docx",
+          "chunk_id": "",
+          "dense_score": 0.7066,
+          "hybrid_score": 0.014925,
+          "content_sha256": "c9632fd2ef31"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "98ce3d0457913a086d05a47c03ebb747201dfbd4",
+          "dense_score": null,
+          "hybrid_score": 0.014286,
+          "content_sha256": "83e15b8bca81"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "",
+          "dense_score": 0.6769,
+          "hybrid_score": 0.013333,
+          "content_sha256": "001706912fb2"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "15925a578fe9f76ee6eda65c4b0353f05798a819",
+          "dense_score": null,
+          "hybrid_score": 0.012195,
+          "content_sha256": "ffa4b713ab97"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.7199,
+          "hybrid_score": 0.03031,
+          "content_sha256": "35c6e50c085d"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.7217,
+          "hybrid_score": 0.030118,
+          "content_sha256": "79db9b18ae29"
+        }
+      ],
+      "retrieval_ms": 149.1
+    },
+    {
+      "id": "bwe_hinglish",
+      "split": "heldout",
+      "category": "hinglish",
+      "question": "BWE ka main fayda kya hai?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "BWE.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "f5278342c6b1cac295ae3fafac3e82165d8500c1",
+          "dense_score": null,
+          "hybrid_score": 0.016393,
+          "content_sha256": "c22af3abe285"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "e198a13c0f840dc61091dea1733a79a22fed4be9",
+          "dense_score": null,
+          "hybrid_score": 0.016129,
+          "content_sha256": "9234355b921a"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "250dbe3faf5111f806834d272e350f75144fb483",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "0dee5191edb4"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "9b293953432546f30d7d567bd4d649395045d3b2",
+          "dense_score": null,
+          "hybrid_score": 0.015625,
+          "content_sha256": "95079d04b349"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "b38f67ecc33c61c1cebba4b52db57ac4a1789f5e",
+          "dense_score": null,
+          "hybrid_score": 0.015385,
+          "content_sha256": "1a6a1ac113db"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "4d62662323f883eff8e8400873957d371add7204",
+          "dense_score": null,
+          "hybrid_score": 0.015152,
+          "content_sha256": "c2c88f105662"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "e3789f297587cb9970dd24b743892eadb3fcd591",
+          "dense_score": null,
+          "hybrid_score": 0.014925,
+          "content_sha256": "bfed3df6c7b1"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "d7cf76ecb6d05d599fc61b72998829820df9dcc5",
+          "dense_score": null,
+          "hybrid_score": 0.014706,
+          "content_sha256": "da2c1220d935"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "b48ca53a898080cb8311d32eac2d6984c1f943f4",
+          "dense_score": null,
+          "hybrid_score": 0.014493,
+          "content_sha256": "212ddd69eb65"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "14f36496187f16af9be4344bc0f4c4d7d76e3181",
+          "dense_score": null,
+          "hybrid_score": 0.014286,
+          "content_sha256": "4103d8604da9"
+        }
+      ],
+      "retrieval_ms": 141.4
+    },
+    {
+      "id": "safety_hi_cross",
+      "split": "heldout",
+      "category": "cross_language",
+      "question": "खनन में भारी मशीनों और विस्फोटकों के आसपास सुरक्षा क्यों महत्वपूर्ण है?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "requested_fact_not_supported",
+      "expected_sources": [
+        "Safety Modules.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5649,
+          "hybrid_score": 0.016393,
+          "content_sha256": "1bf13da366a0"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5554,
+          "hybrid_score": 0.015625,
+          "content_sha256": "a99ee94af370"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5301,
+          "hybrid_score": 0.011364,
+          "content_sha256": "d50f1e4cb4ec"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5613,
+          "hybrid_score": 0.016129,
+          "content_sha256": "279b38900363"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5602,
+          "hybrid_score": 0.015873,
+          "content_sha256": "2af6d97ee8f2"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5546,
+          "hybrid_score": 0.015385,
+          "content_sha256": "472b5c03498c"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5543,
+          "hybrid_score": 0.015152,
+          "content_sha256": "14ce22e5c923"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5469,
+          "hybrid_score": 0.014925,
+          "content_sha256": "a529996e75f0"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5464,
+          "hybrid_score": 0.014706,
+          "content_sha256": "df4b9fe93a5e"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.544,
+          "hybrid_score": 0.014493,
+          "content_sha256": "358aa4bce6e1"
+        }
+      ],
+      "retrieval_ms": 166.0
+    },
+    {
+      "id": "absent_bwe_salary",
+      "split": "validation",
+      "category": "absent_fact",
+      "question": "What is the exact annual salary of a BWE operator in 2042?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "no_retrieved_evidence",
+      "expected_sources": [],
+      "retrieved": [],
+      "retrieval_ms": 138.8
+    },
+    {
+      "id": "mines_not_minerals",
+      "split": "validation",
+      "category": "misleading_related",
+      "question": "How many critical mines were listed by the Ministry of Mines in December 2023?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "requested_fact_not_supported",
+      "expected_sources": [],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7884,
+          "hybrid_score": 0.032787,
+          "content_sha256": "8278e3522b41"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7584,
+          "hybrid_score": 0.031754,
+          "content_sha256": "4f797952ec74"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "702d5a4caf2fccd88280ad6964365f0cfb0913f0",
+          "dense_score": null,
+          "hybrid_score": 0.014925,
+          "content_sha256": "4957f4b79fee"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7672,
+          "hybrid_score": 0.032002,
+          "content_sha256": "50c94f93bb5b"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7351,
+          "hybrid_score": 0.03009,
+          "content_sha256": "b548f0612520"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.714,
+          "hybrid_score": 0.012658,
+          "content_sha256": "7be9c725f00f"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7111,
+          "hybrid_score": 0.012346,
+          "content_sha256": "2f71a6605449"
+        }
+      ],
+      "retrieval_ms": 124.7
+    },
+    {
+      "id": "dragline_warranty",
+      "split": "validation",
+      "category": "absent_fact",
+      "question": "What is the 2028 warranty period for the dragline?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "no_retrieved_evidence",
+      "expected_sources": [],
+      "retrieved": [],
+      "retrieval_ms": 196.9
+    },
+    {
+      "id": "missing_revision",
+      "split": "validation",
+      "category": "missing_version",
+      "question": "What does the 2099 edition of the mine safety rules require?",
+      "expected_decision": "REQUIRED_VERSION_NOT_FOUND",
+      "actual_decision": "REQUIRED_VERSION_NOT_FOUND",
+      "decision_reason": "no_retrieved_evidence",
+      "expected_sources": [],
+      "retrieved": [],
+      "retrieval_ms": 230.1
+    },
+    {
+      "id": "lithium_future",
+      "split": "heldout",
+      "category": "absent_number",
+      "question": "How many tonnes of lithium did India produce in 2042 according to the critical minerals report?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "no_retrieved_evidence",
+      "expected_sources": [],
+      "retrieved": [],
+      "retrieval_ms": 71.1
+    },
+    {
+      "id": "partial_miner",
+      "split": "heldout",
+      "category": "partial",
+      "question": "What is a continuous miner, and what is its serial number?",
+      "expected_decision": "PARTIAL_EVIDENCE",
+      "actual_decision": "PARTIAL_EVIDENCE",
+      "decision_reason": "some_requested_parts_unsupported",
+      "expected_sources": [
+        "UG Mines .docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.7779,
+          "hybrid_score": 0.032522,
+          "content_sha256": "b76ea105ed96"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.7774,
+          "hybrid_score": 0.032522,
+          "content_sha256": "c17c7f96b3f8"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.6399,
+          "hybrid_score": 0.028259,
+          "content_sha256": "8cdb1717df96"
+        },
+        {
+          "source": "raw_data_files/Q&As/Mining Geology.docx",
+          "chunk_id": "",
+          "dense_score": 0.6715,
+          "hybrid_score": 0.014706,
+          "content_sha256": "c9632fd2ef31"
+        },
+        {
+          "source": "raw_data_files/Q&As/Longwall.docx",
+          "chunk_id": "f92b339cca501a5608ac5816544ebb07f193b66e",
+          "dense_score": null,
+          "hybrid_score": 0.014706,
+          "content_sha256": "3b3f4ec0e3cf"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.6667,
+          "hybrid_score": 0.014493,
+          "content_sha256": "0d94af68c124"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "2ff0ce5aedfae2d20ba291a1f14bea789eb75e06",
+          "dense_score": null,
+          "hybrid_score": 0.013333,
+          "content_sha256": "22e8f25707b5"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "7080f57f817ee243654ad79dd5bfa6afbf71c392",
+          "dense_score": null,
+          "hybrid_score": 0.012346,
+          "content_sha256": "06d9e005b840"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "639fd93cecc616e1fe54be616da37421fef48bf6",
+          "dense_score": null,
+          "hybrid_score": 0.012195,
+          "content_sha256": "4e74c0f3c15b"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.6151,
+          "hybrid_score": 0.011236,
+          "content_sha256": "8278e3522b41"
+        }
+      ],
+      "retrieval_ms": 90.1
+    },
+    {
+      "id": "absent_dragline_serial",
+      "split": "heldout",
+      "category": "absent_identifier",
+      "question": "What is the serial number of the dragline excavator XQ-9000?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "requested_fact_not_supported",
+      "expected_sources": [],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6828,
+          "hybrid_score": 0.032787,
+          "content_sha256": "7d11cdd26d80"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "58db231b020ead5b809e35e45d29da50542c3139",
+          "dense_score": null,
+          "hybrid_score": 0.016129,
+          "content_sha256": "6cbd9af3be6a"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "a4a7c475972ebcd95c3255565e9799cb540f4422",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "6f7e79ca6164"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.5817,
+          "hybrid_score": 0.011236,
+          "content_sha256": "28006b67f03d"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6553,
+          "hybrid_score": 0.016129,
+          "content_sha256": "d699f468fc73"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6408,
+          "hybrid_score": 0.015873,
+          "content_sha256": "9a32db3e8b14"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6338,
+          "hybrid_score": 0.015625,
+          "content_sha256": "c0494f3502eb"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "3f4e1e889114123c8f1e9d014d572b30a021b7b4",
+          "dense_score": null,
+          "hybrid_score": 0.015625,
+          "content_sha256": "676374f2bbd7"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6225,
+          "hybrid_score": 0.015385,
+          "content_sha256": "78049dec14df"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "de3980d68ee2a74e1c96c9474ada5eb0f9cbd075",
+          "dense_score": null,
+          "hybrid_score": 0.015385,
+          "content_sha256": "e53b729d8325"
+        }
+      ],
+      "retrieval_ms": 75.2
+    },
+    {
+      "id": "safety_en",
+      "split": "heldout",
+      "category": "explicit",
+      "question": "Why is mine safety important around explosives and heavy machinery?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "Safety Modules.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.7553,
+          "hybrid_score": 0.032522,
+          "content_sha256": "bfc983f109bf"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.6864,
+          "hybrid_score": 0.024451,
+          "content_sha256": "482b2313708a"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.6877,
+          "hybrid_score": 0.022472,
+          "content_sha256": "4f2550fbf449"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.7009,
+          "hybrid_score": 0.021251,
+          "content_sha256": "70708dc982ba"
+        },
+        {
+          "source": "raw_data_files/Q&As/Longwall.docx",
+          "chunk_id": "05184379e82ebbdef942de94c91b5da9740bccbe",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "e1b878e93f75"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "f4c1db255fe2c3ca520728cb20a10b75c9b8ee49",
+          "dense_score": null,
+          "hybrid_score": 0.015152,
+          "content_sha256": "a3ae86c75ae8"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "ff51c5e5663954fe73ca12ffd94833b61a8961af",
+          "dense_score": null,
+          "hybrid_score": 0.014085,
+          "content_sha256": "3740a1975fff"
+        },
+        {
+          "source": "raw_data_files/Q&As/Mining Geology.docx",
+          "chunk_id": "",
+          "dense_score": 0.6913,
+          "hybrid_score": 0.011765,
+          "content_sha256": "9d690c92d7b3"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.7106,
+          "hybrid_score": 0.029211,
+          "content_sha256": "a7a2207b5709"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "",
+          "dense_score": 0.693,
+          "hybrid_score": 0.026786,
+          "content_sha256": "0199253606e0"
+        }
+      ],
+      "retrieval_ms": 92.6
+    },
+    {
+      "id": "drilling_en",
+      "split": "heldout",
+      "category": "explicit",
+      "question": "Why is drilling required before blasting in mining?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "direct_term_and_relation_support",
+      "expected_sources": [
+        "Drilling & Blasting.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "",
+          "dense_score": 0.8127,
+          "hybrid_score": 0.032787,
+          "content_sha256": "cf88c59c1003"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "",
+          "dense_score": 0.7583,
+          "hybrid_score": 0.027347,
+          "content_sha256": "3e09180d4702"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.7166,
+          "hybrid_score": 0.02375,
+          "content_sha256": "4ee012a3427a"
+        },
+        {
+          "source": "raw_data_files/Q&As/Mining Geology.docx",
+          "chunk_id": "",
+          "dense_score": 0.7165,
+          "hybrid_score": 0.015896,
+          "content_sha256": "76ea9a319dc8"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "e4da65e1a880231f29d4f880d06f02d199b98fa1",
+          "dense_score": null,
+          "hybrid_score": 0.013699,
+          "content_sha256": "3da81706b22f"
+        },
+        {
+          "source": "raw_data_files/Q&As/Safety Modules.docx",
+          "chunk_id": "a467d195129a8c7192d1ef9c08aac737a9aeccfd",
+          "dense_score": null,
+          "hybrid_score": 0.010638,
+          "content_sha256": "f45967fb2ab1"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "4e60b662938cca5cca9f8f651cd9770c8f055c0c",
+          "dense_score": null,
+          "hybrid_score": 0.008772,
+          "content_sha256": "ac31181e29fb"
+        },
+        {
+          "source": "raw_data_files/Q&As/Longwall.docx",
+          "chunk_id": "1580889f30ac00df634469f678e2caaf4db38a50",
+          "dense_score": null,
+          "hybrid_score": 0.006897,
+          "content_sha256": "50e96cbe409e"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "",
+          "dense_score": 0.7639,
+          "hybrid_score": 0.03125,
+          "content_sha256": "b5e9b92d03cd"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "",
+          "dense_score": 0.7506,
+          "hybrid_score": 0.030159,
+          "content_sha256": "d275a5edf2f5"
+        }
+      ],
+      "retrieval_ms": 130.7
+    }
+  ],
+  "baseline": false,
+  "collection": "texmin_qa__82b087481fe8__v8",
+  "candidate": true,
+  "limitations": "Source-level labels and lexical checks do not prove answer entailment."
+}

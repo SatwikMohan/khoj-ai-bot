@@ -474,16 +474,23 @@ def split_documents(documents: list[Document]) -> list[Document]:
     for document in documents:
         if document.metadata.get("element_type") == "table" and len(document.page_content) > settings["chunk_size"]:
             lines = document.page_content.splitlines()
-            header_count = 2 if lines and lines[0].startswith("Sheet:") else 1
+            # Carry both the section heading and the column header into each
+            # oversized table chunk. The former implementation repeated only
+            # the heading for DOCX tables, orphaning later rows.
+            header_count = 2 if len(lines) > 1 and (
+                lines[0].startswith("Sheet:") or document.metadata.get("heading")
+            ) else 1
             header = lines[:header_count]
             batch = []
             for line in lines[header_count:]:
                 if batch and len("\n".join(header + batch + [line])) > settings["chunk_size"]:
-                    chunks.extend(splitter.split_documents([Document(page_content="\n".join(header + batch), metadata=document.metadata.copy())]))
+                    chunks.append(Document(page_content="\n".join(header + batch),
+                                           metadata=document.metadata.copy()))
                     batch = []
                 batch.append(line)
             if batch:
-                chunks.extend(splitter.split_documents([Document(page_content="\n".join(header + batch), metadata=document.metadata.copy())]))
+                chunks.append(Document(page_content="\n".join(header + batch),
+                                       metadata=document.metadata.copy()))
         else:
             chunks.extend(splitter.split_documents([document]))
     for index, chunk in enumerate(chunks):
@@ -550,7 +557,7 @@ def create_vector_store(
     if reset_collection:
         try:
             client.delete_collection(collection_name)
-        except Exception:
+        except chromadb.errors.NotFoundError:
             pass
 
     profile = embedding_profile()
@@ -773,12 +780,15 @@ def train(raw_data_dir: Path, force_rebuild: bool = False) -> None:
             continue
         manifest["failures"].pop(source, None)
 
-        if not documents:
-            manifest["files"].pop(source, None)
-            continue
-
-        if not chunks:
-            manifest["files"].pop(source, None)
+        if not documents or not chunks:
+            failed_count += 1
+            manifest["failures"][source] = (
+                "Extraction produced no usable text or chunks. The previous "
+                "index entry, if any, was retained; repair extraction before "
+                "serving this index."
+            )
+            print(json.dumps({"event": "index_file_failed", "source": source,
+                              "reason": "empty_extraction"}), flush=True)
             continue
 
         unique_chunks = {}

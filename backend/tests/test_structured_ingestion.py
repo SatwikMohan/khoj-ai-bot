@@ -4,6 +4,7 @@ import zipfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from langchain_core.documents import Document
 
 from PIL import Image
 from openpyxl import Workbook
@@ -53,6 +54,18 @@ class StructuredIngestionTests(unittest.TestCase):
         self.assertEqual(documents[1].metadata["element_type"], "table")
         self.assertIn("Hazard | Dust", documents[1].page_content)
         self.assertEqual(documents[2].metadata["element_type"], "image_ocr")
+
+    def test_split_table_repeats_heading_and_columns_without_cutting_rows(self):
+        table = Document(
+            page_content="Mine Safety\nHazard | Requirement\nDust | Use masks\nNoise | Use protection\nExplosives | Clear the area",
+            metadata={"source": "rules.docx", "heading": "Mine Safety", "element_type": "table"},
+        )
+        with patch("train_engine.chunk_settings", return_value={"chunk_size": 56, "chunk_overlap": 0}):
+            chunks = split_documents([table])
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk.page_content.startswith("Mine Safety\nHazard | Requirement\n")
+                            for chunk in chunks))
+        self.assertTrue(any("Explosives | Clear the area" in chunk.page_content for chunk in chunks))
 
     def test_opendocument_sheet_and_csv_columns(self):
         ods = self.root / "sample.ods"

@@ -1,4 +1,5 @@
 import threading
+import config
 import io
 import wave
 import unittest
@@ -9,7 +10,7 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableGenerator
 
 from services.model_config import thinking_setting
-from services.qa_service import _select_answer_docs, _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
+from services.qa_service import QAEngineError, _select_answer_docs, _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
 from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
 from services.request_lifecycle import registry
 from services.speech_chunker import IncrementalSpeechSegments
@@ -83,7 +84,7 @@ class ResponseDeliveryTests(unittest.TestCase):
             patch('services.qa_service._load_environment'),
             patch('services.qa_service._vector_store'),
             patch('services.qa_service._retrieve_context', return_value=[Document(
-                page_content='The storage limit is 100 kg.', metadata={'source': 'rules.pdf'},
+                page_content='The storage limit is 100 kg.', metadata={'source': 'rules.pdf', 'page': 3},
             )]),
             patch.multiple('config', RESPONSE_LANGUAGE='english', QA_RESPONSE_TIMEOUT_SECONDS=3),
         ]
@@ -116,7 +117,8 @@ class ResponseDeliveryTests(unittest.TestCase):
 
     def test_answer_context_drops_distractors_but_keeps_version_comparisons(self):
         docs = [Document(page_content=str(i), metadata={"source": f"source-{i}"}) for i in range(5)]
-        self.assertEqual(_select_answer_docs("What is a bucket wheel excavator?", docs, "document"), docs[:2])
+        self.assertEqual(_select_answer_docs("What is a bucket wheel excavator?", docs, "document"),
+                         docs[:config.QA_ANSWER_CONTEXT_DOCS])
         self.assertEqual(_select_answer_docs("Compare the 2023 and 2024 rules", docs, "document"), docs)
         self.assertEqual(_select_answer_docs("Explain mine safety", docs, "summary"), docs)
 
@@ -135,6 +137,13 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertTrue(_wants_source_locations("Sources?"))
         self.assertTrue(_wants_source_locations("\u0938\u094d\u0930\u094b\u0924 \u092c\u0924\u093e\u0907\u090f"))
         self.assertFalse(_wants_source_locations("What is the reference voltage?"))
+
+    def test_context_never_silently_cuts_a_passage(self):
+        doc = Document(page_content="The storage limit is 100 kg because ventilation is required.",
+                       metadata={"source": "rules.pdf"})
+        with patch.object(config, "CONTEXT_MAX_CHARS", 24):
+            with self.assertRaisesRegex(QAEngineError, "no partial passage"):
+                _format_context([doc])
 
     def test_streamed_citations_are_removed_before_history_or_tts(self):
         model = self.model([AIMessageChunk(content="From Ref"), AIMessageChunk(
@@ -159,6 +168,23 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'error')
         self.assertIn('length', events[-1]['message'])
         self.assertNotIn('done', [e['type'] for e in events])
+
+    def test_missing_fact_abstains_without_invoking_model(self):
+        with patch('services.qa_service._llm') as model:
+            events = list(stream_answer_events('What is the storage warranty period?'))
+        model.assert_not_called()
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertIn('indexed documents', events[-1]['answer'])
+        self.assertEqual(events[-1]['sources'], [])
+
+    def test_invented_number_is_not_released_as_answer(self):
+        with patch('services.qa_service._llm', return_value=self.model([
+            AIMessageChunk(content='The storage limit is 500 kg.')
+        ])):
+            events = list(stream_answer_events('What is the storage limit?'))
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertNotIn('500', ''.join(e.get('text', '') for e in events if e['type'] == 'token'))
+        self.assertIn('indexed documents', events[-1]['answer'])
 
     def test_generation_exception_is_visible(self):
         with patch('services.qa_service._llm', side_effect=RuntimeError('Ollama connection refused')):

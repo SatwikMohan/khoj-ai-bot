@@ -101,7 +101,13 @@ class PromptedOllamaEmbeddings(Embeddings):
 
     def embed_query(self, text: str) -> list[float]:
         prefix = self.profile.query_prefix
-        return self._client.embed_query(f"{prefix}{text}" if prefix else text)
+        vector = self._client.embed_query(f"{prefix}{text}" if prefix else text)
+        if len(vector) != int(config.OLLAMA_EMBED_DIMENSIONS):
+            raise ValueError(
+                "Query embedding dimensions do not match OLLAMA_EMBED_DIMENSIONS; "
+                "keep the current index active and rebuild a compatible collection."
+            )
+        return vector
 
 
 def ollama_model_names(base_url: str, timeout_seconds: float = 3.0) -> set[str]:

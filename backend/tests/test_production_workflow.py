@@ -219,7 +219,8 @@ class LanguageContractTests(unittest.TestCase):
             else:
                 yield AIMessageChunk(content="\u092d\u0902\u0921\u093e\u0930\u0923 \u0915\u0940 \u0938\u0940\u092e\u093e 100 kg \u0939\u0948\u0964")
         model = RunnableGenerator(generate)
-        with patch.multiple(config, RESPONSE_LANGUAGE="auto", QA_RESPONSE_TIMEOUT_SECONDS=5), patch(
+        with patch.multiple(config, RESPONSE_LANGUAGE="auto", QA_RESPONSE_TIMEOUT_SECONDS=5,
+                            QA_EVIDENCE_GATE_ENABLED=False), patch(
             "services.qa_service._load_environment"
         ), patch("services.qa_service._vector_store"), patch(
             "services.qa_service._retrieve_context",
