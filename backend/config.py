@@ -46,10 +46,10 @@ QA_DIAGNOSTICS_ENABLED = False  # Logs system template, hashes and passage IDs; 
 QA_EVIDENCE_GATE_ENABLED = True  # Check requested facts before generation.
 QA_SEMANTIC_EVIDENCE_ENABLED = True  # Verify meaning across languages before generation.
 QA_EVIDENCE_MODEL = ""  # Empty reuses the chat model; set to an installed smaller Ollama model after benchmarking.
-QA_EVIDENCE_GATE_TIMEOUT_SECONDS = 8
+QA_EVIDENCE_GATE_TIMEOUT_SECONDS = 12
 QA_EVIDENCE_MAX_PASSAGES = 5
 QA_EVIDENCE_MAX_CHARS = 6500
-QA_EVIDENCE_NUM_PREDICT = 256
+QA_EVIDENCE_NUM_PREDICT = 320
 # None selects model-specific embedding prefixes automatically; "" disables them.
 EMBED_QUERY_PREFIX = None
 EMBED_DOCUMENT_PREFIX = None

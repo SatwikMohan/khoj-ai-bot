@@ -6,6 +6,7 @@ every accepted quote must occur verbatim in one of the supplied passages.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import unicodedata
 
@@ -23,7 +24,7 @@ _SYSTEM = (
     "not establish its definition or requested details. Choose INSUFFICIENT_EVIDENCE "
     "if they establish nothing useful. Respect exact entities, numbers, negations, "
     "years, versions and relationships. Never infer an acronym expansion from memory. "
-    "For each supported fact, copy one exact continuous quote from a passage and its "
+    "Copy at most two short exact continuous quotes from passages and their "
     "passage_id. If passages disagree on a requested fact, choose CONFLICTING_EVIDENCE. "
     "If evidence is insufficient and the question is Hindi or Roman Hindi, also "
     "provide english_search_query: a short English translation for ONE more local "
@@ -41,7 +42,7 @@ _FORMAT = {
         "decision": {"type": "string", "enum": [
             "ANSWERABLE", "PARTIAL_EVIDENCE", "INSUFFICIENT_EVIDENCE", "CONFLICTING_EVIDENCE"
         ]},
-        "evidence": {"type": "array", "items": {"type": "object", "properties": {
+        "evidence": {"type": "array", "maxItems": 2, "items": {"type": "object", "properties": {
             "passage_id": {"type": "integer"}, "quote": {"type": "string"},
         }, "required": ["passage_id", "quote"]}},
         "missing_parts": {"type": "array", "items": {"type": "string"}},
@@ -98,6 +99,110 @@ def _chat(payload: str, model: str):
     )
 
 
+def _compact_chat(payload: str, model: str):
+    """One short retry for older Ollama/model combinations with malformed JSON."""
+    from ollama import Client
+
+    client = Client(host=config.OLLAMA_BASE_URL,
+                    timeout=float(config.QA_EVIDENCE_GATE_TIMEOUT_SECONDS))
+    return client.chat(
+        model=model,
+        messages=[{"role": "system", "content": (
+            "Use only the supplied indexed passages. Return one compact JSON object with "
+            "decision (ANSWERABLE, PARTIAL_EVIDENCE, INSUFFICIENT_EVIDENCE or "
+            "CONFLICTING_EVIDENCE), evidence (zero or one {passage_id, quote} with an "
+            "exact continuous passage quote), missing_parts (zero or one short string), "
+            "and english_search_query (empty unless an unsupported Hindi question needs "
+            "one faithful English search). No prose or markdown."
+        )}, {"role": "user", "content": payload}],
+        format="json", think=False,
+        options={"temperature": 0, "num_predict": min(256, int(config.QA_EVIDENCE_NUM_PREDICT)),
+                 "num_ctx": int(config.OLLAMA_NUM_CTX)},
+        keep_alive=config.OLLAMA_KEEP_ALIVE,
+    )
+
+
+def _parse_verdict(response) -> dict:
+    raw = response.message.content if hasattr(response, "message") else response
+    if isinstance(raw, dict):
+        return raw
+    text = raw if isinstance(raw, str) else str(raw)
+    start = text.find("{")
+    if start < 0:
+        raise json.JSONDecodeError("No JSON object in verifier output", text, 0)
+    data, _ = json.JSONDecoder().raw_decode(text[start:])
+    if not isinstance(data, dict):
+        raise ValueError("Verifier output is not a JSON object")
+    return data
+
+
+def _recover_complete_prefix_fields(response) -> dict | None:
+    """Use only complete JSON string fields from a truncated response.
+
+    A recovered positive verdict is downgraded to partial; its quote must still
+    pass the normal exact-passage check before any generation is allowed.
+    """
+    raw = response.message.content if hasattr(response, "message") else response
+    if not isinstance(raw, str):
+        return None
+    decision_match = re.search(
+        r'"decision"\s*:\s*"(ANSWERABLE|PARTIAL_EVIDENCE|INSUFFICIENT_EVIDENCE|CONFLICTING_EVIDENCE)"',
+        raw,
+    )
+    if not decision_match:
+        return None
+    decision = decision_match.group(1)
+    search_match = re.search(r'"english_search_query"\s*:\s*("(?:\\.|[^"\\])*")', raw)
+    search_query = json.loads(search_match.group(1)) if search_match else ""
+    if decision == "INSUFFICIENT_EVIDENCE":
+        return {"decision": decision, "evidence": [], "missing_parts": [],
+                "english_search_query": search_query}
+    if decision == "CONFLICTING_EVIDENCE":
+        return None
+    id_match = re.search(r'"passage_id"\s*:\s*(\d+)', raw)
+    quote_match = re.search(r'"quote"\s*:\s*("(?:\\.|[^"\\])*")', raw)
+    if not id_match or not quote_match:
+        return None
+    try:
+        quote = json.loads(quote_match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return {
+        "decision": "PARTIAL_EVIDENCE", "evidence": [{
+            "passage_id": int(id_match.group(1)), "quote": quote,
+        }],
+        "missing_parts": ["The full answer could not be verified from the indexed passages."],
+        "english_search_query": "",
+    }
+
+
+def _ask_verdict(payload: str, model: str, chat=None) -> dict:
+    response = (chat or _chat)(payload, model)
+    try:
+        return _parse_verdict(response)
+    except json.JSONDecodeError:
+        raw = response.message.content if hasattr(response, "message") else response
+        raw_text = raw if isinstance(raw, str) else str(raw)
+        print(json.dumps({
+            "event": "qa_semantic_json_retry", "model": model,
+            "raw_chars": len(raw_text),
+            "raw_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:12],
+            "done_reason": getattr(response, "done_reason", None),
+            "eval_count": getattr(response, "eval_count", None),
+        }), flush=True)
+        retry = (chat(payload, model) if chat else _compact_chat(payload, model))
+        try:
+            return _parse_verdict(retry)
+        except json.JSONDecodeError:
+            recovered = (_recover_complete_prefix_fields(retry)
+                         or _recover_complete_prefix_fields(response))
+            if recovered is not None:
+                print(json.dumps({"event": "qa_semantic_prefix_recovered",
+                                  "model": model, "decision": recovered["decision"]}), flush=True)
+                return recovered
+            raise
+
+
 def suggest_local_search_query(question: str, *, chat=None) -> str:
     """Translate only for retrieval; never treat this output as answer evidence."""
     model = config.QA_EVIDENCE_MODEL.strip() or config.OLLAMA_CHAT_MODEL
@@ -105,9 +210,7 @@ def suggest_local_search_query(question: str, *, chat=None) -> str:
                "Decision must be INSUFFICIENT_EVIDENCE. Supply one faithful "
                "english_search_query to search the same local index again.")
     try:
-        response = (chat or _chat)(payload, model)
-        raw = response.message.content if hasattr(response, "message") else response
-        data = json.loads(raw if isinstance(raw, str) else str(raw))
+        data = _ask_verdict(payload, model, chat)
         return _safe_search_query(question, data.get("english_search_query"))
     except Exception:
         return ""
@@ -144,9 +247,7 @@ def assess_semantic_evidence(question: str, documents: list, *, topic_context: s
     payload += "\n\nIndexed passages:\n" + "\n\n".join(blocks)
     model = config.QA_EVIDENCE_MODEL.strip() or config.OLLAMA_CHAT_MODEL
     try:
-        response = (chat or _chat)(payload, model)
-        raw = response.message.content if hasattr(response, "message") else response
-        data = json.loads(raw if isinstance(raw, str) else str(raw))
+        data = _ask_verdict(payload, model, chat)
         status = EvidenceStatus(data.get("decision", ""))
     except Exception as exc:
         return EvidenceDecision(EvidenceStatus.VERIFICATION_UNAVAILABLE, (),

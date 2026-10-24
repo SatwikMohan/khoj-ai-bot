@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableGenerator
 
 from services.evidence_gate import EvidenceDecision, EvidenceStatus
-from services.semantic_evidence import _safe_search_query, assess_semantic_evidence, suggest_local_search_query
+from services.semantic_evidence import _parse_verdict, _safe_search_query, assess_semantic_evidence, suggest_local_search_query
 from services.qa_service import stream_answer_events
 
 
@@ -61,6 +61,47 @@ class SemanticEvidenceTests(unittest.TestCase):
             raise TimeoutError("local model timed out")
         decision = assess_semantic_evidence("Explain DGMS", self.passages, chat=fails)
         self.assertEqual(decision.status, EvidenceStatus.VERIFICATION_UNAVAILABLE)
+
+    def test_wrapped_json_is_parsed_without_accepting_prose_as_evidence(self):
+        wrapped = SimpleNamespace(message=SimpleNamespace(content=(
+            '```json\n{"decision":"INSUFFICIENT_EVIDENCE","evidence":[],"missing_parts":[],"english_search_query":""}\n```'
+        )))
+        self.assertEqual(_parse_verdict(wrapped)["decision"], "INSUFFICIENT_EVIDENCE")
+
+    def test_truncated_json_gets_one_compact_retry(self):
+        replies = iter([
+            SimpleNamespace(message=SimpleNamespace(content='{"decision":"PARTIAL_EVIDENCE","evidence":['),
+                            done_reason="length", eval_count=256),
+            response("PARTIAL_EVIDENCE", [{
+                "passage_id": 0,
+                "quote": "State DGMs receive modern tools and training for mineral exploration in the region.",
+            }], ["The full definition is absent."]),
+        ])
+        calls = []
+        def answer(*_):
+            calls.append(1)
+            return next(replies)
+        decision = assess_semantic_evidence("Explain DGMS", self.passages, chat=answer)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(decision.status, EvidenceStatus.PARTIAL_EVIDENCE)
+
+    def test_two_malformed_verdicts_still_fail_closed(self):
+        decision = assess_semantic_evidence(
+            "Explain DGMS", self.passages,
+            chat=lambda *_: SimpleNamespace(message=SimpleNamespace(content='{"decision":')),
+        )
+        self.assertEqual(decision.status, EvidenceStatus.VERIFICATION_UNAVAILABLE)
+
+    def test_complete_quote_in_truncated_json_is_only_partial_evidence(self):
+        truncated = ('{"decision":"ANSWERABLE","evidence":[{"passage_id":0,'
+                     '"quote":"State DGMs receive modern tools and training for '
+                     'mineral exploration in the region."}')
+        decision = assess_semantic_evidence(
+            "Explain DGMS", self.passages,
+            chat=lambda *_: SimpleNamespace(message=SimpleNamespace(content=truncated)),
+        )
+        self.assertEqual(decision.status, EvidenceStatus.PARTIAL_EVIDENCE)
+        self.assertEqual(decision.documents, tuple(self.passages))
 
     def test_followup_topic_is_for_reference_resolution_only(self):
         captured = []
