@@ -33,7 +33,7 @@ All application settings live in `backend/config.py`. For example:
 
 ```python
 OLLAMA_KEEP_ALIVE = 1800
-QA_WARMUP_ON_STARTUP = False
+QA_WARMUP_ON_STARTUP = True
 RETRIEVAL_FETCH_K = 40
 RETRIEVAL_MMR_ENABLED = True
 MMR_LAMBDA_MULT = 0.35

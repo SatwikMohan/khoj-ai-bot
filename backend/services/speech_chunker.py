@@ -7,6 +7,7 @@ import config
 
 
 SENTENCE_END = re.compile(r"[.!?\u0964](?=\s|$)")
+CLAUSE_END = re.compile(r"[,;:\u2014](?=\s|$)")
 
 
 def split_speakable_prefix(buffer: str) -> tuple[list[str], str]:
@@ -40,10 +41,13 @@ class IncrementalSpeechSegments:
     def __init__(self):
         self.buffer = ""
         self.buffered_at = None
+        self.last_token_at = None
 
     def push(self, token: str) -> list[str]:
-        if token and not self.buffer:
-            self.buffered_at = time.monotonic()
+        if token:
+            self.last_token_at = time.monotonic()
+            if not self.buffer.strip():
+                self.buffered_at = self.last_token_at
         self.buffer += token
         segments, self.buffer = split_speakable_prefix(self.buffer)
         if segments:
@@ -57,13 +61,27 @@ class IncrementalSpeechSegments:
                 now - self.buffered_at < float(config.TTS_STREAM_MAX_BUFFER_SECONDS) or
                 len(self.buffer.strip()) < int(config.TTS_STREAM_MIN_CHARS)):
             return []
+        minimum = int(config.TTS_STREAM_MIN_CHARS)
         maximum = int(config.TTS_STREAM_MAX_CHARS)
         prefix = self.buffer[:maximum]
-        boundaries = list(re.finditer(r"\s+", prefix))
-        if not boundaries:
-            return []
-        cut = boundaries[-1].end()
-        if cut < int(config.TTS_STREAM_MIN_CHARS):
+        clauses = [match.end() for match in CLAUSE_END.finditer(prefix)
+                   if match.end() >= minimum]
+        if clauses:
+            cut = clauses[-1]
+        else:
+            # A continuously arriving sentence should not be cut mid-phrase
+            # merely because its first token is old. Bound long sentences.
+            soft_limit = minimum + (maximum - minimum) // 2
+            idle = self.last_token_at is None or (
+                now - self.last_token_at >= float(config.TTS_STREAM_MAX_BUFFER_SECONDS)
+            )
+            if not idle and len(self.buffer) < soft_limit:
+                return []
+            boundaries = list(re.finditer(r"\s+", prefix))
+            if not boundaries:
+                return []
+            cut = boundaries[-1].end()
+        if cut < minimum:
             return []
         segment = self.buffer[:cut].strip()
         self.buffer = self.buffer[cut:]
@@ -74,4 +92,5 @@ class IncrementalSpeechSegments:
         final = self.buffer.strip()
         self.buffer = ""
         self.buffered_at = None
+        self.last_token_at = None
         return [final] if final else []

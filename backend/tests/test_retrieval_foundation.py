@@ -21,7 +21,9 @@ from services.qa_service import (
     _direct_answer_content,
     _detect_language_style,
     _general_response,
+    _format_chat_history,
     _history_aware_query,
+    _query_identifiers,
     _is_general_query,
     _is_summary_query,
     _looks_like_internal_analysis,
@@ -70,6 +72,7 @@ class RetrievalQueryTests(unittest.TestCase):
             "HYBRID_SEARCH_ENABLED": True,
             "RELEVANCE_SCORE_THRESHOLD": 0.15,
             "RERANK_ENABLED": False,
+            "ALLOW_LOW_RELEVANCE_FALLBACK": True,
         }
         with (
             patch.multiple("config", **environment),
@@ -80,13 +83,83 @@ class RetrievalQueryTests(unittest.TestCase):
 
         self.assertEqual(results, [document])
 
+    def test_weak_hybrid_hit_is_not_passed_to_the_answer_model(self):
+        unrelated = Document(
+            page_content="The handbook lists 30 critical minerals for clean energy.",
+            metadata={"source": "minerals.pdf", "chunk_index": 1},
+        )
+
+        class VectorStore:
+            @staticmethod
+            def similarity_search_with_relevance_scores(_question, k):
+                return [(unrelated, 0.11)]
+
+        with patch.multiple(config, HYBRID_SEARCH_ENABLED=True,
+                            ALLOW_LOW_RELEVANCE_FALLBACK=False,
+                            RELEVANCE_SCORE_THRESHOLD=0.25,
+                            RERANK_ENABLED=False), patch(
+            "services.qa_service._active_index", return_value=("test", "fingerprint")
+        ), patch("services.qa_service.lexical_search", return_value=[]):
+            self.assertEqual(_retrieve_context(VectorStore(), "DGMS safety rules", 1), [])
+
+    def test_identifier_keeps_matching_evidence_and_rejects_unrelated_evidence(self):
+        unrelated = Document(page_content="Mining safety information is important.",
+                             metadata={"source": "general.pdf", "chunk_index": 1})
+        relevant = Document(page_content="DGMS issues safety circulars for active mines and their operators.",
+                            metadata={"source": "circular.pdf", "chunk_index": 2})
+
+        class VectorStore:
+            @staticmethod
+            def similarity_search_with_relevance_scores(_question, k):
+                return [(unrelated, 0.9), (relevant, 0.52)]
+
+        with patch.multiple(config, HYBRID_SEARCH_ENABLED=True,
+                            ALLOW_LOW_RELEVANCE_FALLBACK=False,
+                            RELEVANCE_SCORE_THRESHOLD=0.25,
+                            RERANK_ENABLED=False), patch(
+            "services.qa_service._active_index", return_value=("test", "fingerprint")
+        ), patch("services.qa_service.lexical_search", return_value=[]):
+            self.assertEqual(_retrieve_context(VectorStore(), "What is DGMS?", 2), [relevant])
+
+    def test_lowercase_acronym_is_grounded_without_treating_language_as_entity(self):
+        self.assertEqual(_query_identifiers("dgms ko elaborate kare"), ("dgms",))
+        self.assertEqual(_query_identifiers("Explain the rules in HINDI"), ())
+
+    def test_lexical_or_hit_needs_substantive_overlap(self):
+        unrelated = Document(page_content="Mining safety information is important.",
+                             metadata={"source": "general.pdf", "chunk_index": 1})
+        relevant = Document(page_content="Critical minerals include lithium and cobalt.",
+                            metadata={"source": "minerals.pdf", "chunk_index": 2})
+
+        class VectorStore:
+            @staticmethod
+            def similarity_search_with_relevance_scores(_question, k):
+                return []
+
+        with patch.multiple(config, HYBRID_SEARCH_ENABLED=True,
+                            ALLOW_LOW_RELEVANCE_FALLBACK=False,
+                            RERANK_ENABLED=False), patch(
+            "services.qa_service._active_index", return_value=("test", "fingerprint")
+        ), patch("services.qa_service.lexical_search", return_value=[unrelated, relevant]):
+            self.assertEqual(_retrieve_context(VectorStore(), "Explain critical minerals", 2), [relevant])
+
+    def test_assistant_claims_are_not_reused_as_evidence(self):
+        history = [
+            {"role": "user", "content": "Explain DGMS mine safety rules"},
+            {"role": "assistant", "content": "DGMS is a fictional mineral council."},
+        ]
+        formatted = _format_chat_history(history)
+        self.assertIn("DGMS mine safety rules", formatted)
+        self.assertNotIn("fictional mineral council", formatted)
+        self.assertIn("DGMS", _history_aware_query("When did it apply?", history))
+
     def test_standalone_question_is_not_polluted_by_history(self):
         history = [{"role": "user", "content": "unrelated annual report"}]
         question = "What is the permitted explosive storage limit?"
         self.assertEqual(_history_aware_query(question, history), question)
 
     def test_short_pronoun_followup_uses_history(self):
-        history = [{"role": "assistant", "content": "The rule was amended in 2025."}]
+        history = [{"role": "user", "content": "What changed in the rule amended in 2025?"}]
         result = _history_aware_query("When did it apply?", history)
         self.assertIn("Recent conversation", result)
 

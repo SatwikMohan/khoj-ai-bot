@@ -19,7 +19,7 @@ from services.embedding_service import (
     model_is_available,
     ollama_model_names,
 )
-from services.lexical_service import lexical_search
+from services.lexical_service import STOP_WORDS, lexical_search
 from services.language_service import answer_language_matches, resolve_language_context, response_language, language_instruction
 from services.reranker_service import rerank_documents
 from services.model_config import thinking_setting
@@ -681,17 +681,12 @@ def _format_chat_history(chat_history: list[ChatMessage] | None) -> str:
     used_chars = 0
     for message in reversed((chat_history or [])[-max_turns:]):
         role = _message_role(message).strip().lower()
-        if role not in {"user", "assistant"}:
+        if role != "user":
             continue
         content = _trim_text(_message_content(message), max_message_chars)
-        if role == "assistant":
-            content = CitationTextFilter().feed(content, final=True)
-        if role == "assistant" and _looks_like_internal_analysis(content):
-            continue
         if not content:
             continue
-        label = "You said" if role == "user" else "I replied"
-        line = f"{label}: {content}"
+        line = f"You said: {content}"
         if used_chars + len(line) > max_chars:
             break
         lines.append(line)
@@ -758,7 +753,6 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         return question
 
     recent_user_messages = []
-    clean_assistant_messages = []
     for message in (chat_history or [])[-6:]:
         role = _message_role(message).strip().lower()
         if role not in {"user", "assistant"}:
@@ -768,10 +762,8 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
             continue
         if role == "user" and not _is_general_query(content):
             recent_user_messages.append(content)
-        elif role == "assistant" and not _looks_like_internal_analysis(content):
-            clean_assistant_messages.append(content)
 
-    topic_messages = recent_user_messages[-2:] or clean_assistant_messages[-1:]
+    topic_messages = recent_user_messages[-2:]
     if not topic_messages:
         return question
 
@@ -800,6 +792,56 @@ def _hybrid_rank(dense_docs: list, lexical_docs: list, limit: int):
     for doc in ranked:
         doc.metadata["hybrid_score"] = round(scores[_doc_key(doc)], 6)
     return ranked[:limit]
+
+
+def _query_identifiers(question: str) -> tuple[str, ...]:
+    """Identifiers are strong evidence anchors, even in code-mixed questions."""
+    explicit = [
+        token for token in re.findall(
+            r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{2,11}(?![A-Za-z0-9])", question
+        )
+        if token.lower() not in _IDENTIFIER_EXCLUSIONS
+    ]
+    # Speech recognition and typed Hinglish may lowercase consonant-only acronyms.
+    uncapitalized = [
+        token for token in re.findall(r"\b[a-z]{3,6}\b", question)
+        if not any(vowel in token for vowel in "aeiouy")
+        and token not in _RETRIEVAL_FILLER
+    ]
+    return tuple(dict.fromkeys([*explicit, *uncapitalized]))
+
+
+def _mentions_identifiers(doc, identifiers: tuple[str, ...]) -> bool:
+    if not identifiers:
+        return True
+    searchable = doc.page_content + " " + str(doc.metadata.get("source", ""))
+    return any(re.search(r"(?<![A-Za-z0-9])" + re.escape(identifier) + r"(?![A-Za-z0-9])",
+                         searchable, flags=re.IGNORECASE) for identifier in identifiers)
+
+
+_RETRIEVAL_FILLER = STOP_WORDS | {
+    "about", "again", "answer", "bare", "bata", "batao", "current", "conversation",
+    "de", "detail", "describe", "elaborate", "explain", "information", "jankari",
+    "kare", "know", "matlab", "please", "question", "recent", "samjhao",
+    "tell", "topic", "want",
+}
+
+
+_IDENTIFIER_EXCLUSIONS = _RETRIEVAL_FILLER | {
+    "english", "hindi", "hinglish", "mineral", "minerals",
+    "mine", "mines", "rule", "rules", "safety",
+}
+
+
+def _lexical_evidence_matches(doc, question: str) -> bool:
+    """FTS uses OR search for recall; reject hits on just a stray common word."""
+    terms = set(re.findall(r"[a-z]{3,}|[0-9]{4}", question.lower())) - _RETRIEVAL_FILLER
+    if not terms:
+        return False
+    searchable = doc.page_content.lower() + " " + str(doc.metadata.get("source", "")).lower()
+    document_terms = set(re.findall(r"[a-z]{3,}|[0-9]{4}", searchable))
+    overlap = len(terms & document_terms)
+    return overlap >= max(1, min(2, len(terms))) and overlap / len(terms) >= 0.4
 
 
 def _diversify_docs(docs, top_k: int):
@@ -852,11 +894,27 @@ def _retrieve_context(vector_store: Chroma, question: str, top_k: int, *, scope_
         if score >= threshold:
             relevant_by_key[_doc_key(doc)] = doc
 
+    identifiers = _query_identifiers(question)
+    dense_docs = [doc for doc in dense_docs if _mentions_identifiers(doc, identifiers)]
+    relevant_by_key = {
+        key: doc for key, doc in relevant_by_key.items()
+        if _mentions_identifiers(doc, identifiers)
+    }
+
     if config.HYBRID_SEARCH_ENABLED:
-        lexical_docs = [doc for doc in lexical_docs if _has_meaningful_content(doc)]
-        if dense_docs or lexical_docs:
+        lexical_docs = [
+            doc for doc in lexical_docs
+            if _has_meaningful_content(doc)
+            and _mentions_identifiers(doc, identifiers)
+            and (bool(identifiers) or _lexical_evidence_matches(doc, question))
+        ]
+        eligible_dense = [
+            doc for doc in dense_docs
+            if _doc_key(doc) in relevant_by_key or config.ALLOW_LOW_RELEVANCE_FALLBACK
+        ]
+        if eligible_dense or lexical_docs:
             candidate_count = max(top_k, config.RERANK_CANDIDATES, config.VERSION_CANDIDATES)
-            fused = _hybrid_rank(dense_docs, lexical_docs, fetch_k * 4)
+            fused = _hybrid_rank(eligible_dense, lexical_docs, fetch_k * 4)
             candidates = select_documents(fused, intent_question, candidate_count, candidate_pool=True)
             ranked = rerank_documents(question, candidates, len(candidates))
             selected = select_documents(ranked, intent_question, top_k)
@@ -960,7 +1018,10 @@ def _prompt_for_query(query_type: str, *, include_locations: bool = False) -> Ch
         "Output only the words you want them to read or hear. Never describe the request, your process, "
         "the conversation history, the supplied material, or how you plan to answer. Never refer to "
         "the person as 'the user' or as 'they'; address them naturally as 'you'. Start with the useful "
-        "answer, not with 'okay, let me break this down'. Use a compact conversational paragraph for "
+        "answer, not with 'okay, let me break this down'. Give the main point in the first sentence, "
+        "then explain the reason or practical meaning with only the details needed for this question. "
+        "Use a concrete example only when the evidence supports it. Avoid repeating the question, "
+        "rote lists, and formulaic closing offers. Use a compact conversational paragraph for "
         "simple questions and bullets only when they genuinely help. Use only facts supported by the "
         "document material. Match every number to the exact noun and unit in the question; never "
         "substitute a related figure. For example, mineral blocks are not mines. If the material "
@@ -988,8 +1049,8 @@ def _prompt_for_query(query_type: str, *, include_locations: bool = False) -> Ch
     )
     if query_type == "summary":
         system_message = (
-            "Give a natural overview of the topic and invite the person to choose a specific area when "
-            "their request is broad. Bring related facts together instead of listing excerpts. "
+            "Give a natural overview of the topic, grouping related facts instead of listing excerpts. "
+            "Ask which area matters most only if the request is too broad for a useful answer. "
             f"{shared_style} {location_instruction} {{language_instruction}}"
         )
     else:

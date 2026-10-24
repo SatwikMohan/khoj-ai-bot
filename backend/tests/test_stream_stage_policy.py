@@ -221,6 +221,44 @@ class StreamingBenchmarkTests(unittest.TestCase):
 
 
 class SpeechBufferTests(unittest.TestCase):
+    def test_next_sentence_starts_a_new_buffer_timer(self):
+        with patch("config.TTS_STREAM_MIN_CHARS", 25), patch(
+            "config.TTS_STREAM_MAX_CHARS", 160
+        ):
+            buffer = IncrementalSpeechSegments()
+            self.assertEqual(buffer.push(
+                "The inspection interval is five days. "
+            ), ["The inspection interval is five days."])
+            self.assertIsNone(buffer.buffered_at)
+            buffer.push("The reporting deadline is ten days")
+            self.assertIsNotNone(buffer.buffered_at)
+
+    def test_active_stream_waits_for_a_natural_phrase_boundary(self):
+        with patch("config.TTS_STREAM_MIN_CHARS", 25), patch(
+            "config.TTS_STREAM_MAX_CHARS", 200
+        ), patch("config.TTS_STREAM_MAX_BUFFER_SECONDS", 0.1):
+            buffer = IncrementalSpeechSegments()
+            buffer.push("The mine ventilation system moves clean air through each working section")
+            first_at = buffer.buffered_at
+            buffer.last_token_at = first_at + 0.08
+            self.assertEqual(buffer.flush_due(now=first_at + 0.11), [])
+            self.assertEqual(buffer.finish(), [
+                "The mine ventilation system moves clean air through each working section"
+            ])
+
+    def test_clause_boundary_can_stream_without_waiting_for_sentence_end(self):
+        with patch("config.TTS_STREAM_MIN_CHARS", 25), patch(
+            "config.TTS_STREAM_MAX_CHARS", 160
+        ), patch("config.TTS_STREAM_MAX_BUFFER_SECONDS", 0.1):
+            buffer = IncrementalSpeechSegments()
+            buffer.push("The inspection interval is five days, but the reporting deadline is ten days")
+            first_at = buffer.buffered_at
+            buffer.last_token_at = first_at + 0.08
+            self.assertEqual(buffer.flush_due(now=first_at + 0.11), [
+                "The inspection interval is five days,"
+            ])
+            self.assertEqual(buffer.finish(), ["but the reporting deadline is ten days"])
+
     def test_max_buffer_delay_releases_phrase_at_word_boundary(self):
         with patch("config.TTS_STREAM_MIN_CHARS", 25), patch("config.TTS_STREAM_MAX_CHARS", 120), patch(
                 "config.TTS_STREAM_MAX_BUFFER_SECONDS", 0.1):

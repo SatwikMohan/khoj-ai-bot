@@ -27,16 +27,14 @@ class HinglishSpeechTests(unittest.TestCase):
 
     def convert(self, text, words, **extra):
         body = {"done": True, "message": {"content": json.dumps({"words": words})}, **extra}
-        with patch("services.hinglish_speech._fast_devanagari_speech", return_value=None), patch(
-            "services.hinglish_speech.urllib.request.urlopen",
-            return_value=io.BytesIO(json.dumps(body).encode())
-        ) as call:
+        with patch("services.hinglish_speech.urllib.request.urlopen",
+                   return_value=io.BytesIO(json.dumps(body).encode())) as call:
             result = devanagari_speech(text)
         sent = json.loads(call.call_args.args[0].data)
         self.assertFalse(sent["stream"])
         self.assertEqual(sent["model"], config.OLLAMA_CHAT_MODEL)
         self.assertEqual(call.call_args.kwargs["timeout"], config.TTS_TRANSLITERATION_TIMEOUT_SECONDS)
-        return result
+        return result, json.loads(sent["messages"][1]["content"])["words"]
 
     def test_common_hinglish_uses_local_conversion_without_model_call(self):
         with patch("services.hinglish_speech.urllib.request.urlopen") as remote:
@@ -48,43 +46,52 @@ class HinglishSpeechTests(unittest.TestCase):
         self.assertEqual(quantities,
                          "\u092e\u0941\u091d\u0947 100 kg safety rules \u092c\u0924\u093e\u0913!")
 
-    def test_unfamiliar_word_uses_existing_model_conversion(self):
-        body = {"done": True, "message": {"content": json.dumps({
-            "words": [MUJHE, "excavation", "\u0938\u092e\u091d\u093e\u0913"]
-        })}}
-        with patch("services.hinglish_speech.urllib.request.urlopen",
-                   return_value=io.BytesIO(json.dumps(body).encode())) as remote:
-            spoken = devanagari_speech("Mujhe excavation samjhao")
-        remote.assert_called_once()
+    def test_only_unfamiliar_word_is_sent_to_the_same_offline_model(self):
+        spoken, words = self.convert("Mujhe excavation samjhao", ["excavation"])
+        self.assertEqual(words, ["excavation"])
         self.assertEqual(spoken, MUJHE + " excavation \u0938\u092e\u091d\u093e\u0913")
 
+    def test_model_translation_is_rejected_without_changing_voice(self):
+        spoken, words = self.convert("Mujhe excavation samjhao",
+                                     ["\u0916\u0928\u0928"])
+        self.assertEqual(words, ["excavation"])
+        self.assertEqual(spoken, MUJHE + " excavation \u0938\u092e\u091d\u093e\u0913")
+
+    def test_phonetic_hindi_transliteration_is_kept(self):
+        spoken, words = self.convert("mujhe purri batao",
+                                     ["\u092a\u0942\u0930\u0940"])
+        self.assertEqual(words, ["purri"])
+        self.assertEqual(spoken, MUJHE + " \u092a\u0942\u0930\u0940 " + BATAO)
+
     def test_preserves_quantities_units_acronyms_and_punctuation(self):
-        output = self.convert("Mujhe 100.5 kg, GPU aur B12 batao!",
-                              [MUJHE, BATAO, BATAO, AUR, BATAO, BATAO])
+        with patch("services.hinglish_speech.urllib.request.urlopen") as remote:
+            output = devanagari_speech("Mujhe 100.5 kg, GPU aur B12 batao!")
+        remote.assert_not_called()
         self.assertEqual(output, f"{MUJHE} 100.5 kg, GPU {AUR} B12 {BATAO}!")
 
     def test_invalid_conversions_are_rejected(self):
-        for words in ([], ["mujhe", "batao"], [MUJHE, "do something else"],
-                      [MUJHE, chr(0x967)], [MUJHE, BATAO + " 100"]):
+        for words in ([], ["\u092a\u0942\u0930\u0940", "extra"],
+                      ["do something else"], [chr(0x967)],
+                      ["\u092a\u0942\u0930\u0940 100"]):
             with self.subTest(words=words), self.assertRaises(ValueError):
-                self.convert("mujhe batao", words)
+                self.convert("mujhe purri batao", words)
 
     def test_truncated_conversion_is_rejected(self):
         with self.assertRaises(ValueError):
-            self.convert("mujhe", [MUJHE], done_reason="length")
+            self.convert("mujhe purri batao", ["\u092a\u0942\u0930\u0940"], done_reason="length")
 
-    def test_english_segment_can_stay_unchanged(self):
-        self.assertEqual(self.convert("Check the safety valve.", ["Check", "the", "safety", "valve"]),
-                         "Check the safety valve.")
+    def test_english_segment_without_unknown_words_skips_model(self):
+        with patch("services.hinglish_speech.urllib.request.urlopen") as remote:
+            self.assertEqual(devanagari_speech("Check safety rules."), "Check safety rules.")
+        remote.assert_not_called()
 
     def test_invalid_first_conversion_retries_same_offline_model(self):
-        invalid = {"done": True, "message": {"content": json.dumps({"words": ["mujhe", "batao"]})}}
-        valid = {"done": True, "message": {"content": json.dumps({"words": [MUJHE, BATAO]})}}
+        invalid = {"done": True, "message": {"content": json.dumps({"words": []})}}
+        valid = {"done": True, "message": {"content": json.dumps({"words": ["\u092a\u0942\u0930\u0940"]})}}
         responses = [io.BytesIO(json.dumps(result).encode()) for result in (invalid, valid)]
-        with patch("services.hinglish_speech._fast_devanagari_speech", return_value=None), patch(
-            "services.hinglish_speech.urllib.request.urlopen", side_effect=responses
-        ) as call:
-            self.assertEqual(devanagari_speech("mujhe batao"), MUJHE + " " + BATAO)
+        with patch("services.hinglish_speech.urllib.request.urlopen", side_effect=responses) as call:
+            self.assertEqual(devanagari_speech("mujhe purri batao"),
+                             MUJHE + " \u092a\u0942\u0930\u0940 " + BATAO)
         self.assertEqual(call.call_count, 2)
         requests = [json.loads(item.args[0].data) for item in call.call_args_list]
         self.assertEqual(requests[0]["model"], requests[1]["model"])
@@ -92,11 +99,9 @@ class HinglishSpeechTests(unittest.TestCase):
         self.assertIn("previous conversion was invalid", requests[1]["messages"][0]["content"])
 
     def test_timeout_reports_conversion_failure(self):
-        with patch("services.hinglish_speech._fast_devanagari_speech", return_value=None), patch(
-            "services.hinglish_speech.urllib.request.urlopen", side_effect=TimeoutError
-        ):
+        with patch("services.hinglish_speech.urllib.request.urlopen", side_effect=TimeoutError):
             with self.assertRaisesRegex(ValueError, "written answer"):
-                devanagari_speech("mujhe batao")
+                devanagari_speech("mujhe purri batao")
 
     def test_hinglish_answer_stays_roman_but_piper_receives_hindi(self):
         original = TTSRequest(text="Mujhe batao.", language="hinglish")

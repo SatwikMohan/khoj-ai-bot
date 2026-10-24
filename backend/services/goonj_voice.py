@@ -32,15 +32,23 @@ def _runtime():
 
 
 def _pieces(text: str, limit: int = 150):
-    words = re.findall(r"\S+\s*", text)
-    chunk = ""
-    for word in words:
-        if chunk and len(chunk) + len(word) > limit:
-            yield chunk.strip()
-            chunk = ""
-        chunk += word
-    if chunk.strip():
-        yield chunk.strip()
+    remaining = text.strip()
+    while len(remaining) > limit:
+        prefix = remaining[:limit + 1]
+        # Prefer a clause boundary near the limit so prosody does not restart
+        # in the middle of a thought. Never split a word to satisfy the limit.
+        clauses = [match.end() for match in re.finditer(r"[,;:.!?\u0964](?=\s|$)", prefix)
+                   if match.end() >= limit * 0.65]
+        cut = clauses[-1] if clauses else prefix.rfind(" ")
+        if cut <= 0:
+            following = re.search(r"\s", remaining[limit:])
+            if following is None:
+                break
+            cut = limit + following.start()
+        yield remaining[:cut].strip()
+        remaining = remaining[cut:].strip()
+    if remaining:
+        yield remaining
 
 
 def synthesize(text: str, language: str, speed: float, cancelled=None):
@@ -50,17 +58,24 @@ def synthesize(text: str, language: str, speed: float, cancelled=None):
     _, pipelines, voice, device = _runtime()
     pipeline = pipelines["hi" if language == "hi" else "en"]
     parts = []
+    previous_piece = ""
     with torch.inference_mode():
         for piece in _pieces(text):
             if cancelled is not None and cancelled.is_set():
                 raise RuntimeError("Speech generation was cancelled.")
+            piece_audio = []
             for result in pipeline(piece, voice=voice, speed=speed):
                 if cancelled is not None and cancelled.is_set():
                     raise RuntimeError("Speech generation was cancelled.")
                 if result.audio is not None:
-                    parts.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
+                    piece_audio.append(np.asarray(result.audio, dtype=np.float32).reshape(-1))
+            if piece_audio:
+                if parts:
+                    # Ordinary word splits should not sound like a hesitation.
+                    pause = 2400 if re.search(r"[.!?\u0964]$", previous_piece) else 240
+                    parts.append(np.zeros(pause, dtype=np.float32))
+                parts.extend(piece_audio)
+                previous_piece = piece
     if not parts:
         raise RuntimeError("Goonj returned no audio.")
-    pause = np.zeros(2400, dtype=np.float32)
-    return np.concatenate([item for index, part in enumerate(parts)
-                           for item in ((pause, part) if index else (part,))])
+    return np.concatenate(parts)

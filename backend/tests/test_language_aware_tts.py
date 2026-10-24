@@ -15,6 +15,7 @@ from helpers.request_models import TTSRequest
 from services.audio_chunks import join_speech_segments
 from services.speech_language import speech_phrases, normalize_speech_text
 from services.language_service import detect_language
+from services.goonj_voice import _pieces
 from services.tts_service import _markdown_to_spoken_text, _synthesize_piper_speech
 from services.request_lifecycle import registry
 
@@ -63,10 +64,23 @@ class LanguageAwareSpeechTests(unittest.TestCase):
 
     def test_speech_only_numbers_dates_and_abbreviations(self):
         spoken = normalize_speech_text("GPU API \u0915\u0940 fee \u20b9500 \u0939\u0948 on 2026-10-04 at 9 AM", "hi")
-        self.assertIn("G P U A P I", spoken)
+        self.assertIn("\u091c\u0940 \u092a\u0940 \u092f\u0942 \u090f \u092a\u0940 \u0906\u0908", spoken)
         self.assertIn("500 \u0930\u0941\u092a\u092f\u0947", spoken)
         self.assertIn("4 \u0905\u0915\u094d\u091f\u0942\u092c\u0930 2026", spoken)
-        self.assertIn("9 A M", spoken)
+        self.assertIn("9 \u090f \u090f\u092e", spoken)
+
+    def test_mining_initialisms_have_speakable_letter_names(self):
+        self.assertIn("D G M S", normalize_speech_text("DGMS rules", "en"))
+        self.assertIn(
+            "\u0921\u0940 \u091c\u0940 \u090f\u092e \u090f\u0938",
+            normalize_speech_text("DGMS \u0915\u0947 \u0928\u093f\u092f\u092e", "hi"),
+        )
+
+    def test_goonj_splits_near_a_clause_without_cutting_words(self):
+        text = "The inspection interval is five days, but the reporting deadline is ten days."
+        pieces = list(_pieces(text, limit=50))
+        self.assertEqual(" ".join(pieces), text)
+        self.assertTrue(pieces[0].endswith(","))
 
     def test_plain_english_and_other_language_do_not_get_hindi_voice(self):
         self.assertEqual(speech_phrases("Can you remind me at 9 AM?", "en"),
