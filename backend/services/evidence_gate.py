@@ -19,6 +19,7 @@ class EvidenceStatus(str, Enum):
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     CONFLICTING_EVIDENCE = "CONFLICTING_EVIDENCE"
     REQUIRED_VERSION_NOT_FOUND = "REQUIRED_VERSION_NOT_FOUND"
+    VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,8 @@ class EvidenceDecision:
     documents: tuple
     reason: str
     missing_parts: tuple[str, ...] = ()
+    verified_quotes: tuple[str, ...] = ()
+    search_query: str = ""
 
 
 _STOP = set("a an and are as at be by can could do does for from how in is it its of on or the their this to was what when where which who why with would you your me about explain give tell mean elaborate kare page document source states state again main kya hai ka ki ke ko mein me aur par se ek iska".split())

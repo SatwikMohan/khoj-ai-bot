@@ -30,6 +30,9 @@ class LanguageContractTests(unittest.TestCase):
         engine = patch.object(config, "TTS_ENGINE", "veena")
         engine.start()
         self.addCleanup(engine.stop)
+        semantic = patch.object(config, "QA_SEMANTIC_EVIDENCE_ENABLED", False)
+        semantic.start()
+        self.addCleanup(semantic.stop)
 
     def test_piper_auto_hinglish_generates_pronounceable_english(self):
         with patch.multiple(config, TTS_ENGINE="piper", TTS_ENABLED=True, RESPONSE_LANGUAGE="auto", TTS_HINGLISH_TRANSLITERATION=False):

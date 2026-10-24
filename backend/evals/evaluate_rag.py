@@ -51,21 +51,41 @@ def _metrics(rows, k):
     }
 
 
-def evaluate(cases, *, baseline=False, candidate=False):
+def evaluate(cases, *, baseline=False, candidate=False, semantic=False):
     store, collection_name = _store_for_evaluation(candidate)
     results = []
     for case in cases:
         started = time.perf_counter()
         docs = _retrieve_context(store, case["question"], 10,
                                  lexical_collection_name=collection_name)
-        retrieval_ms = round((time.perf_counter() - started) * 1000, 1)
+        result = None
         if baseline:
             decision = "ANSWERABLE" if docs else "INSUFFICIENT_EVIDENCE"
             reason = "legacy_nonempty_retrieval"
         else:
-            from services.evidence_gate import assess_evidence
-            result = assess_evidence(case["question"], docs[:config.QA_TOP_K])
+            if semantic:
+                from services.semantic_evidence import assess_semantic_evidence, suggest_local_search_query
+                result = assess_semantic_evidence(case["question"], docs[:config.QA_TOP_K])
+                if result.status.value == "INSUFFICIENT_EVIDENCE":
+                    search_query = result.search_query or (
+                        suggest_local_search_query(case["question"]) if not docs else ""
+                    )
+                    if search_query:
+                        retry_docs = _retrieve_context(store, search_query, 10,
+                                                       scope_question=case["question"],
+                                                       lexical_collection_name=collection_name)
+                        if retry_docs:
+                            retry_result = assess_semantic_evidence(
+                                case["question"], retry_docs[:config.QA_TOP_K])
+                            if retry_result.status.value in {
+                                "ANSWERABLE", "PARTIAL_EVIDENCE", "CONFLICTING_EVIDENCE"
+                            }:
+                                docs, result = retry_docs, retry_result
+            else:
+                from services.evidence_gate import assess_evidence
+                result = assess_evidence(case["question"], docs[:config.QA_TOP_K])
             decision, reason = result.status.value, result.reason
+        retrieval_ms = round((time.perf_counter() - started) * 1000, 1)
         retrieved = [{
             "source": str(doc.metadata.get("source", "")),
             "chunk_id": str(doc.metadata.get("chunk_id", "")),
@@ -96,6 +116,7 @@ def evaluate(cases, *, baseline=False, candidate=False):
             "latency_ms_p50": round(statistics.median(row["retrieval_ms"] for row in rows), 1) if rows else None,
         }
     return {"summary": summary, "cases": results, "baseline": baseline,
+            "semantic": semantic,
             "collection": collection_name, "candidate": candidate,
             "limitations": "Source-level labels and lexical checks do not prove answer entailment."}
 
@@ -107,6 +128,7 @@ def main():
     parser.add_argument("--embed-dimensions", type=int)
     parser.add_argument("--baseline", action="store_true")
     parser.add_argument("--candidate", action="store_true", help="Evaluate the staged collection, not the active one.")
+    parser.add_argument("--semantic", action="store_true", help="Call the configured offline semantic evidence model.")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.embed_model:
@@ -114,7 +136,8 @@ def main():
     if args.embed_dimensions:
         config.OLLAMA_EMBED_DIMENSIONS = args.embed_dimensions
     cases = [json.loads(line) for line in args.cases.read_text(encoding="utf-8").splitlines() if line.strip()]
-    report = evaluate(cases, baseline=args.baseline, candidate=args.candidate)
+    report = evaluate(cases, baseline=args.baseline, candidate=args.candidate,
+                      semantic=args.semantic)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")

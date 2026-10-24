@@ -17,7 +17,10 @@ def provision_models(offline: bool = False) -> None:
     ) as response:
         installed = {item["name"] for item in json.load(response).get("models", [])}
 
-    for model in dict.fromkeys((config.OLLAMA_CHAT_MODEL, config.OLLAMA_EMBED_MODEL)):
+    models = [config.OLLAMA_CHAT_MODEL, config.OLLAMA_EMBED_MODEL]
+    if config.QA_SEMANTIC_EVIDENCE_ENABLED and config.QA_EVIDENCE_MODEL.strip():
+        models.append(config.QA_EVIDENCE_MODEL.strip())
+    for model in dict.fromkeys(models):
         if model in installed or (":" not in model and f"{model}:latest" in installed):
             print(f"Already available: {model}", flush=True)
             continue

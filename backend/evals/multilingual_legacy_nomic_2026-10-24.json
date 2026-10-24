@@ -1,0 +1,413 @@
+{
+  "summary": {
+    "validation": {
+      "cases": 3,
+      "recall_at_5": 1.0,
+      "precision_at_5": 1.0,
+      "mrr": 1.0,
+      "ndcg_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "precision_at_10": 1.0,
+      "ndcg_at_10": 1.0,
+      "decision_accuracy": 0.3333,
+      "unanswerable_false_admission_rate": 1.0,
+      "latency_ms_p50": 132.6
+    },
+    "heldout": {
+      "cases": 3,
+      "recall_at_5": 0.5,
+      "precision_at_5": 0.4,
+      "mrr": 0.5,
+      "ndcg_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "precision_at_10": 0.2,
+      "ndcg_at_10": 0.5,
+      "decision_accuracy": 0.3333,
+      "unanswerable_false_admission_rate": 0.0,
+      "latency_ms_p50": 169.4
+    },
+    "all": {
+      "cases": 6,
+      "recall_at_5": 0.6667,
+      "precision_at_5": 0.6,
+      "mrr": 0.6667,
+      "ndcg_at_5": 0.6667,
+      "recall_at_10": 0.6667,
+      "precision_at_10": 0.4667,
+      "ndcg_at_10": 0.6667,
+      "decision_accuracy": 0.3333,
+      "unanswerable_false_admission_rate": 0.6667,
+      "latency_ms_p50": 134.6
+    }
+  },
+  "cases": [
+    {
+      "id": "dgms_partial_hi",
+      "split": "heldout",
+      "category": "cross_language_partial",
+      "question": "can you explain dgms in hindi to the audience",
+      "expected_decision": "PARTIAL_EVIDENCE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [
+        "Handbook_PDF_21_1751282675.pdf"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "632d2e6b06c904b5fffb0f43c78ae70066f5bfed",
+          "dense_score": null,
+          "hybrid_score": 0.016393,
+          "content_sha256": "970791fc9238"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "27abb7ee23fd8a37dcb1868bcb1bed471a16a7b4",
+          "dense_score": null,
+          "hybrid_score": 0.016129,
+          "content_sha256": "541c82fb7efa"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "fb05e709e118b1b723351bef285388ff7bfcfa97",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "844b77d03a2e"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "d634540d8b27cc1eb3d7794e240aec5748e78b79",
+          "dense_score": null,
+          "hybrid_score": 0.015625,
+          "content_sha256": "d5b35a35650e"
+        }
+      ],
+      "retrieval_ms": 5902.9
+    },
+    {
+      "id": "safety_hi",
+      "split": "heldout",
+      "category": "cross_language",
+      "question": "खनन में भारी मशीनों और विस्फोटकों के आसपास सुरक्षा क्यों महत्वपूर्ण है?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [
+        "Safety Modules.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5649,
+          "hybrid_score": 0.016393,
+          "content_sha256": "1bf13da366a0"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5554,
+          "hybrid_score": 0.015625,
+          "content_sha256": "a99ee94af370"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5301,
+          "hybrid_score": 0.011364,
+          "content_sha256": "d50f1e4cb4ec"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5613,
+          "hybrid_score": 0.016129,
+          "content_sha256": "279b38900363"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5602,
+          "hybrid_score": 0.015873,
+          "content_sha256": "2af6d97ee8f2"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5546,
+          "hybrid_score": 0.015385,
+          "content_sha256": "472b5c03498c"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5543,
+          "hybrid_score": 0.015152,
+          "content_sha256": "14ce22e5c923"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5469,
+          "hybrid_score": 0.014925,
+          "content_sha256": "a529996e75f0"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.5464,
+          "hybrid_score": 0.014706,
+          "content_sha256": "df4b9fe93a5e"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "",
+          "dense_score": 0.544,
+          "hybrid_score": 0.014493,
+          "content_sha256": "358aa4bce6e1"
+        }
+      ],
+      "retrieval_ms": 136.0
+    },
+    {
+      "id": "bwe_hinglish",
+      "split": "validation",
+      "category": "mixed_language",
+      "question": "BWE ka main fayda kya hai?",
+      "expected_decision": "ANSWERABLE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [
+        "BWE.docx"
+      ],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "dab0206e5b56faba529b424be23b173bf687c2e5",
+          "dense_score": null,
+          "hybrid_score": 0.016393,
+          "content_sha256": "94b10db6ffc8"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "7eb294a9946cb43a4bc47805d085b2870f2f9774",
+          "dense_score": null,
+          "hybrid_score": 0.016129,
+          "content_sha256": "3b2c35ac5547"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "b42c5c676c0d4542d60f51fb39dd0fd865665bfd",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "ca5fa068820f"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "2b71baf787665d9f4c0d4da0cfb2e6041c8b25f2",
+          "dense_score": null,
+          "hybrid_score": 0.015625,
+          "content_sha256": "c1f507f8108c"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "e705a3a83bef4dfff5a6aef9a6b41da8bc1145d2",
+          "dense_score": null,
+          "hybrid_score": 0.015385,
+          "content_sha256": "f59dee07ab60"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "5719ffe7d7f572d474ee96da1a8d949948e84c8d",
+          "dense_score": null,
+          "hybrid_score": 0.015152,
+          "content_sha256": "3a9fbd15f15a"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "baee1ac86233173a89d4d1b53020233a6cc796dc",
+          "dense_score": null,
+          "hybrid_score": 0.014925,
+          "content_sha256": "c371e4d8f0bd"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "0b6828766f871cf6f3af73d98dee089e89151388",
+          "dense_score": null,
+          "hybrid_score": 0.014706,
+          "content_sha256": "9240d16f823c"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "82adfed029a58cbae49db329dbfa4fa0498095cc",
+          "dense_score": null,
+          "hybrid_score": 0.014493,
+          "content_sha256": "f5bcb87ba476"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "fe688833f100b7b6723a63bb47341584fca02092",
+          "dense_score": null,
+          "hybrid_score": 0.014286,
+          "content_sha256": "becf0ddaff5d"
+        }
+      ],
+      "retrieval_ms": 132.6
+    },
+    {
+      "id": "missing_warranty",
+      "split": "validation",
+      "category": "unsupported_relation",
+      "question": "What is the warranty period for a dragline excavator?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6755,
+          "hybrid_score": 0.032522,
+          "content_sha256": "8be7aeacd0de"
+        },
+        {
+          "source": "raw_data_files/Q&As/Drilling & Blasting.docx",
+          "chunk_id": "0c0d70f09368bed54111f33c0124ad55714448e9",
+          "dense_score": null,
+          "hybrid_score": 0.015873,
+          "content_sha256": "9c9b278db235"
+        },
+        {
+          "source": "raw_data_files/Q&As/BWE.docx",
+          "chunk_id": "e764264e1e7d8635aa0578dce520880109e1593d",
+          "dense_score": null,
+          "hybrid_score": 0.015385,
+          "content_sha256": "078fdcbb9c2b"
+        },
+        {
+          "source": "raw_data_files/Q&As/UG Mines .docx",
+          "chunk_id": "",
+          "dense_score": 0.6209,
+          "hybrid_score": 0.011236,
+          "content_sha256": "cb0bd26bdb46"
+        },
+        {
+          "source": "raw_data_files/Q&As/Shovel & Dumper.docx",
+          "chunk_id": "",
+          "dense_score": 0.6072,
+          "hybrid_score": 0.01,
+          "content_sha256": "4a864bb326af"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6701,
+          "hybrid_score": 0.032522,
+          "content_sha256": "3344b19a6cf7"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6325,
+          "hybrid_score": 0.028125,
+          "content_sha256": "2012b0515d69"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6602,
+          "hybrid_score": 0.015873,
+          "content_sha256": "8966a67f98f4"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6577,
+          "hybrid_score": 0.015625,
+          "content_sha256": "5413aae18884"
+        },
+        {
+          "source": "raw_data_files/Q&As/Dragline.docx",
+          "chunk_id": "",
+          "dense_score": 0.6565,
+          "hybrid_score": 0.015385,
+          "content_sha256": "d7c1d512a129"
+        }
+      ],
+      "retrieval_ms": 118.0
+    },
+    {
+      "id": "mines_vs_minerals",
+      "split": "validation",
+      "category": "superficially_related",
+      "question": "How many critical mines did India list in December 2023?",
+      "expected_decision": "INSUFFICIENT_EVIDENCE",
+      "actual_decision": "ANSWERABLE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [],
+      "retrieved": [
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7876,
+          "hybrid_score": 0.032266,
+          "content_sha256": "50c94f93bb5b"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7684,
+          "hybrid_score": 0.031054,
+          "content_sha256": "4f797952ec74"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/Handbook_PDF_21_1751282675.pdf",
+          "chunk_id": "f91953840a37a7190246228865469a7d81f5063d",
+          "dense_score": null,
+          "hybrid_score": 0.013333,
+          "content_sha256": "4957f4b79fee"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/19_1751370840.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7849,
+          "hybrid_score": 0.032266,
+          "content_sha256": "8278e3522b41"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7578,
+          "hybrid_score": 0.014493,
+          "content_sha256": "2f71a6605449"
+        },
+        {
+          "source": "raw_data_files/Critical Minerals/649d4212cceb01688027666.pdf",
+          "chunk_id": "",
+          "dense_score": 0.7348,
+          "hybrid_score": 0.012821,
+          "content_sha256": "b548f0612520"
+        }
+      ],
+      "retrieval_ms": 133.2
+    },
+    {
+      "id": "missing_edition",
+      "split": "heldout",
+      "category": "missing_version",
+      "question": "What did the 2099 edition of the mine safety rules require?",
+      "expected_decision": "REQUIRED_VERSION_NOT_FOUND",
+      "actual_decision": "INSUFFICIENT_EVIDENCE",
+      "decision_reason": "legacy_nonempty_retrieval",
+      "expected_sources": [],
+      "retrieved": [],
+      "retrieval_ms": 169.4
+    }
+  ],
+  "baseline": true,
+  "semantic": false,
+  "collection": "texmin_qa__eb33bc6823f8__v6",
+  "candidate": false,
+  "limitations": "Source-level labels and lexical checks do not prove answer entailment."
+}

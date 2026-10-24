@@ -44,7 +44,12 @@ QA_TOP_K = 5
 QA_ANSWER_CONTEXT_DOCS = 3  # Give grounded answers room for several supporting passages.
 QA_DIAGNOSTICS_ENABLED = False  # Logs system template, hashes and passage IDs; never full private text.
 QA_EVIDENCE_GATE_ENABLED = True  # Check requested facts before generation.
-QA_EVIDENCE_GATE_TIMEOUT_SECONDS = 8  # Reserved for a future bounded semantic verifier.
+QA_SEMANTIC_EVIDENCE_ENABLED = True  # Verify meaning across languages before generation.
+QA_EVIDENCE_MODEL = ""  # Empty reuses the chat model; set to an installed smaller Ollama model after benchmarking.
+QA_EVIDENCE_GATE_TIMEOUT_SECONDS = 8
+QA_EVIDENCE_MAX_PASSAGES = 5
+QA_EVIDENCE_MAX_CHARS = 6500
+QA_EVIDENCE_NUM_PREDICT = 256
 # None selects model-specific embedding prefixes automatically; "" disables them.
 EMBED_QUERY_PREFIX = None
 EMBED_DOCUMENT_PREFIX = None
@@ -259,6 +264,8 @@ def validate_config() -> None:
         raise ValueError("QA stage timeouts and worker capacity must be positive.")
     if QA_EVIDENCE_GATE_TIMEOUT_SECONDS <= 0:
         raise ValueError("QA_EVIDENCE_GATE_TIMEOUT_SECONDS must be positive.")
+    if min(QA_EVIDENCE_MAX_PASSAGES, QA_EVIDENCE_MAX_CHARS, QA_EVIDENCE_NUM_PREDICT) <= 0:
+        raise ValueError("Evidence verifier limits must be positive.")
     if TTS_TRANSLITERATION_TIMEOUT_SECONDS <= 0:
         raise ValueError("TTS_TRANSLITERATION_TIMEOUT_SECONDS must be positive.")
     if PIPER_DEVICE not in {"cpu", "cuda"}:

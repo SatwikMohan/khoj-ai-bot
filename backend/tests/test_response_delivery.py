@@ -86,7 +86,8 @@ class ResponseDeliveryTests(unittest.TestCase):
             patch('services.qa_service._retrieve_context', return_value=[Document(
                 page_content='The storage limit is 100 kg.', metadata={'source': 'rules.pdf', 'page': 3},
             )]),
-            patch.multiple('config', RESPONSE_LANGUAGE='english', QA_RESPONSE_TIMEOUT_SECONDS=3),
+            patch.multiple('config', RESPONSE_LANGUAGE='english', QA_RESPONSE_TIMEOUT_SECONDS=3,
+                           QA_SEMANTIC_EVIDENCE_ENABLED=False),
         ]
         for item in patches:
             item.start()
