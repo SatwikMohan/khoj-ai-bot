@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -111,13 +112,59 @@ class LanguageContractTests(unittest.TestCase):
             english = resolve_language_context("please explain this in English")
             mixed = resolve_language_context("explain it in Hinglish")
             selected = resolve_language_context("explain it in Hindi", selected_language="en")
+            roman_hindi = resolve_language_context("DGMS ko Hindi mein batao")
+            roman_english = resolve_language_context("DGMS ko English mein batao")
         self.assertEqual(hindi.detected_language, "en")
         self.assertEqual((hindi.target_language, english.target_language,
                           mixed.target_language, selected.target_language),
                          ("hi", "en", "hinglish", "en"))
+        self.assertEqual((roman_hindi.target_language, roman_english.target_language),
+                         ("hi", "en"))
+
+    def test_single_voice_auto_mode_uses_a_speakable_language(self):
+        with patch.multiple(config, RESPONSE_LANGUAGE="auto", TTS_ENGINE="goonj", TTS_ENABLED=True):
+            context = resolve_language_context("Explique la estructura del catalogo")
+        self.assertEqual(context.detected_language, "es")
+        self.assertEqual((context.target_language, context.tts_language), ("en", "en"))
+        with patch.multiple(config, RESPONSE_LANGUAGE="auto", TTS_ENGINE="goonj", TTS_ENABLED=False):
+            self.assertEqual(resolve_language_context("Explique la estructura del catalogo").target_language, "es")
+
+    def test_short_hinglish_followup_streams_without_spanish_retry(self):
+        prompts = []
+
+        def generate(inputs):
+            prompts.append(str(list(inputs)))
+            yield AIMessageChunk(content=("DGMS mine safety ke rules banata hai. "
+                                          "Yeh mines ki inspection bhi karta hai."))
+
+        with patch.object(config, "RESPONSE_LANGUAGE", "auto"), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context",
+            return_value=[Document(page_content="DGMS oversees mine safety.",
+                                   metadata={"source": "manual"})]
+        ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
+            events = list(stream_answer_events("dgms ko elaborate kare", chat_history=[
+                {"role": "user", "content": "dgms ke bare mein purri jankari de"},
+                {"role": "assistant", "content": "DGMS mine safety dekhta hai."},
+            ]))
+
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("error", [event["type"] for event in events])
+        self.assertEqual(events[-1]["language"], "hinglish")
+        self.assertIn("DGMS mine safety", events[-1]["answer"])
+
+    def test_english_guard_ignores_uncorroborated_spanish_guess(self):
+        answer = ("DGMS is the Directorate General of Mines Safety in India. "
+                  "It oversees mine safety regulations and inspections.")
+        classifier = SimpleNamespace(classify=lambda text: ("es", 0.99))
+        with patch("services.language_service._classifier", return_value=classifier):
+            self.assertTrue(answer_language_matches(answer, "en"))
 
     def test_obvious_wrong_language_is_rejected(self):
         self.assertFalse(answer_language_matches("The storage limit is 100 kg.", "hi"))
+        self.assertTrue(answer_language_matches(
+            "DGMS \u0915\u093e full form Directorate General of Mines Safety \u0939\u0948\u0964", "hi"))
         self.assertFalse(answer_language_matches(
             "La estructura del cat?logo contiene los detalles de seguridad para todos los trabajadores.",
             "en",

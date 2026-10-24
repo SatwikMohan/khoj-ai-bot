@@ -199,6 +199,17 @@ class LanguageAndVoiceTests(unittest.TestCase):
             self.assertEqual(detect_language("Explique la estructura del catálogo"), "es")
         self.assertIn("(es)", language_instruction("es"))
 
+    def test_code_mixed_followup_cannot_be_promoted_to_spanish(self):
+        self.assertEqual(detect_language("dgms ko elaborate kare"), "hinglish")
+        self.assertEqual(detect_language("dgms ke bare mein purri jankari de"), "hinglish")
+        self.assertEqual(detect_language("please elaborate on DGMS"), "en")
+        self.assertEqual(detect_language("safety rules batao"), "hinglish")
+        self.assertEqual(detect_language("isko detail me samjhao"), "hinglish")
+        with patch("services.language_service._classifier", return_value=SimpleNamespace(
+            classify=lambda text: ("es", 0.99)
+        )):
+            self.assertEqual(detect_language("Could you elaborate on DGMS rules?"), "en")
+
     def test_request_language_selects_piper_voice(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

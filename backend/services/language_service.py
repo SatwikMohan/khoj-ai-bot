@@ -28,6 +28,8 @@ ROMAN_HINDI = {
     "hota", "hoti", "hote", "hogi", "honge", "karta", "karti",
     "rakha", "rakhi", "rakhe", "gaya", "gayi", "gaye", "diya",
     "dikhata", "dikhati", "batata", "batati", "samajh", "sakte",
+    "kare", "karen", "karein", "jankari", "jaankari", "matlab",
+    "samjhaiye", "samjhaye", "bataein", "bataen", "isko", "baare",
 }
 ROMAN_HINDI_STRONG = ROMAN_HINDI - {"ka", "ki", "ke", "se", "ko", "mein", "aur", "kal"}
 ENGLISH_CLUES = {"the", "and", "is", "are", "what", "which", "with", "from", "this", "that", "their", "into", "before", "after"}
@@ -37,7 +39,7 @@ SHORT_LANGUAGE_WORDS = {
     "shukriya": "hinglish", "dhanyavad": "hinglish",
 }
 LATIN_CLUES = {
-    "es": {"explique", "estructura", "catálogo", "catalogo", "cuál", "cómo", "quiero", "dame", "años"},
+    "es": {"la", "del", "los", "explique", "estructura", "catálogo", "catalogo", "cuál", "cómo", "quiero", "dame", "años"},
     "pt": {"qual", "estrutura", "catálogo", "catalogo", "quais", "pode", "diga", "tabela"},
     "fr": {"quelle", "quelles", "catalogue", "expliquez", "donnez", "sont", "avec"},
     "de": {"wie", "struktur", "katalogs", "welche", "bitte", "sind"},
@@ -68,23 +70,25 @@ def detect_language(text: str, fallback: str = "en") -> str:
     if len(words) == 1 and words[0] in SHORT_LANGUAGE_WORDS:
         return SHORT_LANGUAGE_WORDS[words[0]]
     hindi_words = sum(word in ROMAN_HINDI for word in words)
-    if hindi_words >= 2 or (hindi_words and len(words) <= 2):
+    english_clues = len(set(words) & ENGLISH_CLUES)
+    if (hindi_words >= 2 or (hindi_words and len(words) <= 2)
+            or (len(words) <= 6 and english_clues < 2
+                and any(word in ROMAN_HINDI_STRONG for word in words))):
         return "hinglish"
     # Abbreviations and identifiers dominate very short questions. Avoid a
     # language guess based on one product name or schema identifier.
     if len(words) < 4:
         return fallback
-    if len(set(words) & ENGLISH_CLUES) >= 3:
+    if english_clues >= 3:
         return "en"
     clue_scores = {code: len(set(words) & clues) for code, clues in LATIN_CLUES.items()}
     best = max(clue_scores, key=clue_scores.get)
     if clue_scores[best] >= 2 and sum(score == clue_scores[best] for score in clue_scores.values()) == 1:
         return best
-    classifier = _classifier()
-    if classifier is None:
-        return fallback
-    code, confidence = classifier.classify(text)
-    return code if confidence >= 0.7 else fallback
+    # langid is unreliable on short code-mixed questions and identifiers: for
+    # example, it calls "dgms ko elaborate kare" Spanish. Only the script and
+    # distinctive word clues above can change the automatic reply language.
+    return fallback
 
 
 def _explicit_response_language(question: str) -> str | None:
@@ -93,6 +97,11 @@ def _explicit_response_language(question: str) -> str | None:
         r"\b(?:in|into)\s+(?:(?:simple|plain|proper|fluent|natural)\s+)?"
         r"(hindi|english|hinglish)\b", question, re.IGNORECASE,
     )
+    if not match:
+        match = re.search(
+            r"\b(hindi|english|hinglish)\s+(?:mein|me|mai|main)\b",
+            question, re.IGNORECASE,
+        )
     return {"hindi": "hi", "english": "en", "hinglish": "hinglish"}.get(
         match.group(1).lower() if match else ""
     )
@@ -152,6 +161,13 @@ def resolve_language_context(
     explicit = _explicit_response_language(current) if configured == "auto" else None
     target = selected or (explicit or detected if configured == "auto" else configured)
     target = {"english": "en", "hindi": "hi"}.get(target, target)
+    # The configured single offline speaker is validated for these three
+    # languages. In automatic voice mode, keep other detected languages from
+    # selecting an answer that cannot be spoken.
+    if (configured == "auto" and selected is None and config.TTS_ENABLED
+            and config.TTS_ENGINE.strip().lower() in {"goonj", "veena"}
+            and target not in {"en", "hi", "hinglish"}):
+        target = "en"
     # Choose a pronounceable answer before generation, not a second LLM
     # translation after generation. Keep detection and explicit choices intact.
     if (target == "hinglish" and selected is None and configured == "auto"
@@ -181,7 +197,14 @@ def answer_language_matches(text: str, expected: str) -> bool:
         return True
     devanagari = sum("\u0900" <= char <= "\u097f" for char in letters)
     if expected == "hi":
-        return devanagari / len(letters) >= 0.18
+        if devanagari / len(letters) >= 0.18:
+            return True
+        # Long English names and acronyms can dominate a valid Hindi answer.
+        hindi_words = re.findall(r"[\u0900-\u097f]+", body)
+        grammar_words = {"\u0939\u0948", "\u0939\u0948\u0902", "\u0925\u093e", "\u0925\u0940", "\u0915\u093e", "\u0915\u0940", "\u0915\u0947", "\u092e\u0947\u0902", "\u0938\u0947", "\u0914\u0930", "\u092f\u0939", "\u092f\u0947"}
+        return len(hindi_words) >= 3 or (
+            len(hindi_words) >= 2 and bool(set(hindi_words) & grammar_words)
+        )
     if expected == "en":
         if devanagari / len(letters) >= 0.18:
             return False
@@ -194,7 +217,9 @@ def answer_language_matches(text: str, expected: str) -> bool:
             classifier = _classifier()
             if classifier:
                 detected, confidence = classifier.classify(body)
-                if detected != "en" and confidence >= 0.95:
+                clues = LATIN_CLUES.get(detected, set())
+                if (detected != "en" and confidence >= 0.95
+                        and len(set(words) & clues) >= 2):
                     return False
         return True
     if expected == "hinglish":
