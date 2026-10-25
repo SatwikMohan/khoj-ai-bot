@@ -27,6 +27,7 @@ from services.qa_service import (
     _is_general_query,
     _is_summary_query,
     _looks_like_internal_analysis,
+    _mentions_identifiers,
     _retrieve_context,
     _topic_opener_response,
 )
@@ -124,6 +125,14 @@ class RetrievalQueryTests(unittest.TestCase):
     def test_lowercase_acronym_is_grounded_without_treating_language_as_entity(self):
         self.assertEqual(_query_identifiers("dgms ko elaborate kare"), ("dgms",))
         self.assertEqual(_query_identifiers("Explain the rules in HINDI"), ())
+
+    def test_acronym_retrieval_does_not_confuse_mixed_case_plural(self):
+        plural = Document(page_content="State DGMs receive mineral exploration training.",
+                          metadata={"source": "handbook.pdf"})
+        acronym = Document(page_content="DGMS is defined in the indexed mining safety rules.",
+                           metadata={"source": "rules.pdf"})
+        self.assertFalse(_mentions_identifiers(plural, _query_identifiers("what is dgms")))
+        self.assertTrue(_mentions_identifiers(acronym, _query_identifiers("what is dgms")))
 
     def test_lexical_or_hit_needs_substantive_overlap(self):
         unrelated = Document(page_content="Mining safety information is important.",

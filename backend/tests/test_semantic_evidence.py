@@ -22,7 +22,7 @@ def response(decision, evidence=None, missing_parts=None, english_search_query="
 class SemanticEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.passages = [Document(
-            page_content="State DGMs receive modern tools and training for mineral exploration in the region.",
+            page_content="DGMS personnel receive modern tools and training for mineral exploration in the region.",
             metadata={"source": "handbook.pdf", "year": "2024"},
         )]
 
@@ -31,7 +31,7 @@ class SemanticEvidenceTests(unittest.TestCase):
             "क्या आप DGMS के बारे में हिंदी में समझा सकते हैं?", self.passages,
             chat=lambda *_: response("PARTIAL_EVIDENCE", [{
                 "passage_id": 0,
-                "quote": "State DGMs receive modern tools and training for mineral exploration in the region.",
+                "quote": "DGMS personnel receive modern tools and training for mineral exploration in the region.",
             }], ["The indexed passage does not define the abbreviation or full remit."]),
         )
         self.assertEqual(decision.status, EvidenceStatus.PARTIAL_EVIDENCE)
@@ -54,7 +54,54 @@ class SemanticEvidenceTests(unittest.TestCase):
                 "quote": "DGMS is the national safety authority for all mining operations.",
             }]),
         )
+        self.assertEqual(decision.status, EvidenceStatus.VERIFICATION_UNAVAILABLE)
+        self.assertEqual(decision.documents, ())
+
+    def test_mixed_case_plural_does_not_establish_acronym(self):
+        passage = Document(page_content="State DGMs receive training to develop auctionable mineral blocks.",
+                           metadata={"source": "handbook.pdf"})
+        def must_not_run(*_):
+            self.fail("An unrelated mixed-case plural must be rejected before model verification")
+        decision = assess_semantic_evidence("what is dgms", [passage], chat=must_not_run)
         self.assertEqual(decision.status, EvidenceStatus.INSUFFICIENT_EVIDENCE)
+        self.assertEqual(decision.reason, "requested_identifier_not_present")
+
+    def test_invalid_model_quote_can_be_repaired_with_literal_source_sentence(self):
+        passage = Document(page_content=(
+            "DGMS means Directorate General of Mines Safety. "
+            "It is responsible for mine safety oversight in this document."
+        ), metadata={"source": "definition.pdf"})
+        replies = iter([
+            response("ANSWERABLE", [{"passage_id": 0,
+                                      "quote": "DGMS is the Directorate General of Mines Safety."}]),
+            SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                "decision": "ANSWERABLE", "sentence_ids": ["p0s0"], "missing_parts": [],
+            }))),
+        ])
+        decision = assess_semantic_evidence("what is DGMS", [passage],
+                                            chat=lambda *_: next(replies))
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+        self.assertEqual(decision.reason, "semantic_sentence_id_verified")
+        self.assertEqual(decision.documents, (passage,))
+        self.assertEqual(decision.verified_quotes,
+                         ("DGMS means Directorate General of Mines Safety.",))
+
+    def test_repair_cannot_select_a_sentence_without_requested_acronym(self):
+        passage = Document(page_content=(
+            "DGMS is discussed in the report. "
+            "An unrelated agency controls all mines everywhere."
+        ), metadata={"source": "report.pdf"})
+        replies = iter([
+            response("ANSWERABLE", [{"passage_id": 0,
+                                      "quote": "DGMS controls all mines everywhere."}]),
+            SimpleNamespace(message=SimpleNamespace(content=json.dumps({
+                "decision": "ANSWERABLE", "sentence_ids": ["p0s1"], "missing_parts": [],
+            }))),
+        ])
+        decision = assess_semantic_evidence("what is DGMS", [passage],
+                                            chat=lambda *_: next(replies))
+        self.assertEqual(decision.status, EvidenceStatus.VERIFICATION_UNAVAILABLE)
+        self.assertEqual(decision.documents, ())
 
     def test_model_failure_is_distinct_from_missing_information(self):
         def fails(*_):
@@ -74,7 +121,7 @@ class SemanticEvidenceTests(unittest.TestCase):
                             done_reason="length", eval_count=256),
             response("PARTIAL_EVIDENCE", [{
                 "passage_id": 0,
-                "quote": "State DGMs receive modern tools and training for mineral exploration in the region.",
+                "quote": "DGMS personnel receive modern tools and training for mineral exploration in the region.",
             }], ["The full definition is absent."]),
         ])
         calls = []
@@ -94,7 +141,7 @@ class SemanticEvidenceTests(unittest.TestCase):
 
     def test_complete_quote_in_truncated_json_is_only_partial_evidence(self):
         truncated = ('{"decision":"ANSWERABLE","evidence":[{"passage_id":0,'
-                     '"quote":"State DGMs receive modern tools and training for '
+                     '"quote":"DGMS personnel receive modern tools and training for '
                      'mineral exploration in the region."}')
         decision = assess_semantic_evidence(
             "Explain DGMS", self.passages,
@@ -145,7 +192,7 @@ class SemanticEvidenceTests(unittest.TestCase):
                 "DGMS के बारे में बताइए", self.passages,
                 chat=lambda *_: response("PARTIAL_EVIDENCE", [{
                     "passage_id": 0,
-                    "quote": "State DGMs receive modern tools and training for mineral exploration in the region.",
+                    "quote": "DGMS personnel receive modern tools and training for mineral exploration in the region.",
                 }], ["The full form is not established."]),
             ),
         ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
@@ -154,7 +201,7 @@ class SemanticEvidenceTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "done")
         self.assertIn("पूरा नाम नहीं", events[-1]["answer"])
         self.assertIn("The full form is not established.", " ".join(prompts))
-        self.assertIn("State DGMs receive modern tools", " ".join(prompts))
+        self.assertIn("DGMS personnel receive modern tools", " ".join(prompts))
 
     def test_cross_language_retry_uses_new_relevant_passage(self):
         unrelated = Document(page_content="Critical minerals support mineral exploration and development.",
@@ -179,7 +226,7 @@ class SemanticEvidenceTests(unittest.TestCase):
             events = list(stream_answer_events("खनन सुरक्षा में विस्फोटकों की क्या भूमिका है?"))
         self.assertEqual(search.call_count, 2)
         self.assertEqual(events[-1]["type"], "done")
-        self.assertEqual(events[-1]["sources"][0]["source"], "safety.pdf")
+        self.assertEqual(events[-1]["sources"], [])
 
 
 if __name__ == "__main__":

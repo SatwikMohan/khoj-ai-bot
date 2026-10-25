@@ -24,6 +24,7 @@ _SYSTEM = (
     "not establish its definition or requested details. Choose INSUFFICIENT_EVIDENCE "
     "if they establish nothing useful. Respect exact entities, numbers, negations, "
     "years, versions and relationships. Never infer an acronym expansion from memory. "
+    "Keep all-caps acronyms distinct from mixed-case plurals ending in s. "
     "Copy at most two short exact continuous quotes from passages and their "
     "passage_id. If passages disagree on a requested fact, choose CONFLICTING_EVIDENCE. "
     "If evidence is insufficient and the question is Hindi or Roman Hindi, also "
@@ -60,6 +61,94 @@ def _normalize(value: str) -> str:
 def _exact_quote(quote: str, passage: str) -> bool:
     normalized = _normalize(quote)
     return len(normalized) >= 20 and len(normalized.split()) >= 3 and normalized in _normalize(passage)
+
+
+def _question_acronyms(question: str) -> tuple[str, ...]:
+    """A lower-case consonant token can be a spoken/typed acronym.
+
+    Keep acronym case meaningful in the evidence.  ``DGMs`` is often the
+    plural of ``DGM`` and cannot silently establish facts about ``DGMS``.
+    """
+    fillers = {"what", "when", "where", "which", "about", "with", "from", "that",
+               "this", "kare", "mein", "nahi", "bata", "kya", "hai"}
+    tokens = re.findall(r"(?<![A-Za-z])[A-Za-z]{3,8}(?![A-Za-z])", question)
+    return tuple(dict.fromkeys(token.upper() for token in tokens
+                               if (token.isupper() or not re.search(r"[aeiouy]", token, re.I))
+                               and token.lower() not in fillers))
+
+
+def _acronyms_present(question: str, passage: str) -> bool:
+    for acronym in _question_acronyms(question):
+        # Allow all caps, all lower case, and dotted OCR/rendering variants,
+        # but not mixed-case plurals such as DGMs for DGMS.
+        dotted = r"\.?\s*".join(map(re.escape, acronym)) + r"\.?(?![A-Za-z])"
+        plain = r"(?<![A-Za-z])(?:" + re.escape(acronym) + "|" + re.escape(acronym.lower()) + r")(?![A-Za-z])"
+        if not (re.search(plain, passage) or re.search(r"(?<![A-Za-z])" + dotted, passage)):
+            return False
+    return True
+
+
+def _evidence_spans(passages: list, allowed_indices: set[int]) -> dict[str, tuple[int, str]]:
+    """Number literal source sentences for a bounded quote-repair request."""
+    spans = {}
+    for index in sorted(allowed_indices):
+        parts = re.split(r"(?<=[.!?।])\s+|\n+", passages[index].page_content)
+        for part in parts:
+            part = part.strip()
+            if len(part) < 20:
+                continue
+            span_id = f"p{index}s{len(spans)}"
+            spans[span_id] = (index, part)
+    return spans
+
+
+def _repair_quote_selection(question: str, passages: list, allowed_indices: set[int],
+                            model: str, chat=None) -> EvidenceDecision | None:
+    """Ask once for source sentence IDs when a model paraphrases its own quote.
+
+    The selected text is copied from the index by this process; no model quote
+    or model-supplied factual text is admitted as evidence.
+    """
+    spans = _evidence_spans(passages, allowed_indices)
+    if not spans:
+        return None
+    body = "\n".join(f"[{span_id}] {span}" for span_id, (_, span) in spans.items())
+    payload = (
+        "Question:\n" + question + "\n\nIndexed source sentences:\n" + body +
+        "\n\nChoose at most two sentence IDs that directly establish facts requested by the "
+        "question. A sentence about the same topic is not enough. Distinguish an "
+        "all-caps acronym from a mixed-case plural ending in s. A mention of an "
+        "acronym without its meaning does not establish its full form. Return compact "
+        "JSON with decision, sentence_ids, missing_parts. If no sentence establishes "
+        "a requested fact, use INSUFFICIENT_EVIDENCE and an empty sentence_ids list."
+    )
+    # This is a single bounded repair, not another generation loop.
+    try:
+        response = (chat or _sentence_chat)(payload, model)
+        data = _parse_verdict(response)
+        status = EvidenceStatus(data.get("decision", ""))
+    except Exception:
+        return None
+    if status == EvidenceStatus.INSUFFICIENT_EVIDENCE:
+        return EvidenceDecision(status, (), "semantic_repair_found_no_direct_support")
+    if status not in {EvidenceStatus.ANSWERABLE, EvidenceStatus.PARTIAL_EVIDENCE}:
+        return None
+    ids = data.get("sentence_ids", [])
+    if not isinstance(ids, list) or len(ids) > 2:
+        return None
+    chosen = [spans[span_id] for span_id in ids if isinstance(span_id, str) and span_id in spans
+              and _acronyms_present(question, spans[span_id][1])]
+    if not chosen:
+        return None
+    docs = tuple(passages[index] for index in dict.fromkeys(index for index, _ in chosen))
+    quotes = tuple(span for _, span in chosen)
+    missing = data.get("missing_parts", [])
+    missing = tuple(str(part)[:180] for part in missing if isinstance(part, str) and part.strip()) if isinstance(missing, list) else ()
+    if status == EvidenceStatus.ANSWERABLE and missing:
+        status = EvidenceStatus.PARTIAL_EVIDENCE
+    if status == EvidenceStatus.PARTIAL_EVIDENCE and not missing:
+        missing = ("The indexed passages do not establish the complete requested explanation.",)
+    return EvidenceDecision(status, docs, "semantic_sentence_id_verified", missing, quotes)
 
 
 def _safe_search_query(original: str, proposed: object) -> str:
@@ -116,6 +205,34 @@ def _compact_chat(payload: str, model: str):
             "one faithful English search). No prose or markdown."
         )}, {"role": "user", "content": payload}],
         format="json", think=False,
+        options={"temperature": 0, "num_predict": min(256, int(config.QA_EVIDENCE_NUM_PREDICT)),
+                 "num_ctx": int(config.OLLAMA_NUM_CTX)},
+        keep_alive=config.OLLAMA_KEEP_ALIVE,
+    )
+
+
+def _sentence_chat(payload: str, model: str):
+    """Bounded repair response with source sentence IDs, never generated quotes."""
+    from ollama import Client
+
+    client = Client(host=config.OLLAMA_BASE_URL,
+                    timeout=float(config.QA_EVIDENCE_GATE_TIMEOUT_SECONDS))
+    return client.chat(
+        model=model,
+        messages=[{"role": "system", "content": (
+            "Use only the indexed source sentences. Return JSON containing decision "
+            "(ANSWERABLE, PARTIAL_EVIDENCE, or INSUFFICIENT_EVIDENCE), sentence_ids "
+            "(at most two literal IDs from the supplied list), and missing_parts "
+            "(an array of unsupported facts). A sentence merely mentioning a topic "
+            "is not proof of its definition or requested relationship. No prose."
+        )}, {"role": "user", "content": payload}],
+        format={"type": "object", "properties": {
+            "decision": {"type": "string", "enum": ["ANSWERABLE", "PARTIAL_EVIDENCE",
+                                                   "INSUFFICIENT_EVIDENCE"]},
+            "sentence_ids": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
+            "missing_parts": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["decision", "sentence_ids", "missing_parts"]},
+        think=False,
         options={"temperature": 0, "num_predict": min(256, int(config.QA_EVIDENCE_NUM_PREDICT)),
                  "num_ctx": int(config.OLLAMA_NUM_CTX)},
         keep_alive=config.OLLAMA_KEEP_ALIVE,
@@ -239,6 +356,12 @@ def assess_semantic_evidence(question: str, documents: list, *, topic_context: s
     if not blocks:
         return EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
                                 "no_passage_within_verification_budget")
+    if _question_acronyms(question) and not any(
+        _acronyms_present(question, passages[index].page_content)
+        for index in allowed_indices
+    ):
+        return EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
+                                "requested_identifier_not_present")
 
     payload = "Question:\n" + question
     if topic_context and topic_context != question:
@@ -268,14 +391,22 @@ def assess_semantic_evidence(question: str, documents: list, *, topic_context: s
         index = item["passage_id"]
         quote = item.get("quote", "")
         if not (index in allowed_indices and isinstance(quote, str)
-                and _exact_quote(quote, passages[index].page_content)):
+                and _exact_quote(quote, passages[index].page_content)
+                and _acronyms_present(question, quote)):
             continue
         if passages[index] not in selected:
             selected.append(passages[index])
         quotes.append(quote)
     if not selected:
-        return EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
-                                "semantic_quote_not_found_in_indexed_passage")
+        print(json.dumps({"event": "qa_semantic_quote_repair", "model": model,
+                          "passages": len(allowed_indices),
+                          "evidence_items": len(data.get("evidence", [])) if isinstance(data.get("evidence"), list) else 0}),
+              flush=True)
+        repaired = _repair_quote_selection(question, passages, allowed_indices, model, chat)
+        if repaired is not None:
+            return repaired
+        return EvidenceDecision(EvidenceStatus.VERIFICATION_UNAVAILABLE, (),
+                                "semantic_evidence_could_not_be_attributed")
 
     missing = data.get("missing_parts", [])
     if not isinstance(missing, list):

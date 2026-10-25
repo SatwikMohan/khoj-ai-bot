@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessageChunk
 from langchain_core.runnables import RunnableGenerator
 
 from services.model_config import thinking_setting
-from services.qa_service import QAEngineError, _select_answer_docs, _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _wants_source_locations, answer_question, stream_answer_events
+from services.qa_service import QAEngineError, _select_answer_docs, _feedback_retrieval_query, _format_chat_history, _format_context, _is_general_query, _requires_verified_context, _wants_source_locations, answer_question, stream_answer_events
 from services.response_stream import AnswerTextFilter, CitationTextFilter, bounded_events
 from services.request_lifecycle import registry
 from services.speech_chunker import IncrementalSpeechSegments
@@ -113,7 +113,7 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(text, events[-1]['answer'])
         self.assertIn('100 kg', text)
         self.assertNotIn('private', text)
-        self.assertEqual(events[-1]['sources'][0]['source'], 'rules.pdf')
+        self.assertEqual(events[-1]['sources'], [])
         self.assertEqual(events[-1]['model_metrics']['load_duration'], 123456)
 
     def test_answer_context_drops_distractors_but_keeps_version_comparisons(self):
@@ -159,8 +159,8 @@ class ResponseDeliveryTests(unittest.TestCase):
         ]))
         with patch('services.qa_service._llm', return_value=model):
             explicit = list(stream_answer_events("Which page in the document states the limit?"))
-        self.assertIn("Reference 1", explicit[-1]['answer'])
-        self.assertEqual(explicit[-1]['sources'][0]['source'], 'rules.pdf')
+        self.assertEqual(explicit[-1]['answer'], "The storage limit is 100 kg.")
+        self.assertEqual(explicit[-1]['sources'], [])
 
     def test_reasoning_only_response_returns_error_not_generic_answer(self):
         model = self.model([AIMessageChunk(content='', response_metadata={'done_reason': 'length'})])
@@ -170,12 +170,41 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertIn('length', events[-1]['message'])
         self.assertNotIn('done', [e['type'] for e in events])
 
-    def test_missing_fact_abstains_without_invoking_model(self):
+    def test_missing_precise_fact_abstains_without_model_guess(self):
         with patch('services.qa_service._llm') as model:
             events = list(stream_answer_events('What is the storage warranty period?'))
         model.assert_not_called()
         self.assertEqual(events[-1]['type'], 'done')
-        self.assertIn('indexed documents', events[-1]['answer'])
+        self.assertIn("don't know", events[-1]['answer'])
+        self.assertEqual(events[-1]['sources'], [])
+
+    def test_general_explanation_and_precise_fact_use_different_paths(self):
+        self.assertFalse(_requires_verified_context('what is dgms'))
+        self.assertFalse(_requires_verified_context('explain mine safety'))
+        self.assertTrue(_requires_verified_context('What is the storage warranty period?'))
+        self.assertTrue(_requires_verified_context('How many mines were inspected in 2024?'))
+
+    def test_model_can_answer_general_question_without_index_support(self):
+        captured = []
+        def generate(inputs):
+            captured.extend(str(item) for item in inputs)
+            yield AIMessageChunk(content="DGMS stands for Directorate General of Mines Safety.")
+        with patch('services.qa_service._llm', return_value=RunnableGenerator(generate)):
+            events = list(stream_answer_events('what is dgms'))
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertIn('Directorate General of Mines Safety', events[-1]['answer'])
+        self.assertEqual(events[-1]['sources'], [])
+        self.assertIn('No indexed passage has been verified', ' '.join(captured))
+
+    def test_missing_index_does_not_block_offline_knowledge(self):
+        with patch('services.qa_service._vector_store', side_effect=QAEngineError('index missing')), patch(
+            'services.qa_service._llm', return_value=self.model([
+                AIMessageChunk(content="DGMS stands for Directorate General of Mines Safety.")
+            ])
+        ):
+            events = list(stream_answer_events('what is dgms'))
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertIn('Directorate General of Mines Safety', events[-1]['answer'])
         self.assertEqual(events[-1]['sources'], [])
 
     def test_invented_number_is_not_released_as_answer(self):
@@ -185,7 +214,7 @@ class ResponseDeliveryTests(unittest.TestCase):
             events = list(stream_answer_events('What is the storage limit?'))
         self.assertEqual(events[-1]['type'], 'done')
         self.assertNotIn('500', ''.join(e.get('text', '') for e in events if e['type'] == 'token'))
-        self.assertIn('indexed documents', events[-1]['answer'])
+        self.assertIn("don't know", events[-1]['answer'])
 
     def test_generation_exception_is_visible(self):
         with patch('services.qa_service._llm', side_effect=RuntimeError('Ollama connection refused')):
