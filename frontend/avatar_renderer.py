@@ -140,8 +140,8 @@ try {
   const width=Math.max(1,host.clientWidth),height=Math.max(1,host.clientHeight);
   renderer.setSize(width,height,false);camera.aspect=width/height;
   const tangent=Math.tan(THREE.MathUtils.degToRad(camera.fov)/2);
-  const distance=Math.max(halfHeight/tangent,halfWidth/(tangent*camera.aspect))*1.16+halfDepth;
-  camera.position.set(center.x,center.y+halfHeight*.04,center.z+distance);
+  const distance=Math.max(halfHeight/tangent,halfWidth/(tangent*camera.aspect))*1.08+halfDepth;
+  camera.position.set(center.x,center.y,center.z+distance);
   camera.lookAt(center);camera.updateProjectionMatrix();
  }
  new ResizeObserver(resize).observe(host);
@@ -162,7 +162,8 @@ try {
   const fitted=new THREE.Box3().setFromObject(root);
   center=fitted.getCenter(new THREE.Vector3());
   const fittedSize=fitted.getSize(new THREE.Vector3());
-  halfWidth=fittedSize.x/2;halfHeight=fittedSize.y/2;halfDepth=fittedSize.z/2;
+  center.y=fitted.max.y-fittedSize.y*.27;
+  halfWidth=fittedSize.x*.42;halfHeight=fittedSize.y*.31;halfDepth=fittedSize.z/2;
   if(gltf.animations.length){mixer=new THREE.AnimationMixer(root);mixer.clipAction(gltf.animations[0]).play()}
   resize();loadedAt=performance.now();
  },undefined,error=>{notice.textContent="3D avatar could not load. Check browser console.";console.error("Avatar GLTF load failed",error)});

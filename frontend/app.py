@@ -325,6 +325,7 @@ def render_chat_scroll_observer() -> None:
               nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 180;
             });
             new MutationObserver(scroll).observe(scroller, {childList: true, subtree: true, characterData: true});
+            if (window.ResizeObserver) new ResizeObserver(scroll).observe(scroller.firstElementChild || scroller);
             requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
           }
         } catch (_) {}
