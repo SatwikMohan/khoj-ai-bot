@@ -23,6 +23,7 @@ def ask_question(payload: QARequest) -> QAResponse:
             session_id=payload.session_id,
             request_id=payload.request_id,
             input_type=payload.input_type,
+            spoken_language=payload.spoken_language,
         )
     except QAEngineError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -40,6 +41,7 @@ def stream_question(payload: QARequest) -> StreamingResponse:
                 session_id=payload.session_id,
                 request_id=payload.request_id,
                 input_type=payload.input_type,
+                spoken_language=payload.spoken_language,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         except QAEngineError as exc:

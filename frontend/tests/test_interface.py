@@ -171,6 +171,7 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(kwargs["input_type"], "audio")
             self.assertEqual(kwargs["request_id"], request_id)
             self.assertEqual(kwargs["question"], "Voice question")
+            self.assertEqual(kwargs["spoken_language"], "hinglish")
             yield {"type": "token", "text": "Voice answer."}
             yield {"type": "done", "answer": "Voice answer.", "sources": []}
 
@@ -178,7 +179,9 @@ class InterfaceTests(unittest.TestCase):
             with patch.object(config, "TTS_ENABLED", False), patch(
                 "streamlit.components.v1.declare_component", return_value=voice_component
             ), patch(
-                "services.voice_interaction.transcribe_audio", return_value={"text": "Voice question"}
+                "services.voice_interaction.transcribe_audio", return_value={
+                    "text": "Voice question", "language": "hi", "spoken_language": "hinglish"
+                }
             ) as transcribe, patch(
                 "services.qa_service.stream_answer_events", side_effect=fake_stream
             ) as stream:

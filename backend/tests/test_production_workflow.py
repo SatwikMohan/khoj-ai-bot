@@ -157,6 +157,38 @@ class LanguageContractTests(unittest.TestCase):
         self.assertEqual(events[-1]["language"], "hinglish")
         self.assertIn("DGMS mine safety", events[-1]["answer"])
 
+    def test_spoken_language_survives_english_transcript(self):
+        with patch.object(config, "RESPONSE_LANGUAGE", "auto"):
+            self.assertEqual(resolve_language_context(
+                "Tell me about DGMS", spoken_language="hinglish"
+            ).target_language, "hinglish")
+            self.assertEqual(resolve_language_context(
+                "Tell me about DGMS in English", spoken_language="hinglish"
+            ).target_language, "en")
+
+    def test_audio_question_uses_spoken_language_for_answer(self):
+        session_id, request_id = "spoken-language-session", "spoken-language-request"
+        registry.begin(session_id, request_id, input_type="audio", status="transcribed")
+        prompts = []
+        def generate(inputs):
+            prompts.extend(str(item) for item in inputs)
+            yield AIMessageChunk(content="DGMS mine safety ko oversee karta hai.")
+        try:
+            with patch.object(config, "RESPONSE_LANGUAGE", "auto"), patch(
+                "services.qa_service._load_environment"
+            ), patch("services.qa_service._vector_store", side_effect=RuntimeError("index missing")), patch(
+                "services.qa_service._llm", return_value=RunnableGenerator(generate)
+            ):
+                events = list(stream_answer_events(
+                    "Tell me about DGMS", session_id=session_id, request_id=request_id,
+                    input_type="audio", spoken_language="hinglish",
+                ))
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertEqual(events[-1]["language"], "hinglish")
+            self.assertIn("Roman-script Hinglish", " ".join(prompts))
+        finally:
+            registry.cancel(session_id, request_id)
+
     def test_english_guard_ignores_uncorroborated_spanish_guess(self):
         answer = ("DGMS is the Directorate General of Mines Safety in India. "
                   "It oversees mine safety regulations and inspections.")

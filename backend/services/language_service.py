@@ -152,6 +152,7 @@ class LanguageContext:
 
 def resolve_language_context(
     question: str, *, transcript: str | None = None, selected_language: str | None = None,
+    spoken_language: str | None = None,
 ) -> LanguageContext:
     """Resolve the current query once; retrieved text and history cannot change it."""
     current = (transcript if transcript is not None else question).strip()
@@ -159,7 +160,12 @@ def resolve_language_context(
     configured = config.RESPONSE_LANGUAGE.strip().lower()
     selected = (selected_language or "").strip().lower() or None
     explicit = _explicit_response_language(current) if configured == "auto" else None
-    target = selected or (explicit or detected if configured == "auto" else configured)
+    spoken = (spoken_language or "").strip().lower()
+    if spoken not in {"en", "hi", "hinglish"}:
+        spoken = ""
+    # Speech can be Hindi/Hinglish even when Whisper emits English text. An
+    # explicit instruction in the current question still takes precedence.
+    target = selected or ((explicit or spoken or detected) if configured == "auto" else configured)
     target = {"english": "en", "hindi": "hi"}.get(target, target)
     # The configured single offline speaker is validated for these three
     # languages. In automatic voice mode, keep other detected languages from

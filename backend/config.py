@@ -152,6 +152,7 @@ STT_MIN_ACTIVE_FRAME_RATIO = 0.02
 STT_MIN_VOICED_SECONDS = 0.20
 STT_MAX_SPECTRAL_FLATNESS = 0.55
 WHISPER_LANGUAGE_RETRY_MIN_PROB = 0.02
+STT_HINDI_AUDIO_OVERRIDE_MIN_PROB = 0.35  # Only retry an English transcript as Hindi when the acoustic signal is clear.
 STT_AUDIO_SAMPLE_RATE = 16000
 RECORDING_BUFFER_MS = 250
 REQUEST_CANCELLATION_POLL_SECONDS = 0.1
@@ -250,6 +251,8 @@ def validate_config() -> None:
         raise ValueError("Embedding dimensions, batch size and ingestion workers must be positive.")
     if STT_AUDIO_SAMPLE_RATE != 16000 or RECORDING_BUFFER_MS <= 0 or REQUEST_CANCELLATION_POLL_SECONDS <= 0 or VOICE_TURN_WATCHDOG_SECONDS <= 0:
         raise ValueError("Whisper input must be 16 kHz and recording/cancellation intervals positive.")
+    if not 0 <= STT_HINDI_AUDIO_OVERRIDE_MIN_PROB <= 1:
+        raise ValueError("STT_HINDI_AUDIO_OVERRIDE_MIN_PROB must be between zero and one.")
     if min(TTS_SAMPLE_RATE, TTS_CHANNELS, TTS_SAMPLE_WIDTH_BYTES) <= 0:
         raise ValueError("TTS audio format settings must be positive.")
     if not 0 < TTS_STREAM_MIN_CHARS < TTS_STREAM_MAX_CHARS or TTS_STREAM_CONCURRENCY <= 0 or TTS_MAX_QUEUED_SEGMENTS <= 0 or TTS_MAX_PENDING_JOBS <= 0 or TTS_STREAM_MAX_BUFFER_SECONDS <= 0 or AUDIO_QUEUE_TIMEOUT_SECONDS <= 0:

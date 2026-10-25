@@ -58,7 +58,10 @@ def transcribe_interaction(
             raise STTEngineError("This voice interaction was replaced.") from exc
         raise
     print(json.dumps({"event": "stt_completed", "request_id": request_id,
-                      "language": result.get("language"), "audio_duration_s": result.get("duration_seconds"),
+                      "language": result.get("language"),
+                      "spoken_language": result.get("spoken_language"),
+                      "language_probability": result.get("language_probability"),
+                      "audio_duration_s": result.get("duration_seconds"),
                       "elapsed_ms": round((time.perf_counter() - started) * 1000, 1)}), flush=True)
     if not registry.set_status(request, "transcribed"):
         raise STTEngineError("This voice interaction was replaced.")

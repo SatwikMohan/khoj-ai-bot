@@ -21,7 +21,7 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 import config
-from services.language_service import response_language
+from services.language_service import resolve_language_context
 from services.speech_chunker import IncrementalSpeechSegments
 from services.request_lifecycle import registry
 from helpers.request_models import ChatMessage, TTSRequest
@@ -208,7 +208,7 @@ def render_voice_query_component() -> dict | None:
             st.session_state.voice_error = None
             return {
                 "text": text, "request_id": request_id, "input_type": "audio",
-                "language": result.get("language", ""),
+                "spoken_language": result.get("spoken_language") or result.get("language", ""),
             }
         raise ValueError("Speech recognition returned no usable transcript.")
     except Exception as exc:
@@ -238,6 +238,7 @@ def _qa_events(payload: dict):
         session_id=payload.get("session_id"),
         request_id=payload.get("request_id"),
         input_type=payload.get("input_type", "text"),
+        spoken_language=payload.get("spoken_language"),
     )
 
 
@@ -419,6 +420,7 @@ def ask_api_stream(
     activity_signal=None,
     request_id: str | None = None,
     input_type: str = "text",
+    spoken_language: str | None = None,
     speak: bool = True,
 ) -> tuple[str, list[dict], str | None, bytes | None, str, str | None]:
     payload = {
@@ -429,6 +431,7 @@ def ask_api_stream(
         "session_id": st.session_state.conversation_session_id,
         "request_id": request_id or uuid.uuid4().hex,
         "input_type": input_type,
+        "spoken_language": spoken_language if input_type == "audio" else None,
     }
     answer = ""
     sources = []
@@ -449,7 +452,7 @@ def ask_api_stream(
     tts_futures: dict[int, tuple[Future, str, float]] = {}
     next_audio_sequence = 0
     tts_wait_placeholder = st.empty() if queue_id else None
-    tts_config = _current_tts_config(question)
+    tts_config = _current_tts_config(question, spoken_language=payload["spoken_language"])
     tts_config["session_id"] = payload["session_id"]
     tts_config["request_id"] = payload["request_id"]
     spoken_words = 0
@@ -731,7 +734,7 @@ def ask_api_stream(
     return answer.strip(), sources, None, audio_bytes, audio_mime, audio_error
 
 
-def _current_tts_config(question: str = "") -> dict:
+def _current_tts_config(question: str = "", *, spoken_language: str | None = None) -> dict:
     if not question:
         question = next((str(item.get("content", "")) for item in reversed(st.session_state.messages) if item.get("role") == "user"), "")
     return {
@@ -741,7 +744,7 @@ def _current_tts_config(question: str = "") -> dict:
         "rate": st.session_state.tts_rate.strip() or "+0%",
         "pitch": st.session_state.tts_pitch.strip() or "+0Hz",
         "max_words": st.session_state.tts_max_words,
-        "language": response_language(question),
+        "language": resolve_language_context(question, spoken_language=spoken_language).target_language,
     }
 
 
@@ -872,6 +875,7 @@ if question:
             activity_signal=activity_signal,
             request_id=voice_component_query["request_id"] if voice_component_query and not typed_question else None,
             input_type=voice_component_query["input_type"] if voice_component_query and not typed_question else "text",
+            spoken_language=voice_component_query.get("spoken_language") if voice_component_query and not typed_question else None,
             speak=not bool(retry_question),
         )
 

@@ -1,4 +1,5 @@
 import config
+import json
 import os
 import re
 import tempfile
@@ -169,10 +170,53 @@ def transcribe_audio(
             if cancelled is not None and cancelled.is_set():
                 raise STTEngineError("This voice interaction was replaced.")
             model_state = _model()
+            spoken_language = None
             if model_state["engine"] == "transformers":
                 text, detected_language, language_probability, duration = _transcribe_transformers(
                     model_state, samples, language, cancelled
                 )
+                if not language and detected_language == "en":
+                    # Whisper can emit an English translation even with the
+                    # transcribe task. Check the audio language independently
+                    # before accepting English as the person's spoken style.
+                    try:
+                        acoustic_language, acoustic_probability = _preferred_supported_language(
+                            model_state, samples
+                        )
+                    except STTEngineError:
+                        acoustic_language, acoustic_probability = None, 0.0
+                    if (acoustic_language == "hi" and acoustic_probability >=
+                            float(config.STT_HINDI_AUDIO_OVERRIDE_MIN_PROB)):
+                        retry_error = None
+                        try:
+                            hindi_text, _, _, _ = _transcribe_transformers(
+                                model_state, samples, "hi", cancelled
+                            )
+                        except Exception as exc:
+                            if cancelled is not None and cancelled.is_set():
+                                raise STTEngineError("This voice interaction was replaced.")
+                            retry_error = type(exc).__name__
+                            hindi_text = ""
+                        anchors = re.findall(r"\b[A-Z][A-Z0-9]{1,}\b|\b\d+(?:[./-]\d+)*\b", text)
+                        anchors_preserved = all(re.search(
+                            r"(?<![A-Za-z0-9])" + re.escape(anchor) + r"(?![A-Za-z0-9])",
+                            hindi_text, re.IGNORECASE,
+                        ) for anchor in anchors)
+                        if (re.search(r"[\u0900-\u097f]", hindi_text)
+                                and len(hindi_text.split()) >= 2 and anchors_preserved):
+                            text = hindi_text
+                            detected_language = "hi"
+                            spoken_language = "hinglish" if re.search(r"[A-Za-z]", hindi_text) else "hi"
+                            language_probability = acoustic_probability
+                            print(json.dumps({"event": "stt_spoken_language_recovered",
+                                              "spoken_language": spoken_language,
+                                              "acoustic_probability": round(acoustic_probability, 3)}),
+                                  flush=True)
+                        else:
+                            print(json.dumps({"event": "stt_hindi_retry_rejected",
+                                              "reason": retry_error or "transcript_or_identifier_mismatch",
+                                              "acoustic_probability": round(acoustic_probability, 3)}),
+                                  flush=True)
                 if not language and (detected_language not in SUPPORTED_SPEECH_LANGUAGES
                                      or UNSUPPORTED_SCRIPT.search(text)):
                     recovered_language, language_probability = _preferred_supported_language(
@@ -226,6 +270,7 @@ def transcribe_audio(
     return {
         "text": text,
         "language": detected_language,
+        "spoken_language": spoken_language or detected_language,
         "language_probability": round(language_probability, 4),
         "duration_seconds": round(duration, 3),
         "latency_ms": round((time.perf_counter() - started_at) * 1000, 1),
