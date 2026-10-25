@@ -46,6 +46,20 @@ class SemanticEvidenceTests(unittest.TestCase):
         self.assertEqual(decision.status, EvidenceStatus.INSUFFICIENT_EVIDENCE)
         self.assertEqual(decision.documents, ())
 
+    def test_paraphrased_question_can_use_direct_indexed_premise(self):
+        passage = Document(
+            page_content="Ventilation removes hazardous gases from mine workings.",
+            metadata={"source": "safety.pdf"},
+        )
+        decision = assess_semantic_evidence(
+            "What keeps harmful air from building up underground?", [passage],
+            chat=lambda *_: response("ANSWERABLE", [{
+                "passage_id": 0, "quote": passage.page_content,
+            }]),
+        )
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+        self.assertEqual(decision.documents, (passage,))
+
     def test_model_cannot_introduce_fabricated_evidence(self):
         decision = assess_semantic_evidence(
             "Explain DGMS", self.passages,
@@ -168,6 +182,80 @@ class SemanticEvidenceTests(unittest.TestCase):
                          "What does DGMS not do in 2024?")
         self.assertEqual(_safe_search_query("DGMS 2024 में क्या नहीं करता?",
                                             "What does mine safety do in 2025?"), "")
+        self.assertEqual(_safe_search_query("What improves mine safety?",
+                                            "What did DGMS change in 2025?"), "")
+
+    def test_two_passages_can_jointly_support_different_requested_identifiers(self):
+        passages = [
+            Document(page_content="DGMS oversees safety inspections in mines.",
+                     metadata={"source": "safety.pdf"}),
+            Document(page_content="IBM maintains the national mineral inventory.",
+                     metadata={"source": "inventory.pdf"}),
+        ]
+        decision = assess_semantic_evidence(
+            "What do DGMS and IBM each do?", passages,
+            chat=lambda *_: response("ANSWERABLE", [
+                {"passage_id": 0, "quote": passages[0].page_content},
+                {"passage_id": 1, "quote": passages[1].page_content},
+            ]),
+        )
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+        self.assertEqual(decision.documents, tuple(passages))
+
+    def test_english_indirect_question_retries_same_index_before_abstaining(self):
+        weak = Document(page_content="The annual report discusses mine operations.",
+                        metadata={"source": "annual.pdf"})
+        useful = Document(page_content="Ventilation removes hazardous gases from mine workings.",
+                          metadata={"source": "safety.pdf"})
+        decisions = [
+            EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (), "no_direct_support"),
+            EvidenceDecision(EvidenceStatus.ANSWERABLE, (useful,), "semantic_quote_verified",
+                             verified_quotes=(useful.page_content,)),
+        ]
+
+        def generate(inputs):
+            list(inputs)
+            yield AIMessageChunk(content="Ventilation removes hazardous gases from mine workings.")
+
+        with patch("config.QA_ALLOW_MODEL_KNOWLEDGE", False), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context", side_effect=[[weak], [useful]]
+        ) as search, patch(
+            "services.qa_service.suggest_local_search_query",
+            return_value="mine ventilation hazardous gas removal"
+        ) as rewrite, patch(
+            "services.qa_service.assess_semantic_evidence", side_effect=decisions
+        ) as verify, patch(
+            "services.qa_service._llm", return_value=RunnableGenerator(generate)
+        ):
+            events = list(stream_answer_events("What keeps bad air from building up underground?"))
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("Ventilation removes", events[-1]["answer"])
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(verify.call_args.args[1], [useful, weak])
+        rewrite.assert_called_once()
+
+    def test_second_search_without_support_still_abstains(self):
+        weak = Document(page_content="The report lists equipment purchases.",
+                        metadata={"source": "annual.pdf"})
+        with patch("config.QA_ALLOW_MODEL_KNOWLEDGE", False), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context", side_effect=[[weak], []]
+        ), patch(
+            "services.qa_service.suggest_local_search_query",
+            return_value="mine ventilation hazardous gas removal"
+        ), patch(
+            "services.qa_service.assess_semantic_evidence",
+            return_value=EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
+                                          "no_direct_support")
+        ), patch("services.qa_service._llm") as model:
+            events = list(stream_answer_events("What keeps bad air from building up underground?"))
+        model.assert_not_called()
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("don't know", events[-1]["answer"])
 
     def test_missing_hindi_retrieval_can_request_one_english_search(self):
         query = suggest_local_search_query(

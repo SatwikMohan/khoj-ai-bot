@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
+from itertools import zip_longest
 from pathlib import Path
 from typing import Iterator
 
@@ -215,6 +216,13 @@ def _is_general_query(question: str) -> bool:
 def _is_summary_query(question: str) -> bool:
     normalized = _normalized_query(question)
     if any(term in normalized for term in SUMMARY_TERMS):
+        return True
+    if re.search(r"\b(?:what do you know about|what can you tell me about)\b", normalized):
+        return True
+    if (re.search(r"\b(?:ke|ki|ka)\s+(?:bare|baare)\s+(?:mein|me)\b", normalized)
+            and not re.search(r"\b(?:kab|kahan|kitne|kitna|kaun|kis|kyon)\b", normalized)):
+        return True
+    if re.search(r"(?:के|की|का)\s+बारे\s+में|की\s+जानकारी", normalized):
         return True
     words = normalized.split()
     return len(words) <= 10 and normalized.startswith(
@@ -773,8 +781,12 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
         "usko",
         "uski",
         "usme",
-        "dobara",
-        "again",
+        "इसे",
+        "इसको",
+        "उसको",
+        "इसका",
+        "उसका",
+        "उसमें",
     }
     words = set(re.findall(r"\w+", normalized, flags=re.UNICODE))
     explicit_follow_up_phrases = (
@@ -793,6 +805,8 @@ def _history_aware_query(question: str, chat_history: list[ChatMessage] | None) 
     )
     is_follow_up = len(words) <= 12 and (
         bool(words & follow_up_markers)
+        or bool(re.search(r"(?:इसे|इसको|उसको|इसका|उसका|उसमें)", normalized))
+        or _is_restatement_followup(question)
         or normalized.startswith(explicit_follow_up_phrases)
         or normalized in {"latest", "latest version", "the latest version", "previous version", "old version", "historical version"}
         or bool(re.fullmatch(r"(?:in |for |year )?(?:19|20)\d{2}", normalized))
@@ -1137,6 +1151,8 @@ def _prompt_for_query(query_type: str, *, include_locations: bool = False,
     if query_type == "summary":
         system_message = (
             "Give a natural overview of the topic, grouping related facts instead of listing excerpts. "
+            "When the evidence covers only a specific project or plan, make that scope clear; "
+            "do not present its details as a general definition of the whole topic. "
             "Ask which area matters most only if the request is too broad for a useful answer. "
             f"{shared_style} {knowledge_policy} {location_instruction} {{language_instruction}}"
         )
@@ -1239,6 +1255,67 @@ def _feedback_retrieval_query(question: str, history) -> str:
     return _history_aware_query(question, history)
 
 
+def _is_restatement_followup(question: str) -> bool:
+    """A style-only turn has no new subject to verify against the index."""
+    text = _normalized_query(question)
+    style_words = {
+        "a", "above", "an", "and", "answer", "again", "aap", "as", "back", "baat",
+        "bare", "baare", "bata", "batao",
+        "be", "can", "could", "detail", "dobara", "dubara", "easy", "else",
+        "earlier", "english", "explain", "explanation", "give", "hai", "hindi", "hinglish",
+        "i", "in", "is", "isko", "isse", "it", "ka", "ke", "ki", "kya",
+        "information", "jawab", "karke", "language", "last", "make", "me", "mein",
+        "message", "more", "mujhe", "of", "once", "output", "please", "point", "points",
+        "previous", "rephrase", "repeat", "reply", "response", "rewrite", "said", "same",
+        "sakti", "sakte", "samjha", "samjhao", "say", "se", "simple", "simply",
+        "summarize", "summary", "tell", "text", "that", "the", "this", "to", "topic",
+        "translate", "usko", "version", "what", "would", "you", "your", "अंग्रेजी", "अंग्रेज़ी",
+        "आप", "इसे", "इसको", "उसको", "उसे", "उसी", "इसी", "एक", "और",
+        "का", "की", "के", "क्या", "कृपया", "दोबारा", "दुबारा", "फिर", "में",
+        "मुझे", "सरल", "से", "समझाइए", "समझाओ", "बताइए", "बताओ", "हिंदी", "हिन्दी",
+    }
+    tokens = re.findall(r"[a-z]+|[\u0900-\u097f]+|\d+", text)
+    subject_terms = [token for token in tokens if token not in style_words and
+                     not re.fullmatch(r"samjha\w*|bata\w*|explain\w*", token)]
+    restates = bool(re.search(
+        r"\b(?:again|repeat|rephrase|rewrite|translate|explain|simpler|detail|"
+        r"more|summary|english|hindi|hinglish|dubara|dobara|samjha\w*|bata\w*)\b|"
+        r"(?:फिर|दोबारा|दुबारा|समझ|बता|अनुवाद|अंग्रेज|हिंदी|हिन्दी)", text
+    ))
+    new_fact = bool(re.search(
+        r"\b(?:when|where|why|which|who|how many|how much|what about|"
+        r"compare|difference|versus|for the year)\b|"
+        r"(?:कब|क्यों|कहाँ|कितने|कितना|तुलना)", text
+    ))
+    return bool(restates and not subject_terms and not new_fact and
+                not YEAR.search(question) and not VERSION.search(question))
+
+
+def _contextual_question(question: str, history) -> str:
+    """Resolve short follow-ups from user questions, never assistant claims."""
+    topic = ""
+    for message in (history or [])[-8:]:
+        if _message_role(message).strip().lower() != "user":
+            continue
+        previous = _trim_text(_message_content(message), 240)
+        if not previous or _is_general_query(previous):
+            continue
+        if _is_restatement_followup(previous):
+            continue
+        if topic and _history_aware_query(previous, [{"role": "user", "content": topic}]) != previous:
+            topic = _trim_text(f"Earlier topic: {topic}. Follow-up: {previous}", 700)
+        else:
+            topic = previous
+    if not topic or not (_is_restatement_followup(question) or
+                         _history_aware_query(question, [{"role": "user", "content": topic}]) != question):
+        return question
+    if _is_restatement_followup(question):
+        return topic
+    if YEAR.search(question) and not re.search(r"\b(?:compare|versus|vs|both)\b|तुलना", question, re.I):
+        topic = YEAR.sub("", topic)
+    return _trim_text(f"Earlier topic: {topic}. Follow-up question: {question}", 900)
+
+
 def _stream_answer_events(question, top_k, temperature, chat_history, request=None, progress=None,
                           spoken_language=None):
     def active():
@@ -1269,15 +1346,18 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
 
     yield {"type": "status", "message": "Searching your documents"}
     retrieval_started_at = time.perf_counter()
-    query_type = "summary" if _is_summary_query(question) else "document"
-    retrieval_query = _feedback_retrieval_query(question, chat_history)
+    effective_question = _contextual_question(question, chat_history)
+    restating = effective_question != question and _is_restatement_followup(question)
+    query_type = "summary" if _is_summary_query(effective_question) else "document"
+    retrieval_query = (effective_question if effective_question != question else
+                       _feedback_retrieval_query(question, chat_history))
     vector_store = None
     try:
         vector_store = _vector_store()
         docs = (
-            _retrieve_summary_context(vector_store, retrieval_query, top_k, scope_question=question, cancel_event=request.cancelled if request else None)
+            _retrieve_summary_context(vector_store, retrieval_query, top_k, scope_question=effective_question, cancel_event=request.cancelled if request else None)
             if query_type == "summary"
-            else _retrieve_context(vector_store, retrieval_query, top_k, scope_question=question, cancel_event=request.cancelled if request else None)
+            else _retrieve_context(vector_store, retrieval_query, top_k, scope_question=effective_question, cancel_event=request.cancelled if request else None)
         )
     except Exception as exc:
         if not config.QA_ALLOW_MODEL_KNOWLEDGE:
@@ -1289,9 +1369,9 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "reason": type(exc).__name__}), flush=True)
     if not active():
         return
-    answer_question_text = correct_query_from_passages(question, docs)
-    if answer_question_text != question:
-        corrected_retrieval_query = retrieval_query.replace(question, answer_question_text, 1)
+    answer_question_text = correct_query_from_passages(effective_question, docs)
+    if answer_question_text != effective_question:
+        corrected_retrieval_query = retrieval_query.replace(effective_question, answer_question_text, 1)
         if corrected_retrieval_query == retrieval_query:
             corrected_retrieval_query = answer_question_text
         if vector_store is not None:
@@ -1332,7 +1412,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     # mode verifies exact, changing, or source-bound facts.
     semantic_required = (config.QA_SEMANTIC_EVIDENCE_ENABLED and
                          (not config.QA_ALLOW_MODEL_KNOWLEDGE or
-                          _requires_verified_context(question)))
+                          _requires_verified_context(answer_question_text)))
     evidence_started_at = time.perf_counter()
     decision = None
     if config.QA_EVIDENCE_GATE_ENABLED:
@@ -1341,32 +1421,48 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             decision = assess_semantic_evidence(answer_question_text, docs, topic_context=retrieval_query)
         else:
             decision = assess_evidence(answer_question_text, docs)
-    if (vector_store is not None and not docs and config.QA_EVIDENCE_GATE_ENABLED and semantic_required
-            and language in {"hi", "hinglish"} and active()):
-        search_query = suggest_local_search_query(answer_question_text)
-        if search_query:
-            decision = EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
-                                        "no_retrieved_evidence", search_query=search_query)
-    if (vector_store is not None and decision and decision.status == EvidenceStatus.INSUFFICIENT_EVIDENCE
-            and decision.search_query and language in {"hi", "hinglish"} and active()):
+    search_query = ""
+    if (vector_store is not None and semantic_required and decision and decision.status in {
+            EvidenceStatus.INSUFFICIENT_EVIDENCE, EvidenceStatus.REQUIRED_VERSION_NOT_FOUND,
+        } and active()):
+        search_query = decision.search_query or suggest_local_search_query(answer_question_text)
+        if search_query.casefold() == retrieval_query.casefold():
+            search_query = ""
+    if search_query:
         yield {"type": "status", "message": "Checking another search phrasing"}
         print(json.dumps({"event": "qa_evidence_query_retry",
                           "request_id": request.request_id if request else None,
-                          "query_sha256": hashlib.sha256(decision.search_query.encode("utf-8")).hexdigest()[:16]}),
+                          "query_sha256": hashlib.sha256(search_query.encode("utf-8")).hexdigest()[:16]}),
               flush=True)
         retry_docs = _retrieve_context(
-            vector_store, decision.search_query, top_k, scope_question=answer_question_text,
+            vector_store, search_query, top_k, scope_question=answer_question_text,
             cancel_event=request.cancelled if request else None,
         )
         if not active():
             return
         if retry_docs and {_doc_key(doc) for doc in retry_docs} != {_doc_key(doc) for doc in docs}:
-            retry_decision = assess_semantic_evidence(answer_question_text, retry_docs,
+            # Keep complementary original evidence for questions that require
+            # joining facts across passages. Version requests use the new search
+            # alone so an older edition cannot fill a missing requested year.
+            if (decision.status == EvidenceStatus.REQUIRED_VERSION_NOT_FOUND and
+                    not re.search(r"\b(?:compare|comparison|versus|vs|both|between)\b|तुलना",
+                                  answer_question_text, re.I)):
+                candidate_docs = retry_docs
+            else:
+                candidate_docs = []
+                seen = set()
+                for pair in zip_longest(retry_docs, docs):
+                    for doc in pair:
+                        if doc is not None and _doc_key(doc) not in seen:
+                            candidate_docs.append(doc)
+                            seen.add(_doc_key(doc))
+                candidate_docs = candidate_docs[:int(config.QA_EVIDENCE_MAX_PASSAGES)]
+            retry_decision = assess_semantic_evidence(answer_question_text, candidate_docs,
                                                       topic_context=retrieval_query)
             if retry_decision.status in {EvidenceStatus.ANSWERABLE,
                                          EvidenceStatus.PARTIAL_EVIDENCE,
                                          EvidenceStatus.CONFLICTING_EVIDENCE}:
-                docs, decision = retry_docs, retry_decision
+                docs, decision = candidate_docs, retry_decision
                 language_context = replace(language_context, retrieved_languages=tuple(sorted({
                     str(doc.metadata.get("language", "")).lower()
                     for doc in docs if doc.metadata.get("language")
@@ -1427,10 +1523,12 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     print(json.dumps({"event": "qa_model_client_ready", "request_id": request.request_id if request else None,
                       "model": config.OLLAMA_CHAT_MODEL,
                       "elapsed_ms": round((time.perf_counter() - model_started_at) * 1000, 1)}), flush=True)
+    prompt_question = (f"{answer_question_text}\nCurrent request: {question}"
+                       if restating else answer_question_text)
     inputs = {
         "context": context_text,
         "chat_history": history_text,
-        "question": answer_question_text,
+        "question": prompt_question,
         "language_instruction": language_instruction(language),
         "thinking_instruction": _thinking_instruction(),
         "missing_parts": "; ".join(decision.missing_parts) if indexed_answer and decision and
@@ -1611,7 +1709,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             "Preserve supported numbers, units, and identifiers."
         )
         retry_inputs["question"] = (
-            f"{answer_question_text}\n\nPrevious draft (possibly incomplete):\n{answer[:4000]}"
+            f"{prompt_question}\n\nPrevious draft (possibly incomplete):\n{answer[:4000]}"
             "\n\nAnswer the original question fully in the required language."
         )
         retry_filter = AnswerTextFilter()
