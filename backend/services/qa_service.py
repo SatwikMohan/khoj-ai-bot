@@ -20,7 +20,7 @@ from services.embedding_service import (
     model_is_available,
     ollama_model_names,
 )
-from services.evidence_gate import EvidenceDecision, EvidenceStatus, assess_evidence, unsupported_answer_numbers
+from services.evidence_gate import EvidenceDecision, EvidenceStatus, NumberEvidenceStream, assess_evidence
 from services.semantic_evidence import assess_semantic_evidence, suggest_local_search_query
 from services.lexical_service import STOP_WORDS, lexical_search
 from services.language_service import answer_language_matches, resolve_language_context, response_language, language_instruction
@@ -1298,14 +1298,21 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                       "target": language, "retrieved_languages": language_context.retrieved_languages,
                       "elapsed_ms": round((time.perf_counter() - retrieval_started_at) * 1000, 1)}),
           flush=True)
+    # General questions permit offline model knowledge. A second full chat
+    # completion to certify every helpful passage delays the actual answer;
+    # retain semantic verification for exact, changing, or source-bound facts.
+    semantic_required = (config.QA_SEMANTIC_EVIDENCE_ENABLED and
+                         (not config.QA_ALLOW_MODEL_KNOWLEDGE or
+                          _requires_verified_context(question)))
+    evidence_started_at = time.perf_counter()
     decision = None
     if config.QA_EVIDENCE_GATE_ENABLED:
-        if config.QA_SEMANTIC_EVIDENCE_ENABLED and docs:
+        if semantic_required and docs:
             yield {"type": "status", "message": "Checking the evidence"}
             decision = assess_semantic_evidence(question, docs, topic_context=retrieval_query)
         else:
             decision = assess_evidence(question, docs)
-    if (vector_store is not None and not docs and config.QA_EVIDENCE_GATE_ENABLED and config.QA_SEMANTIC_EVIDENCE_ENABLED
+    if (vector_store is not None and not docs and config.QA_EVIDENCE_GATE_ENABLED and semantic_required
             and language in {"hi", "hinglish"} and active()):
         search_query = suggest_local_search_query(question)
         if search_query:
@@ -1341,6 +1348,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
         print(json.dumps({"event": "qa_evidence_decision",
                           "request_id": request.request_id if request else None,
                           "status": decision.status.value, "reason": decision.reason,
+                          "strategy": "semantic" if semantic_required else "local",
+                          "elapsed_ms": round((time.perf_counter() - evidence_started_at) * 1000, 1),
                           "retrieved": len(docs), "selected": len(decision.documents)}), flush=True)
     indexed_answer = bool(docs) and (decision is None or decision.status in {
         EvidenceStatus.ANSWERABLE, EvidenceStatus.PARTIAL_EVIDENCE,
@@ -1428,6 +1437,23 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     pending_tokens = []
     language_gate_open = False
     early_language_mismatch = False
+    used_language_retry = False
+    number_stream = (NumberEvidenceStream(question, answer_docs)
+                     if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED else None)
+
+    def safe_pieces(piece: str) -> list[str]:
+        return number_stream.push(piece) if number_stream is not None else [piece]
+
+    def number_rejection_response() -> dict:
+        print(json.dumps({"event": "qa_answer_validation_failed",
+                          "request_id": request.request_id if request else None,
+                          "reason": "unsupported_number_before_release",
+                          "approved_chars": len(number_stream.accepted)}), flush=True)
+        safe_answer = number_stream.accepted.strip()
+        if not safe_answer:
+            safe_answer = _not_enough_context_response(question).answer
+        return {"type": "done", "answer": safe_answer, "sources": [],
+                "language": language, "query_type": query_type}
     if progress:
         progress.mark("first_token")
     print(json.dumps({"event": "qa_llm_request_started", "request_id": request.request_id if request else None,
@@ -1471,32 +1497,39 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             if token:
                 answer_parts.append(token)
                 if language_gate_open:
-                    yield {"type": "token", "text": token}
+                    for safe in safe_pieces(token):
+                        if first_token_ms is None:
+                            first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                        yield {"type": "token", "text": safe}
+                    if number_stream is not None and number_stream.rejected:
+                        break
                 else:
                     pending_tokens.append(token)
                     draft = "".join(answer_parts)
                     boundary = draft.rstrip().endswith((".", "!", "?", "?"))
-                    if len(draft) >= 40 and (boundary or len(draft) >= 140):
-                        if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED and unsupported_answer_numbers(
-                            draft, question, answer_docs
-                        ):
-                            print(json.dumps({"event": "qa_answer_validation_failed",
-                                              "request_id": request.request_id if request else None,
-                                              "reason": "unsupported_number_before_release"}), flush=True)
-                            response = _not_enough_context_response(question)
-                            yield {"type": "done", "answer": response.answer,
-                                   "sources": [], "language": language, "query_type": query_type}
-                            return
-                        if not answer_language_matches(draft, language):
+                    # Waiting for a full sentence hid short answers until the
+                    # entire slow model response finished. Release once the
+                    # current language is recognizable; keep the existing
+                    # retry for a later language switch.
+                    ready_to_release = len(draft) >= 24 and answer_language_matches(draft, language)
+                    definite_mismatch = len(draft) >= 40 and (boundary or len(draft) >= 140)
+                    if ready_to_release or definite_mismatch:
+                        if not ready_to_release:
                             early_language_mismatch = True
                             break
                         language_gate_open = True
                         if request:
                             registry.set_status(request, "streaming")
-                        first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
                         for ready in pending_tokens:
-                            yield {"type": "token", "text": ready}
+                            for safe in safe_pieces(ready):
+                                if first_token_ms is None:
+                                    first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                                yield {"type": "token", "text": safe}
+                            if number_stream is not None and number_stream.rejected:
+                                break
                         pending_tokens.clear()
+                        if number_stream is not None and number_stream.rejected:
+                            break
         if not early_language_mismatch:
             remaining = citation_filter.feed(filter_text.feed("", final=True), final=True)
             if not active():
@@ -1504,7 +1537,10 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             if remaining:
                 answer_parts.append(remaining)
                 if language_gate_open:
-                    yield {"type": "token", "text": remaining}
+                    for safe in safe_pieces(remaining):
+                        if first_token_ms is None:
+                            first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                        yield {"type": "token", "text": safe}
                 else:
                     pending_tokens.append(remaining)
     finally:
@@ -1522,7 +1558,19 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             "For reasoning-only output, disable thinking if the model supports it, or increase "
             "OLLAMA_NUM_PREDICT. For load failures, inspect Ollama logs and available memory."
         )
+    if number_stream is not None and number_stream.rejected:
+        yield number_rejection_response()
+        return
+    if language_gate_open and number_stream is not None:
+        for safe in number_stream.finish():
+            if first_token_ms is None:
+                first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+            yield {"type": "token", "text": safe}
+        if number_stream.rejected:
+            yield number_rejection_response()
+            return
     if early_language_mismatch or not answer_language_matches(answer, language):
+        used_language_retry = True
         # The first complete sentence is held until its language passes this
         # guard. A later switch can still replace already streamed text.
         print(json.dumps({"event": "qa_language_retry", "request_id": request.request_id if request else None,
@@ -1574,12 +1622,16 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                 f"Model {config.OLLAMA_CHAT_MODEL} could not answer in the required language ({language}). "
                 "Try a multilingual chat model or choose another response language."
             )
-        if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED and unsupported_answer_numbers(corrected, question, answer_docs):
-            response = _not_enough_context_response(question)
-            yield {"type": "replace", "text": response.answer, "language": language}
-            yield {"type": "done", "answer": response.answer, "sources": [],
-                   "language": language, "query_type": query_type}
-            return
+        if number_stream is not None:
+            corrected_stream = NumberEvidenceStream(question, answer_docs)
+            corrected_stream.push(corrected)
+            corrected_stream.finish()
+            if corrected_stream.rejected:
+                print(json.dumps({"event": "qa_answer_validation_failed",
+                                  "request_id": request.request_id if request else None,
+                                  "reason": "unsupported_number_before_release",
+                                  "approved_chars": len(corrected_stream.accepted)}), flush=True)
+                corrected = corrected_stream.accepted.strip() or _not_enough_context_response(question).answer
         answer = corrected
         if language_gate_open:
             yield {"type": "replace", "text": answer, "language": language}
@@ -1587,29 +1639,28 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
             yield {"type": "token", "text": answer}
     elif not language_gate_open:
-        if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED and unsupported_answer_numbers(answer, question, answer_docs):
-            print(json.dumps({"event": "qa_answer_validation_failed",
-                              "request_id": request.request_id if request else None,
-                              "reason": "unsupported_number_before_release"}), flush=True)
-            response = _not_enough_context_response(question)
-            yield {"type": "done", "answer": response.answer, "sources": [],
-                   "language": language, "query_type": query_type}
-            return
         if request:
             registry.set_status(request, "streaming")
-        first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
         for ready in pending_tokens:
-            yield {"type": "token", "text": ready}
-    if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED and unsupported_answer_numbers(answer, question, answer_docs):
-        print(json.dumps({"event": "qa_answer_validation_failed",
-                          "request_id": request.request_id if request else None,
-                          "reason": "unsupported_number"}), flush=True)
-        response = _not_enough_context_response(question)
-        answer = response.answer
-        yield {"type": "replace", "text": answer, "language": language}
-        yield {"type": "done", "answer": answer, "sources": [],
-               "language": language, "query_type": query_type}
-        return
+            for safe in safe_pieces(ready):
+                if first_token_ms is None:
+                    first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                yield {"type": "token", "text": safe}
+            if number_stream is not None and number_stream.rejected:
+                yield number_rejection_response()
+                return
+        if number_stream is not None:
+            for safe in number_stream.finish():
+                if first_token_ms is None:
+                    first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+                yield {"type": "token", "text": safe}
+            if number_stream.rejected:
+                yield number_rejection_response()
+                return
+        elif first_token_ms is None:
+            first_token_ms = round((time.perf_counter() - generation_started_at) * 1000, 1)
+    if number_stream is not None and not used_language_retry:
+        answer = number_stream.accepted.strip()
     timings = {
         "retrieval": round((generation_started_at - retrieval_started_at) * 1000, 1),
         "first_token": first_token_ms or 0.0,

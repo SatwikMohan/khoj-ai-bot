@@ -184,7 +184,7 @@ class SemanticEvidenceTests(unittest.TestCase):
             prompts.extend(str(item) for item in inputs)
             yield AIMessageChunk(content="दस्तावेज़ में राज्य DGMs के प्रशिक्षण का उल्लेख है, लेकिन पूरा नाम नहीं दिया गया है।")
 
-        with patch("services.qa_service._load_environment"), patch(
+        with patch("config.QA_ALLOW_MODEL_KNOWLEDGE", False), patch("services.qa_service._load_environment"), patch(
             "services.qa_service._vector_store"
         ), patch("services.qa_service._retrieve_context", return_value=self.passages), patch(
             "services.qa_service.assess_semantic_evidence",
@@ -218,7 +218,7 @@ class SemanticEvidenceTests(unittest.TestCase):
             list(inputs)
             yield AIMessageChunk(content="विस्फोटकों के पास कामगारों को सुरक्षित दूरी पर रखना आवश्यक है।")
         model = RunnableGenerator(generate)
-        with patch("services.qa_service._load_environment"), patch(
+        with patch("config.QA_ALLOW_MODEL_KNOWLEDGE", False), patch("services.qa_service._load_environment"), patch(
             "services.qa_service._vector_store"
         ), patch("services.qa_service._retrieve_context", side_effect=[[unrelated], [relevant]]) as search, patch(
             "services.qa_service.assess_semantic_evidence", side_effect=decisions

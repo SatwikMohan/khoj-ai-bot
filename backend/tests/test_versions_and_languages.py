@@ -205,6 +205,9 @@ class LanguageAndVoiceTests(unittest.TestCase):
         self.assertEqual(detect_language("please elaborate on DGMS"), "en")
         self.assertEqual(detect_language("safety rules batao"), "hinglish")
         self.assertEqual(detect_language("isko detail me samjhao"), "hinglish")
+        self.assertEqual(detect_language("critical minerals ko explain kariye"), "hinglish")
+        self.assertEqual(detect_language("safety rules explain kijiye"), "hinglish")
+        self.assertEqual(detect_language("Please explain critical minerals"), "en")
         with patch("services.language_service._classifier", return_value=SimpleNamespace(
             classify=lambda text: ("es", 0.99)
         )):

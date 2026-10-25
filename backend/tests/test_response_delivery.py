@@ -196,6 +196,21 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(events[-1]['sources'], [])
         self.assertIn('No indexed passage has been verified', ' '.join(captured))
 
+    def test_general_question_skips_extra_semantic_model_request(self):
+        with patch.multiple(config, RESPONSE_LANGUAGE="auto", QA_SEMANTIC_EVIDENCE_ENABLED=True,
+                            QA_ALLOW_MODEL_KNOWLEDGE=True), patch(
+            'services.qa_service.assess_semantic_evidence', side_effect=AssertionError('slow verifier ran')
+        ) as verifier, patch(
+            'services.qa_service.suggest_local_search_query', side_effect=AssertionError('slow rewrite ran')
+        ) as rewrite, patch('services.qa_service._llm', return_value=self.model([
+            AIMessageChunk(content='DGMS mine safety ko dekhta hai.')
+        ])):
+            events = list(stream_answer_events('DGMS kya hai?'))
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertEqual(events[-1]['language'], 'hinglish')
+        verifier.assert_not_called()
+        rewrite.assert_not_called()
+
     def test_missing_index_does_not_block_offline_knowledge(self):
         with patch('services.qa_service._vector_store', side_effect=QAEngineError('index missing')), patch(
             'services.qa_service._llm', return_value=self.model([
@@ -215,6 +230,19 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertEqual(events[-1]['type'], 'done')
         self.assertNotIn('500', ''.join(e.get('text', '') for e in events if e['type'] == 'token'))
         self.assertIn("don't know", events[-1]['answer'])
+
+    def test_late_invented_number_keeps_spoken_answer_consistent(self):
+        model = self.model([
+            AIMessageChunk(content='The storage limit is 100 kg. '),
+            AIMessageChunk(content='The warranty is 500 days.'),
+        ])
+        with patch('services.qa_service._llm', return_value=model):
+            events = list(stream_answer_events('What is the storage limit?'))
+        streamed = ''.join(e['text'] for e in events if e['type'] == 'token').strip()
+        self.assertEqual(streamed, 'The storage limit is 100 kg.')
+        self.assertEqual(events[-1]['answer'], streamed)
+        self.assertNotIn('replace', [event['type'] for event in events])
+        self.assertNotIn('500', streamed)
 
     def test_generation_exception_is_visible(self):
         with patch('services.qa_service._llm', side_effect=RuntimeError('Ollama connection refused')):

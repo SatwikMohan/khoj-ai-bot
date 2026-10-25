@@ -7,6 +7,7 @@ values against the selected passages. Ambiguous cases abstain.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 
@@ -50,8 +51,22 @@ _CROSS_LANGUAGE_TERMS = {
     "matlab": ("meaning", "definition"),
 }
 _WORD = re.compile(r"[\w]+(?:[-'][\w]+)*", re.UNICODE)
-_NUMBER = re.compile(r"(?<![\w])\d+(?:[.,]\d+)*(?:\s*%|\s*[a-zA-Z]+)?")
+_NUMBER = re.compile(
+    r"(?<![\w])(?P<value>\d+(?:[.,]\d+)*)"
+    r"(?:\s*(?P<unit>%|kg|kilograms?|g|grams?|tonnes?|tons?|metres?|meters?|"
+    r"cm|mm|km|m|hours?|days?|किलोग्राम|किलो|ग्राम|टन|मीटर|घंटे|घंटा|दिन|प्रतिशत))?"
+    r"(?![\w%])", re.I,
+)
 _MEASURE = re.compile(r"\b\d+(?:[.,]\d+)*(?:\s*)(?:kg|g|tonnes?|tons?|%|metres?|meters?|hours?|days?)\b", re.I)
+_LIST_NUMBER = re.compile(r"(?m)^\s*\d{1,2}[.)]\s+(?=\S)")
+_ANSWER_BOUNDARY = re.compile(r"(?<!\d)[.!?\u0964](?=\s|$)|\n")
+_UNIT_ALIASES = {
+    "kilogram": "kg", "kilograms": "kg", "gram": "g", "grams": "g",
+    "meter": "m", "meters": "m", "metre": "m", "metres": "m",
+    "hour": "hours", "day": "days", "किलोग्राम": "kg", "किलो": "kg",
+    "ग्राम": "g", "टन": "ton", "मीटर": "m", "घंटे": "hours",
+    "घंटा": "hours", "दिन": "days", "प्रतिशत": "%",
+}
 
 
 def _terms(value: str) -> set[str]:
@@ -154,12 +169,65 @@ def assess_evidence(question: str, documents: list) -> EvidenceDecision:
 def unsupported_answer_numbers(answer: str, question: str, documents: list) -> set[str]:
     """Catch newly invented numeric claims; years already present in the question are allowed."""
     evidence = " ".join(doc.page_content + " " + str(doc.metadata.get("source", ""))
+                        + " " + str(doc.metadata.get("year", ""))
                         for doc in documents)
-    permitted = {m.group().strip().casefold() for m in _NUMBER.finditer(evidence + " " + question)}
+    permitted = {_number_key(m) for m in _NUMBER.finditer(evidence + " " + question)}
     for doc in documents:
         page = doc.metadata.get("page")
         if isinstance(page, int):
             permitted.update((str(page), str(page + 1)))
     # Citation labels refer to the selected passage order, not a factual count.
     permitted.update(str(i) for i in range(1, len(documents) + 1))
-    return {m.group().strip().casefold() for m in _NUMBER.finditer(answer)} - permitted
+    answer_without_list_markers = _LIST_NUMBER.sub("", answer)
+    return {_number_key(m) for m in _NUMBER.finditer(answer_without_list_markers)} - permitted
+
+
+def _number_key(match: re.Match) -> str:
+    value = "".join(str(unicodedata.decimal(char)) if char.isdecimal() else char
+                    for char in match.group("value") if char != ",")
+    unit = (match.group("unit") or "").casefold()
+    unit = _UNIT_ALIASES.get(unit, unit)
+    return value + (" " + unit if unit else "")
+
+
+class NumberEvidenceStream:
+    """Release only complete phrases whose numbers occur in selected evidence."""
+
+    def __init__(self, question: str, documents: list):
+        self.question = question
+        self.documents = documents
+        self.buffer = ""
+        self.accepted = ""
+        self.rejected: set[str] = set()
+
+    def _accept(self, phrase: str) -> list[str]:
+        unsupported = unsupported_answer_numbers(phrase, self.question, self.documents)
+        if unsupported:
+            self.rejected = unsupported
+            self.buffer = ""
+            return []
+        self.accepted += phrase
+        return [phrase]
+
+    def push(self, text: str) -> list[str]:
+        if self.rejected or not text:
+            return []
+        self.buffer += text
+        released = []
+        while self.buffer:
+            boundary = next((hit for hit in _ANSWER_BOUNDARY.finditer(self.buffer)
+                             if len(self.buffer[:hit.end()].strip()) >= 24), None)
+            if boundary is None:
+                break
+            phrase = self.buffer[:boundary.end()]
+            self.buffer = self.buffer[boundary.end():]
+            released.extend(self._accept(phrase))
+            if self.rejected:
+                break
+        return released
+
+    def finish(self) -> list[str]:
+        if self.rejected or not self.buffer:
+            return []
+        phrase, self.buffer = self.buffer, ""
+        return self._accept(phrase)

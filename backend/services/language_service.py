@@ -21,6 +21,7 @@ ROMAN_HINDI = {
     "batao", "bataye", "bataiye", "kripya", "dhanyavad", "shukriya",
     "namaste", "nahi", "mera", "meri", "hoga", "karo", "samjhao",
     "chahiye", "mein", "se", "ka", "ki", "ke", "yaar", "kal",
+    "kariye", "kijiye", "dijiye", "batayein", "samjhayen",
     "jaana", "jana", "karna", "aaj", "aur", "ko", "yaad", "dilao",
     "yeh", "ye", "woh", "voh", "iska", "iski", "iske", "isme",
     "unhe", "unko", "agar", "lekin", "isliye", "kyunki", "liye",

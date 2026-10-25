@@ -157,6 +157,25 @@ class LanguageContractTests(unittest.TestCase):
         self.assertEqual(events[-1]["language"], "hinglish")
         self.assertIn("DGMS mine safety", events[-1]["answer"])
 
+    def test_polite_hinglish_request_does_not_retry_as_english(self):
+        calls = []
+        def generate(inputs):
+            list(inputs)
+            calls.append(1)
+            yield AIMessageChunk(content="Critical minerals energy aur technology ke liye zaroori hote hain.")
+        with patch.object(config, "RESPONSE_LANGUAGE", "auto"), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context", return_value=[Document(
+                page_content="Critical minerals are essential for energy and technology.",
+                metadata={"source": "minerals.pdf"},
+            )]
+        ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)):
+            events = list(stream_answer_events("critical minerals ko explain kariye"))
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["language"], "hinglish")
+        self.assertEqual(len(calls), 1)
+
     def test_spoken_language_survives_english_transcript(self):
         with patch.object(config, "RESPONSE_LANGUAGE", "auto"):
             self.assertEqual(resolve_language_context(

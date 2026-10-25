@@ -2,7 +2,7 @@ import unittest
 
 from langchain_core.documents import Document
 
-from services.evidence_gate import EvidenceStatus, assess_evidence, unsupported_answer_numbers
+from services.evidence_gate import EvidenceStatus, NumberEvidenceStream, assess_evidence, unsupported_answer_numbers
 
 
 class EvidenceGateTests(unittest.TestCase):
@@ -39,7 +39,24 @@ class EvidenceGateTests(unittest.TestCase):
     def test_numeric_claim_validation(self):
         docs = [Document(page_content="The storage limit is 100 kg.", metadata={})]
         self.assertFalse(unsupported_answer_numbers("The limit is 100 kg.", "What is the limit?", docs))
+        self.assertFalse(unsupported_answer_numbers("सीमा १०० किलोग्राम है।", "What is the limit?", docs))
         self.assertTrue(unsupported_answer_numbers("The limit is 500 kg.", "What is the limit?", docs))
+        self.assertTrue(unsupported_answer_numbers("The limit is 100 days.", "What is the limit?", docs))
+
+    def test_numeric_claim_words_and_list_markers_are_not_facts(self):
+        docs = [Document(page_content="India identified 30 critical minerals.", metadata={})]
+        answer = "India identified 30 minerals.\n1. They are important.\n6. This is a list item."
+        self.assertFalse(unsupported_answer_numbers(answer, "Explain critical minerals", docs))
+        self.assertFalse(unsupported_answer_numbers("भारत ने ३० खनिज पहचाने।", "Explain critical minerals", docs))
+        self.assertTrue(unsupported_answer_numbers("India identified 31 minerals.", "Explain critical minerals", docs))
+
+    def test_number_stream_keeps_approved_sentence_when_later_number_is_wrong(self):
+        docs = [Document(page_content="The storage limit is 100 kg.", metadata={})]
+        stream = NumberEvidenceStream("What is the storage limit?", docs)
+        self.assertEqual(stream.push("The storage limit is 100 kg. "), ["The storage limit is 100 kg."])
+        self.assertEqual(stream.push("The warranty is 500 days."), [])
+        self.assertEqual(stream.accepted, "The storage limit is 100 kg.")
+        self.assertTrue(stream.rejected)
 
     def test_same_scope_measurements_conflict(self):
         docs = [
