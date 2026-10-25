@@ -193,7 +193,9 @@ class LanguageContractTests(unittest.TestCase):
             prompts.extend(str(item) for item in inputs)
             yield AIMessageChunk(content="DGMS mine safety ko oversee karta hai.")
         try:
-            with patch.object(config, "RESPONSE_LANGUAGE", "auto"), patch(
+            with patch.object(config, "RESPONSE_LANGUAGE", "auto"), patch.object(
+                config, "QA_ALLOW_MODEL_KNOWLEDGE", True
+            ), patch(
                 "services.qa_service._load_environment"
             ), patch("services.qa_service._vector_store", side_effect=RuntimeError("index missing")), patch(
                 "services.qa_service._llm", return_value=RunnableGenerator(generate)

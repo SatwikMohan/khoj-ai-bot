@@ -5,6 +5,7 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,6 +13,11 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUPPORTED_SPEECH_LANGUAGES = frozenset({"en", "hi"})
+_HINDI_LETTER_NAMES = dict(zip(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ("ए", "बी", "सी", "डी", "ई", "एफ", "जी", "एच", "आई", "जे", "के", "एल", "एम",
+     "एन", "ओ", "पी", "क्यू", "आर", "एस", "टी", "यू", "वी", "डब्ल्यू", "एक्स", "वाई", "जेड"),
+))
 UNSUPPORTED_SCRIPT = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff\u0400-\u04ff\u0370-\u03ff\u4e00-\u9fff]")
 TRANSCRIBE_SEMAPHORE = threading.BoundedSemaphore(
     max(1, int(config.STT_MAX_CONCURRENT))
@@ -24,6 +30,20 @@ class STTEngineError(RuntimeError):
 
 class STTRecoverableError(STTEngineError):
     """A clip with no usable question; continuous listening can resume."""
+
+
+def _identifier_survives_hindi_retry(anchor: str, transcript: str) -> bool:
+    if re.search(r"(?<![A-Za-z0-9])" + re.escape(anchor) + r"(?![A-Za-z0-9])",
+                 transcript, re.IGNORECASE):
+        return True
+    if anchor.isdigit():
+        digits = "".join(str(unicodedata.decimal(char)) for char in transcript if char.isdecimal())
+        return anchor in digits
+    if anchor.isalpha() and anchor.isupper():
+        pronounced = "".join(_HINDI_LETTER_NAMES[char] for char in anchor)
+        devanagari = "".join(char for char in transcript if "\u0900" <= char <= "\u097f")
+        return pronounced in devanagari
+    return False
 
 
 def _load_environment() -> None:
@@ -175,16 +195,20 @@ def transcribe_audio(
                 text, detected_language, language_probability, duration = _transcribe_transformers(
                     model_state, samples, language, cancelled
                 )
-                if not language and detected_language == "en":
+                if not language and detected_language in {"en", "hi"} and (
+                        detected_language == "en" or not re.search(r"[\u0900-\u097f]", text)):
                     # Whisper can emit an English translation even with the
                     # transcribe task. Check the audio language independently
                     # before accepting English as the person's spoken style.
-                    try:
-                        acoustic_language, acoustic_probability = _preferred_supported_language(
-                            model_state, samples
-                        )
-                    except STTEngineError:
-                        acoustic_language, acoustic_probability = None, 0.0
+                    if detected_language == "hi":
+                        acoustic_language, acoustic_probability = "hi", 1.0
+                    else:
+                        try:
+                            acoustic_language, acoustic_probability = _preferred_supported_language(
+                                model_state, samples
+                            )
+                        except STTEngineError:
+                            acoustic_language, acoustic_probability = None, 0.0
                     if (acoustic_language == "hi" and acoustic_probability >=
                             float(config.STT_HINDI_AUDIO_OVERRIDE_MIN_PROB)):
                         retry_error = None
@@ -198,15 +222,16 @@ def transcribe_audio(
                             retry_error = type(exc).__name__
                             hindi_text = ""
                         anchors = re.findall(r"\b[A-Z][A-Z0-9]{1,}\b|\b\d+(?:[./-]\d+)*\b", text)
-                        anchors_preserved = all(re.search(
-                            r"(?<![A-Za-z0-9])" + re.escape(anchor) + r"(?![A-Za-z0-9])",
-                            hindi_text, re.IGNORECASE,
-                        ) for anchor in anchors)
+                        anchors_preserved = all(
+                            _identifier_survives_hindi_retry(anchor, hindi_text) for anchor in anchors
+                        )
                         if (re.search(r"[\u0900-\u097f]", hindi_text)
                                 and len(hindi_text.split()) >= 2 and anchors_preserved):
                             text = hindi_text
                             detected_language = "hi"
-                            spoken_language = "hinglish" if re.search(r"[A-Za-z]", hindi_text) else "hi"
+                            latin_words = re.findall(r"[A-Za-z]{2,}", hindi_text)
+                            spoken_language = ("hinglish" if any(not word.isupper() for word in latin_words)
+                                               else "hi")
                             language_probability = acoustic_probability
                             print(json.dumps({"event": "stt_spoken_language_recovered",
                                               "spoken_language": spoken_language,
@@ -217,6 +242,10 @@ def transcribe_audio(
                                               "reason": retry_error or "transcript_or_identifier_mismatch",
                                               "acoustic_probability": round(acoustic_probability, 3)}),
                                   flush=True)
+                            raise STTRecoverableError(
+                                "Hindi speech was detected but its words could not be transcribed reliably. "
+                                "Please speak again."
+                            )
                 if not language and (detected_language not in SUPPORTED_SPEECH_LANGUAGES
                                      or UNSUPPORTED_SCRIPT.search(text)):
                     recovered_language, language_probability = _preferred_supported_language(
@@ -266,6 +295,8 @@ def transcribe_audio(
         raise STTRecoverableError(
             "The microphone could not recognize English, Hindi or Hinglish. Please speak again."
         )
+    if detected_language == "hi" and not re.search(r"[\u0900-\u097f]", text):
+        raise STTRecoverableError("Hindi speech could not be transcribed in Hindi. Please speak again.")
 
     return {
         "text": text,

@@ -368,7 +368,7 @@ class SpeechReliabilityTests(unittest.TestCase):
             patch("services.stt_service._preferred_supported_language", return_value=("hi", 0.18)) as preference,
             patch("services.stt_service._transcribe_transformers", side_effect=[
                 ("?????", "ar", 0.0, 1.0),
-                ("???? DGMS ?? ???? ??? ????", "hi", 0.0, 1.0),
+                ("DGMS \u0915\u0947 \u092c\u093e\u0930\u0947 \u092e\u0947\u0902 \u092c\u0924\u093e\u0913", "hi", 0.0, 1.0),
             ]) as transcribe,
         ):
             result = transcribe_audio(b"recording")
@@ -389,7 +389,7 @@ class SpeechReliabilityTests(unittest.TestCase):
         ):
             result = transcribe_audio(b"recording")
         self.assertEqual(result["text"], "DGMS के बारे में बताओ")
-        self.assertEqual(result["spoken_language"], "hinglish")
+        self.assertEqual(result["spoken_language"], "hi")
         self.assertEqual(transcribe.call_args_list[1].args[2], "hi")
 
     def test_english_audio_is_not_forced_into_hindi(self):
@@ -415,9 +415,22 @@ class SpeechReliabilityTests(unittest.TestCase):
                 ("मुझे सुरक्षा के बारे में बताओ", "hi", 0.0, 1.0),
             ]),
         ):
+            with self.assertRaises(STTRecoverableError):
+                transcribe_audio(b"recording")
+
+    def test_hindi_retry_accepts_identifier_spoken_as_hindi_letters(self):
+        with (
+            patch("services.stt_service._decode_audio", return_value=np.zeros(16000)),
+            patch("services.stt_service._model", return_value={"engine": "transformers"}),
+            patch("services.stt_service._preferred_supported_language", return_value=("hi", 0.82)),
+            patch("services.stt_service._transcribe_transformers", side_effect=[
+                ("Tell me about DGMS", "en", 0.0, 1.0),
+                ("\u0921\u0940\u091c\u0940\u090f\u092e\u090f\u0938 \u0915\u0947 \u092c\u093e\u0930\u0947 \u092e\u0947\u0902 \u092c\u0924\u093e\u0913", "hi", 0.0, 1.0),
+            ]),
+        ):
             result = transcribe_audio(b"recording")
-        self.assertEqual(result["text"], "Tell me about DGMS")
-        self.assertEqual(result["spoken_language"], "en")
+        self.assertEqual(result["spoken_language"], "hi")
+        self.assertIn("\u0921\u0940\u091c\u0940\u090f\u092e\u090f\u0938", result["text"])
 
     def test_language_recovery_uses_english_hindi_logits(self):
         import torch

@@ -178,6 +178,56 @@ class ResponseDeliveryTests(unittest.TestCase):
         self.assertIn("don't know", events[-1]['answer'])
         self.assertEqual(events[-1]['sources'], [])
 
+    def test_index_typo_repair_is_internal_and_answer_remains_grounded(self):
+        doc = Document(page_content='Rare earth metals include neodymium.',
+                       metadata={'source': 'minerals.pdf'})
+        queries = []
+        prompts = []
+
+        def retrieve(_store, query, _top_k, **_kwargs):
+            queries.append(query)
+            return [doc]
+
+        def generate(inputs):
+            prompts.extend(str(item) for item in inputs)
+            yield AIMessageChunk(content='Rare earth metals include neodymium.')
+
+        with patch('services.qa_service._retrieve_context', side_effect=retrieve), patch(
+            'services.qa_service._llm', return_value=RunnableGenerator(generate)
+        ):
+            events = list(stream_answer_events('Explain Rear Earth Metals'))
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertIn('Rare earth metals', events[-1]['answer'])
+        self.assertEqual(queries, ['Explain Rear Earth Metals', 'Explain Rare Earth Metals'])
+        self.assertIn('Explain Rare Earth Metals', ' '.join(prompts))
+
+    def test_strict_mode_never_asks_model_to_fill_missing_index_fact(self):
+        with patch('services.qa_service._retrieve_context', return_value=[]), patch(
+            'services.qa_service._llm'
+        ) as model:
+            events = list(stream_answer_events('What are rare earth metals?'))
+        model.assert_not_called()
+        self.assertEqual(events[-1]['type'], 'done')
+        self.assertIn("don't know", events[-1]['answer'])
+
+    def test_hindi_spoken_language_controls_abstention_after_english_transcript(self):
+        session_id, request_id = 'hindi-transcript-session', 'hindi-transcript-request'
+        registry.begin(session_id, request_id, input_type='audio', status='transcribed')
+        try:
+            with patch.multiple(config, RESPONSE_LANGUAGE='auto', QA_ALLOW_MODEL_KNOWLEDGE=False), patch(
+                'services.qa_service._retrieve_context', return_value=[]
+            ), patch('services.qa_service._llm') as model:
+                events = list(stream_answer_events(
+                    'Tell me about rare earth metals', session_id=session_id,
+                    request_id=request_id, input_type='audio', spoken_language='hi',
+                ))
+            model.assert_not_called()
+            self.assertEqual(events[-1]['type'], 'done')
+            self.assertEqual(events[-1]['language'], 'hi')
+            self.assertRegex(events[-1]['answer'], '[\u0900-\u097f]')
+        finally:
+            registry.cancel(session_id, request_id)
+
     def test_general_explanation_and_precise_fact_use_different_paths(self):
         self.assertFalse(_requires_verified_context('what is dgms'))
         self.assertFalse(_requires_verified_context('explain mine safety'))
@@ -189,7 +239,9 @@ class ResponseDeliveryTests(unittest.TestCase):
         def generate(inputs):
             captured.extend(str(item) for item in inputs)
             yield AIMessageChunk(content="DGMS stands for Directorate General of Mines Safety.")
-        with patch('services.qa_service._llm', return_value=RunnableGenerator(generate)):
+        with patch.object(config, 'QA_ALLOW_MODEL_KNOWLEDGE', True), patch(
+            'services.qa_service._llm', return_value=RunnableGenerator(generate)
+        ):
             events = list(stream_answer_events('what is dgms'))
         self.assertEqual(events[-1]['type'], 'done')
         self.assertIn('Directorate General of Mines Safety', events[-1]['answer'])
@@ -212,7 +264,9 @@ class ResponseDeliveryTests(unittest.TestCase):
         rewrite.assert_not_called()
 
     def test_missing_index_does_not_block_offline_knowledge(self):
-        with patch('services.qa_service._vector_store', side_effect=QAEngineError('index missing')), patch(
+        with patch.object(config, 'QA_ALLOW_MODEL_KNOWLEDGE', True), patch(
+            'services.qa_service._vector_store', side_effect=QAEngineError('index missing')
+        ), patch(
             'services.qa_service._llm', return_value=self.model([
                 AIMessageChunk(content="DGMS stands for Directorate General of Mines Safety.")
             ])

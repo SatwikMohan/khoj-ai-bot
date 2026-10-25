@@ -25,6 +25,7 @@ from services.semantic_evidence import assess_semantic_evidence, suggest_local_s
 from services.lexical_service import STOP_WORDS, lexical_search
 from services.language_service import answer_language_matches, resolve_language_context, response_language, language_instruction
 from services.reranker_service import rerank_documents
+from services.query_correction import correct_query_from_passages
 from services.model_config import thinking_setting
 from services.response_stream import AnswerTextFilter, CitationTextFilter, StreamProgress, bounded_events
 from services.request_lifecycle import registry
@@ -183,8 +184,8 @@ def _normalized_query(question: str) -> str:
     return re.sub(r"\s+", " ", question.strip().lower()).strip(" .!?।")
 
 
-def _detect_language_style(question: str) -> str:
-    code = response_language(question)
+def _detect_language_style(question: str, language: str | None = None) -> str:
+    code = language or response_language(question)
     return {"en": "english", "hi": "hindi"}.get(code, code)
 
 
@@ -287,8 +288,8 @@ def _direct_answer_content(raw_answer: str) -> str:
 
 
 
-def _general_response(question: str) -> QAResponse:
-    language_style = _detect_language_style(question)
+def _general_response(question: str, language: str | None = None) -> QAResponse:
+    language_style = _detect_language_style(question, language)
     if language_style not in {"english", "hindi", "hinglish"}:
         prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a friendly document assistant. Reply directly and briefly to the greeting or social message. {language_instruction} Do not invent document facts."),
@@ -1035,8 +1036,8 @@ def _retrieve_summary_context(vector_store: Chroma, question: str, top_k: int, *
     return _retrieve_context(vector_store, question, summary_k, scope_question=scope_question, cancel_event=cancel_event)
 
 
-def _not_enough_context_response(question: str) -> QAResponse:
-    language_style = _detect_language_style(question)
+def _not_enough_context_response(question: str, language: str | None = None) -> QAResponse:
+    language_style = _detect_language_style(question, language)
     if language_style == "hindi":
         answer = "मुझे इसका भरोसेमंद जवाब नहीं पता।"
     elif language_style == "hinglish":
@@ -1047,8 +1048,8 @@ def _not_enough_context_response(question: str) -> QAResponse:
     return QAResponse(answer=answer, sources=[], query_type="document")
 
 
-def _conflicting_context_response(question: str) -> QAResponse:
-    style = _detect_language_style(question)
+def _conflicting_context_response(question: str, language: str | None = None) -> QAResponse:
+    style = _detect_language_style(question, language)
     if style == "hindi":
         answer = "इंडेक्स किए गए दस्तावेज़ इस तथ्य पर अलग-अलग जानकारी देते हैं, इसलिए मैं एक निश्चित उत्तर नहीं दे सकता।"
     elif style == "hinglish":
@@ -1058,8 +1059,8 @@ def _conflicting_context_response(question: str) -> QAResponse:
     return QAResponse(answer=answer, sources=[], query_type="document")
 
 
-def _verification_unavailable_response(question: str) -> QAResponse:
-    style = _detect_language_style(question)
+def _verification_unavailable_response(question: str, language: str | None = None) -> QAResponse:
+    style = _detect_language_style(question, language)
     if style == "hindi":
         answer = "मुझे संबंधित दस्तावेज़ मिले, लेकिन अभी उनकी जानकारी की पुष्टि नहीं हो सकी। कृपया फिर से पूछें।"
     elif style == "hinglish":
@@ -1258,7 +1259,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                       "spoken": spoken_language if request and request.input_type == "audio" else None,
                       "target": language, "script": language_context.script}), flush=True)
     if _is_general_query(question):
-        response = _general_response(question)
+        response = _general_response(question, language)
         yield {
             "type": "done", "answer": response.answer, "language": language,
             "sources": _source_dicts(response.sources), "query_type": response.query_type,
@@ -1288,6 +1289,35 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "reason": type(exc).__name__}), flush=True)
     if not active():
         return
+    answer_question_text = correct_query_from_passages(question, docs)
+    if answer_question_text != question:
+        corrected_retrieval_query = retrieval_query.replace(question, answer_question_text, 1)
+        if corrected_retrieval_query == retrieval_query:
+            corrected_retrieval_query = answer_question_text
+        if vector_store is not None:
+            try:
+                corrected_docs = (
+                    _retrieve_summary_context(vector_store, corrected_retrieval_query, top_k,
+                                              scope_question=answer_question_text,
+                                              cancel_event=request.cancelled if request else None)
+                    if query_type == "summary" else
+                    _retrieve_context(vector_store, corrected_retrieval_query, top_k,
+                                      scope_question=answer_question_text,
+                                      cancel_event=request.cancelled if request else None)
+                )
+                if corrected_docs:
+                    docs = corrected_docs
+            except Exception as exc:
+                print(json.dumps({"event": "qa_query_correction_retry_failed",
+                                  "request_id": request.request_id if request else None,
+                                  "reason": type(exc).__name__}), flush=True)
+        retrieval_query = corrected_retrieval_query
+        print(json.dumps({"event": "qa_query_corrected_from_index",
+                          "request_id": request.request_id if request else None,
+                          "query_sha256": hashlib.sha256(answer_question_text.encode("utf-8")).hexdigest()[:16]}),
+              flush=True)
+    if not active():
+        return
     retrieved_languages = sorted({
         str(doc.metadata.get("language", "")).lower()
         for doc in docs if doc.metadata.get("language")
@@ -1298,9 +1328,8 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                       "target": language, "retrieved_languages": language_context.retrieved_languages,
                       "elapsed_ms": round((time.perf_counter() - retrieval_started_at) * 1000, 1)}),
           flush=True)
-    # General questions permit offline model knowledge. A second full chat
-    # completion to certify every helpful passage delays the actual answer;
-    # retain semantic verification for exact, changing, or source-bound facts.
+    # In strict mode, verify all proposed evidence. The optional permissive
+    # mode verifies exact, changing, or source-bound facts.
     semantic_required = (config.QA_SEMANTIC_EVIDENCE_ENABLED and
                          (not config.QA_ALLOW_MODEL_KNOWLEDGE or
                           _requires_verified_context(question)))
@@ -1309,12 +1338,12 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     if config.QA_EVIDENCE_GATE_ENABLED:
         if semantic_required and docs:
             yield {"type": "status", "message": "Checking the evidence"}
-            decision = assess_semantic_evidence(question, docs, topic_context=retrieval_query)
+            decision = assess_semantic_evidence(answer_question_text, docs, topic_context=retrieval_query)
         else:
-            decision = assess_evidence(question, docs)
+            decision = assess_evidence(answer_question_text, docs)
     if (vector_store is not None and not docs and config.QA_EVIDENCE_GATE_ENABLED and semantic_required
             and language in {"hi", "hinglish"} and active()):
-        search_query = suggest_local_search_query(question)
+        search_query = suggest_local_search_query(answer_question_text)
         if search_query:
             decision = EvidenceDecision(EvidenceStatus.INSUFFICIENT_EVIDENCE, (),
                                         "no_retrieved_evidence", search_query=search_query)
@@ -1326,13 +1355,13 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "query_sha256": hashlib.sha256(decision.search_query.encode("utf-8")).hexdigest()[:16]}),
               flush=True)
         retry_docs = _retrieve_context(
-            vector_store, decision.search_query, top_k, scope_question=question,
+            vector_store, decision.search_query, top_k, scope_question=answer_question_text,
             cancel_event=request.cancelled if request else None,
         )
         if not active():
             return
         if retry_docs and {_doc_key(doc) for doc in retry_docs} != {_doc_key(doc) for doc in docs}:
-            retry_decision = assess_semantic_evidence(question, retry_docs,
+            retry_decision = assess_semantic_evidence(answer_question_text, retry_docs,
                                                       topic_context=retrieval_query)
             if retry_decision.status in {EvidenceStatus.ANSWERABLE,
                                          EvidenceStatus.PARTIAL_EVIDENCE,
@@ -1351,21 +1380,19 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "strategy": "semantic" if semantic_required else "local",
                           "elapsed_ms": round((time.perf_counter() - evidence_started_at) * 1000, 1),
                           "retrieved": len(docs), "selected": len(decision.documents)}), flush=True)
-    indexed_answer = bool(docs) and (decision is None or decision.status in {
-        EvidenceStatus.ANSWERABLE, EvidenceStatus.PARTIAL_EVIDENCE,
-    })
+    indexed_answer = bool(docs) and (decision is None or (
+        decision.status in {EvidenceStatus.ANSWERABLE, EvidenceStatus.PARTIAL_EVIDENCE}
+        and bool(decision.documents)
+    ))
     must_abstain = bool(decision and decision.status in {
         EvidenceStatus.REQUIRED_VERSION_NOT_FOUND, EvidenceStatus.CONFLICTING_EVIDENCE,
-    }) or (not indexed_answer and _requires_verified_context(question))
-    if must_abstain or (not config.QA_ALLOW_MODEL_KNOWLEDGE and (not docs or (decision and decision.status in {
-        EvidenceStatus.INSUFFICIENT_EVIDENCE, EvidenceStatus.REQUIRED_VERSION_NOT_FOUND,
-        EvidenceStatus.CONFLICTING_EVIDENCE, EvidenceStatus.VERIFICATION_UNAVAILABLE,
-    }))):
-        response = (_conflicting_context_response(question) if decision and
+    }) or (not indexed_answer and _requires_verified_context(answer_question_text))
+    if must_abstain or (not config.QA_ALLOW_MODEL_KNOWLEDGE and not indexed_answer):
+        response = (_conflicting_context_response(question, language) if decision and
                     decision.status == EvidenceStatus.CONFLICTING_EVIDENCE else
-                    _verification_unavailable_response(question) if decision and
+                    _verification_unavailable_response(question, language) if decision and
                     decision.status == EvidenceStatus.VERIFICATION_UNAVAILABLE else
-                    _not_enough_context_response(question))
+                    _not_enough_context_response(question, language))
         yield {
             "type": "done", "answer": response.answer, "sources": [], "language": language,
             "query_type": query_type,
@@ -1375,7 +1402,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
 
     yield {"type": "status", "message": "Preparing an answer"}
     include_locations = False
-    answer_docs = (_select_answer_docs(question, list(decision.documents) if decision else docs,
+    answer_docs = (_select_answer_docs(answer_question_text, list(decision.documents) if decision else docs,
                                       query_type) if indexed_answer else [])
     knowledge_mode = ("general" if not indexed_answer else
                       "indexed" if config.QA_ALLOW_MODEL_KNOWLEDGE else "strict")
@@ -1403,7 +1430,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     inputs = {
         "context": context_text,
         "chat_history": history_text,
-        "question": question,
+        "question": answer_question_text,
         "language_instruction": language_instruction(language),
         "thinking_instruction": _thinking_instruction(),
         "missing_parts": "; ".join(decision.missing_parts) if indexed_answer and decision and
@@ -1438,7 +1465,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
     language_gate_open = False
     early_language_mismatch = False
     used_language_retry = False
-    number_stream = (NumberEvidenceStream(question, answer_docs)
+    number_stream = (NumberEvidenceStream(answer_question_text, answer_docs)
                      if indexed_answer and config.QA_EVIDENCE_GATE_ENABLED else None)
 
     def safe_pieces(piece: str) -> list[str]:
@@ -1451,7 +1478,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                           "approved_chars": len(number_stream.accepted)}), flush=True)
         safe_answer = number_stream.accepted.strip()
         if not safe_answer:
-            safe_answer = _not_enough_context_response(question).answer
+            safe_answer = _not_enough_context_response(question, language).answer
         return {"type": "done", "answer": safe_answer, "sources": [],
                 "language": language, "query_type": query_type}
     if progress:
@@ -1584,7 +1611,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
             "Preserve supported numbers, units, and identifiers."
         )
         retry_inputs["question"] = (
-            f"{question}\n\nPrevious draft (possibly incomplete):\n{answer[:4000]}"
+            f"{answer_question_text}\n\nPrevious draft (possibly incomplete):\n{answer[:4000]}"
             "\n\nAnswer the original question fully in the required language."
         )
         retry_filter = AnswerTextFilter()
@@ -1623,7 +1650,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                 "Try a multilingual chat model or choose another response language."
             )
         if number_stream is not None:
-            corrected_stream = NumberEvidenceStream(question, answer_docs)
+            corrected_stream = NumberEvidenceStream(answer_question_text, answer_docs)
             corrected_stream.push(corrected)
             corrected_stream.finish()
             if corrected_stream.rejected:
@@ -1631,7 +1658,7 @@ def _stream_answer_events(question, top_k, temperature, chat_history, request=No
                                   "request_id": request.request_id if request else None,
                                   "reason": "unsupported_number_before_release",
                                   "approved_chars": len(corrected_stream.accepted)}), flush=True)
-                corrected = corrected_stream.accepted.strip() or _not_enough_context_response(question).answer
+                corrected = corrected_stream.accepted.strip() or _not_enough_context_response(question, language).answer
         answer = corrected
         if language_gate_open:
             yield {"type": "replace", "text": answer, "language": language}
