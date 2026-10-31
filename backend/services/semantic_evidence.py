@@ -104,6 +104,59 @@ def _quote_mentions_requested_identifier(question: str, quote: str) -> bool:
     return not acronyms or any(_acronyms_present(acronym, quote) for acronym in acronyms)
 
 
+def _direct_definition(question: str, passages: list) -> EvidenceDecision | None:
+    """Accept an explicit indexed definition without asking a model to copy it.
+
+    This is deliberately limited to a short, unconstrained definition request.
+    A related mention, a requested year, or competing definitions still needs
+    semantic review. The evidence quote is copied from the indexed passage.
+    """
+    if re.search(r"\b(?:19|20)\d{2}\b|\b(?:latest|current|version|edition|compare|versus)\b", question, re.I):
+        return None
+    normalized = " ".join(question.strip().strip("?.! ").split())
+    match = re.match(
+        r"^(?:what (?:exactly )?(?:is|are) |define |explain |"
+        r"tell me (?:what |about )?)(.+)$", normalized, re.I,
+    )
+    if not match:
+        return None
+    subject = re.sub(
+        r"\s+(?:in (?:hindi|english|hinglish)|to (?:the )?audience|please)$",
+        "", match.group(1), flags=re.I,
+    ).strip()
+    subject = re.sub(r"^(?:a|an|the)\s+", "", subject, flags=re.I)
+    words = re.findall(r"[A-Za-z][A-Za-z0-9-]*", subject)
+    if not 1 <= len(words) <= 5 or len(" ".join(words)) != len(subject):
+        return None
+    phrase = r"\s+".join(re.escape(word) for word in words)
+    # A singular query may be defined under the plural heading in the index.
+    if not words[-1].lower().endswith("s"):
+        phrase += "s?"
+    definition = re.compile(
+        r"(?<![A-Za-z0-9])(?:" + phrase + r")\s+"
+        r"(?:is|are|means|refers to|denotes|stands for)\s+(.{12,})",
+        re.I,
+    )
+    matches = {}
+    for passage in passages:
+        for sentence in re.split(r"(?<=[.!?\u0964])\s+|\n+", passage.page_content):
+            sentence = sentence.strip()
+            found = definition.search(sentence)
+            # Reporting that a term is mentioned is not a definition.
+            if (found and not re.match(
+                r"(?:discussed|mentioned|listed|included|referenced|shown|"
+                r"examined|covered|noted)\b", found.group(1), re.I,
+            ) and _exact_quote(sentence, passage.page_content)):
+                matches.setdefault(_normalize(sentence), (passage, sentence))
+    if len(matches) != 1:
+        return None
+    passage, sentence = next(iter(matches.values()))
+    if not _acronyms_covered(question, (sentence,)):
+        return None
+    return EvidenceDecision(EvidenceStatus.ANSWERABLE, (passage,),
+                            "explicit_indexed_definition", verified_quotes=(sentence,))
+
+
 def _evidence_spans(passages: list, allowed_indices: set[int]) -> dict[str, tuple[int, str]]:
     """Number literal source sentences for a bounded quote-repair request."""
     spans = {}
@@ -364,6 +417,10 @@ def assess_semantic_evidence(question: str, documents: list, *, topic_context: s
     if precheck.status in {EvidenceStatus.REQUIRED_VERSION_NOT_FOUND,
                            EvidenceStatus.CONFLICTING_EVIDENCE} or not documents:
         return precheck
+
+    direct = _direct_definition(question, list(documents))
+    if direct is not None:
+        return direct
 
     passages = list(documents[:int(config.QA_EVIDENCE_MAX_PASSAGES)])
     blocks = []

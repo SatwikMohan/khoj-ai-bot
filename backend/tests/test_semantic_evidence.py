@@ -82,23 +82,90 @@ class SemanticEvidenceTests(unittest.TestCase):
 
     def test_invalid_model_quote_can_be_repaired_with_literal_source_sentence(self):
         passage = Document(page_content=(
-            "DGMS means Directorate General of Mines Safety. "
+            "DGMS oversees mine safety inspections in this document. "
             "It is responsible for mine safety oversight in this document."
         ), metadata={"source": "definition.pdf"})
         replies = iter([
             response("ANSWERABLE", [{"passage_id": 0,
-                                      "quote": "DGMS is the Directorate General of Mines Safety."}]),
+                                      "quote": "DGMS oversees every mine worldwide."}]),
             SimpleNamespace(message=SimpleNamespace(content=json.dumps({
                 "decision": "ANSWERABLE", "sentence_ids": ["p0s0"], "missing_parts": [],
             }))),
         ])
-        decision = assess_semantic_evidence("what is DGMS", [passage],
+        decision = assess_semantic_evidence("What does DGMS oversee?", [passage],
                                             chat=lambda *_: next(replies))
         self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
         self.assertEqual(decision.reason, "semantic_sentence_id_verified")
         self.assertEqual(decision.documents, (passage,))
         self.assertEqual(decision.verified_quotes,
-                         ("DGMS means Directorate General of Mines Safety.",))
+                         ("DGMS oversees mine safety inspections in this document.",))
+
+    def test_explicit_definition_survives_unavailable_model(self):
+        passage = Document(page_content="DGMS means Directorate General of Mines Safety.",
+                           metadata={"source": "definitions.pdf"})
+        def unavailable(*_):
+            self.fail("An explicit indexed definition must not depend on verifier JSON")
+        decision = assess_semantic_evidence("What is DGMS?", [passage], chat=unavailable)
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+        self.assertEqual(decision.reason, "explicit_indexed_definition")
+        self.assertEqual(decision.verified_quotes, (passage.page_content,))
+
+    def test_simple_indexed_definition_reaches_answer_stream(self):
+        passage = Document(page_content="Mining is the extraction of minerals from the earth.",
+                           metadata={"source": "manual.pdf"})
+        def generate(inputs):
+            list(inputs)
+            yield AIMessageChunk(content=passage.page_content)
+        with patch("config.QA_ALLOW_MODEL_KNOWLEDGE", False), patch(
+            "services.qa_service._load_environment"
+        ), patch("services.qa_service._vector_store"), patch(
+            "services.qa_service._retrieve_context", return_value=[passage]
+        ), patch("services.qa_service._llm", return_value=RunnableGenerator(generate)), patch(
+            "services.semantic_evidence._chat", side_effect=AssertionError("Unexpected verifier call")
+        ):
+            events = list(stream_answer_events("What is mining?"))
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("extraction of minerals", events[-1]["answer"])
+
+    def test_explicit_definition_outside_verifier_passage_limit_is_available(self):
+        weak = [Document(page_content=f"Mining report section {i} covers equipment records.",
+                         metadata={"source": f"report-{i}.pdf"}) for i in range(5)]
+        definition = Document(page_content="Mining is the extraction of minerals from the earth.",
+                              metadata={"source": "manual.pdf"})
+        decision = assess_semantic_evidence("What is mining?", [*weak, definition],
+                                            chat=lambda *_: self.fail("Explicit evidence was missed"))
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+        self.assertEqual(decision.documents, (definition,))
+
+    def test_overlap_does_not_turn_same_definition_into_conflict(self):
+        sentence = "Mining is the extraction of minerals from the earth."
+        passages = [Document(page_content=sentence, metadata={"source": f"chunk-{i}.pdf"})
+                    for i in range(2)]
+        decision = assess_semantic_evidence("What is mining?", passages,
+                                            chat=lambda *_: self.fail("Duplicate evidence missed"))
+        self.assertEqual(decision.status, EvidenceStatus.ANSWERABLE)
+
+    def test_related_mention_is_not_mistaken_for_definition(self):
+        passage = Document(page_content="DGMS is discussed in the annual report and in the appendix.",
+                           metadata={"source": "report.pdf"})
+        decision = assess_semantic_evidence("What is DGMS?", [passage],
+                                            chat=lambda *_: response("INSUFFICIENT_EVIDENCE"))
+        self.assertEqual(decision.status, EvidenceStatus.INSUFFICIENT_EVIDENCE)
+
+    def test_conflicting_definitions_still_need_semantic_review(self):
+        passages = [
+            Document(page_content="Mining is the extraction of minerals from the earth.",
+                     metadata={"source": "a.pdf"}),
+            Document(page_content="Mining is the production of finished metal goods.",
+                     metadata={"source": "b.pdf"}),
+        ]
+        calls = []
+        def verify(*_):
+            calls.append(1)
+            return response("INSUFFICIENT_EVIDENCE")
+        decision = assess_semantic_evidence("What is mining?", passages, chat=verify)
+        self.assertEqual(calls, [1])
+        self.assertEqual(decision.status, EvidenceStatus.INSUFFICIENT_EVIDENCE)
 
     def test_repair_cannot_select_a_sentence_without_requested_acronym(self):
         passage = Document(page_content=(
